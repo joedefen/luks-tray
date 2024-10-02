@@ -1,0 +1,8 @@
+#!/bin/bash
+set -e
+script_dir=$(cd "$(dirname "$0")" && pwd)
+(set -x; cd ${script_dir})
+(set -x; pip install -e .)
+echo -e "\nNOTE: To test:"
+echo "  within lt-venv, run: luks-tray"
+echo "  outside lt-env, run: $script_dir/lt-venv/bin/luks-tray"
