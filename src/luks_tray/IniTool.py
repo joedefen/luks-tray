@@ -30,7 +30,7 @@ class IniTool:
         self.folder = os.path.expanduser("~/.config/luks-tray")
         self.ini_path =  os.path.join(self.folder, "config.ini")
         self.log_path =  os.path.join(self.folder, "debug.log")
-        self.picks_path =  os.path.join(self.folder, "picks.json")
+        self.history_path =  os.path.join(self.folder, "history.json")
         self.config = configparser.ConfigParser()
         self.last_mod_time = None
         self.section_params = {'Settings': {}, }
