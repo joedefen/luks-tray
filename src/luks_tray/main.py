@@ -3,6 +3,7 @@
 """ TBD """
 # pylint: disable=unused-import,broad-exception-caught, invalid-name
 # pylint: disable=no-name-in-module,import-outside-toplevel,too-many-instance-attributes
+# pylint: disable=too-many-locals,too-many-branches,too-many-statements
 import os
 import sys
 import json
@@ -19,7 +20,6 @@ from luks_tray.History import HistoryClass
 from luks_tray.Utils import prt
 from luks_tray import Utils
 from luks_tray.IniTool import IniTool
-
 
 class DeviceInfo:
     """ Class to dig out the info we want from the system."""
@@ -86,7 +86,6 @@ class DeviceInfo:
             while len(mounts) >= 1 and mounts[0] is None:
                 del mounts[0]
             entry.mounts = mounts
-
             return entry
 
                # Run the `lsblk` command and get its output in JSON format with additional columns
@@ -124,8 +123,6 @@ class DeviceInfo:
                     # entries[subentry.name] = subentry
                     if len(grandchildren) == 1 and len(subentry.mounts) == 1:
                         entry.upon = subentry.mounts[0]
-
-
 
         self.entries = entries
         if self.DB:
@@ -169,8 +166,8 @@ class LuksTray():
                 continue
             self.icons.append(QIcon(os.path.join(self.ini_tool.folder, resource)))
 
-        # Load JSON data
-        self.load_data()
+        # ??? Load JSON data
+        # ??? self.load_data()
         self.lsblk = DeviceInfo(opts=opts)
 
         self.tray_icon = QSystemTrayIcon(self.icons[0], self.app)
@@ -183,23 +180,13 @@ class LuksTray():
         self.timer = QTimer(self.tray_icon)
         self.timer.timeout.connect(self.update_menu)
         self.timer.start(3000)  # 3000 milliseconds = 3 seconds
-        
+
     def update_menu(self):
         """ TBD """
-        self.containers = self.lsblk.parse_lsblk()
-        self.merge_containers_history()
-        # self.menu.clear()
+        if self.history.status in ('unlocked', 'clear_text'):
+            self.containers = self.lsblk.parse_lsblk()
+            self.merge_containers_history()
         self.update_menu_items()
-        # self.tray_icon.setContextMenu(self.menu)
-
-    def load_data(self):
-        """Load data from JSON file (if exists)."""
-        self.data = {}
-        try:
-            with open('luks_data.json', 'r', encoding='utf-8') as f:
-                self.data = json.load(f)
-        except FileNotFoundError:
-            self.data = {}
 
     def merge_containers_history(self):
         """ TBD """
@@ -221,55 +208,79 @@ class LuksTray():
         menu = QMenu()
         mono_font = QFont("Consolas", 10)
 
-        # Adding dummy partition states for demonstration
-        for container in self.containers.values():
-            mountpoint = None
-            if container.opened:
-                if len(container.filesystems) >= 1:
-                    mounts = container.filesystems[0].mounts
-                    if mounts:
-                        mountpoint = mounts[0]
-
-            # Set the title based on the state
-            title = '■ ' if mountpoint else '□ '
-            title += '🗹' if container.opened else '—'
-            title += f' {container.name} {mountpoint}'
-
-            # Create the action for the partition
-            action = QAction(title, self.app)
-            action.setFont(mono_font)
-
-            # Connect the left-click action
-            action.triggered.connect(lambda checked,
-                                 x=container.uuid: self.handle_partition_click(x))
-
-            # Use a custom event filter to detect right-click for showing details
-            # action.customContextMenuRequested.connect(
-            #               lambda: self.show_partition_details(container.name))
-
-            # Add action to the menu
+        if self.history.status == 'locked':
+            action = QAction('Click to enter master password', self.app)
+            action.triggered.connect(self.prompt_master_password)
             menu.addAction(action)
+        else:
+            for container in self.containers.values():
+                mountpoint = ''
+                if container.opened:
+                    if len(container.filesystems) >= 1:
+                        mounts = container.filesystems[0].mounts
+                        if mounts:
+                            mountpoint = mounts[0]
+                else:
+                    vital = self.history.get_vital(container.uuid)
+                    if vital.upon:
+                        mountpoint = f'[{vital.upon}]'
 
-        menu.addSeparator()
+                # Set the title based on the state
+                title = '■ ' if mountpoint.startswith('/') else '□ '
+                title += '🗹' if container.opened else '—'
+                title += f' {container.name} {mountpoint}'
+
+                # Create the action for the partition
+                action = QAction(title, self.app)
+                action.setFont(mono_font)
+
+                # Connect the left-click action
+                action.triggered.connect(lambda checked,
+                                     x=container.uuid: self.handle_partition_click(x))
+
+                # Use a custom event filter to detect right-click for showing details
+                # action.customContextMenuRequested.connect(
+                #               lambda: self.show_partition_details(container.name))
+
+                # Add action to the menu
+                menu.addAction(action)
+
+            menu.addSeparator()
+            if self.history.status in ('clear_text', 'unlocked'):
+                verb = 'Set' if self.history.status == 'clear_text' else 'Update'
+                exit_action = QAction(f'{verb} Master Password', self.app)
+                exit_action.setFont(mono_font)
+                exit_action.triggered.connect(self.prompt_master_password)
+                menu.addAction(exit_action)
+            if self.history.status in ('unlocked',):
+                exit_action = QAction('Clear Master Password (TODO)', self.app)
+                exit_action.setFont(mono_font)
+                # exit_action.triggered.connect(self.prompt_master_password)
+                menu.addAction(exit_action)
 
         # Add options to exit
         exit_action = QAction("Exit", self.app)
         exit_action.setFont(mono_font)
         exit_action.triggered.connect(self.exit_app)
         menu.addAction(exit_action)
-        
-        if self.is_menu_different(menu):
+
+        return self.replace_menu_if_different(menu)
+
+    def replace_menu_if_different(self, menu):
+        """ TBD """
+        def replace_menu():
             self.menu = menu
             self.tray_icon.setContextMenu(self.menu)
             self.tray_icon.show()
-            
-    def is_menu_different(self, menu):
-        """ TBD """
-        if not self.menu: # or menu.actions() != self.menu.actions():
             return True
+
+        if not self.menu: # or menu.actions() != self.menu.actions():
+            return replace_menu()
+        if len(menu.actions()) != len(self.menu.actions()):
+            return replace_menu()
         for new_action, old_action in zip(menu.actions(), self.menu.actions()):
             if new_action.text() != old_action.text():
-                return True
+                return replace_menu()
         return False
 
 
@@ -285,16 +296,107 @@ class LuksTray():
         self.tray_icon.hide()
         sys.exit()
 
-class MountDialog(QDialog):
+    def prompt_master_password(self):
+        """ Prompt for master passdword"""
+        dialog = MasterPasswordDialog()
+        dialog.exec_()
+
+class CommonDialog(QDialog):
+    """ TBD """
+    def __init__(self):
+        super().__init__()
+        self.main_layout = QVBoxLayout()
+        self.button_layout = QHBoxLayout()
+        self.items = []
+        self.inputs = {}
+
+    def add_line(self, text):
+        """ TBD """
+        label = QLabel(text)
+        self.main_layout.addWidget(label)
+
+    def add_push_button(self, label, method, arg=None):
+        """ TBD """
+        button = QPushButton(label)
+        button.clicked.connect(lambda: method(arg))
+        self.button_layout.addWidget(button)
+
+    def add_input_field(self, key, label_text, placeholder_text, char_width=5):
+        """ Adds a label and a line edit input to the main layout. """
+        field_layout = QHBoxLayout() # Create a horizontal layout for the label and input field
+        label = QLabel(label_text) # Create a QLabel for the label text
+
+        input_field = QLineEdit()
+        input_field.setText(placeholder_text)
+        char_width = max(len(placeholder_text), char_width)
+        # Set the width of the input field based on character width
+        # Approximation: assuming an average of 8 pixels per character for a monospace font
+         # You can adjust this factor based on the font
+        input_field.setFixedWidth(char_width * 10)
+        field_layout.addWidget(label)
+        field_layout.addWidget(input_field)
+        self.inputs[key] = input_field
+        self.main_layout.addLayout(field_layout) # Add horizontal layout to main vertical layout
+
+    def cancel(self, _=None):
+        """ null function"""
+        self.reject()
+
+    def alert_errors(self, error_lines):
+        """Callback to show errors if present."""
+        if error_lines:  # Check if there are any errors
+            error_text = '\n'.join(error_lines)  # Join the list of error lines into one string
+
+            error_dialog = QMessageBox(self)
+            error_dialog.setIcon(QMessageBox.Critical)  # Set the icon to show it's an error
+            error_dialog.setWindowTitle("Errors Detected")
+            error_dialog.setText("The following errors were encountered:")
+            error_dialog.setInformativeText(error_text)
+            error_dialog.setStandardButtons(QMessageBox.Ok)  # Add a dismiss button
+            error_dialog.exec_()  # Show the message box
+
+class MasterPasswordDialog(CommonDialog):
+    """ TBD """
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle('Master Password Dialog')
+        self.add_input_field('password', "Master Password", '', 24)
+        self.add_push_button('OK', self.set_master_password)
+        self.add_push_button('Cancel', self.cancel)
+        self.main_layout.addLayout(self.button_layout)
+        self.setLayout(self.main_layout)
+
+    def set_master_password(self, _):
+        """ TBD """
+        tray = LuksTray.singleton
+        field = self.inputs.get('password', None)
+        errs = []
+        password = field.text().strip()
+        if tray.history.status == 'locked':
+            tray.history.master_password = password
+            tray.history.restore()
+            if tray.history.status != 'unlocked':
+                tray.history.master_password = ''
+                errs.append(f'failed to unlock {repr(tray.history.path)}')
+        elif tray.history.status in ('unlocked', 'clear_text'):
+            tray.history.master_password = password
+            tray.history.dirty = True
+            err = tray.history.save()
+            if err:
+                tray.history.master_password = ''
+                errs.append(err)
+            else:
+                tray.history.status = 'unlocked'
+        if errs:
+            self.alert_errors(errs)
+        self.accept()
+
+class MountDialog(CommonDialog):
     """ TBD """
     def __init__(self, container):
         super().__init__()
         tray = LuksTray.singleton
 
-        self.main_layout = QVBoxLayout()
-        self.button_layout = QHBoxLayout()
-        self.items = []
-        self.inputs = {}
         mounts = []
         if container.filesystems:
             mounts = container.filesystems[0].mounts
@@ -330,39 +432,6 @@ class MountDialog(QDialog):
             self.main_layout.addLayout(self.button_layout)
 
         self.setLayout(self.main_layout)
-
-    def add_line(self, text):
-        """ TBD """
-        label = QLabel(text)
-        self.main_layout.addWidget(label)
-
-    def add_push_button(self, label, method, arg=None):
-        """ TBD """
-        button = QPushButton(label)
-        button.clicked.connect(lambda: method(arg))
-        self.button_layout.addWidget(button)
-
-    def add_input_field(self, key, label_text, placeholder_text, char_width=5):
-        """ Adds a label and a line edit input to the main layout. """
-        field_layout = QHBoxLayout() # Create a horizontal layout for the label and input field
-        label = QLabel(label_text) # Create a QLabel for the label text
-
-        input_field = QLineEdit()
-        input_field.setText(placeholder_text)
-        char_width = max(len(placeholder_text), char_width)
-        # Set the width of the input field based on character width
-        # Approximation: assuming an average of 8 pixels per character for a monospace font
-         # You can adjust this factor based on the font
-        input_field.setFixedWidth(char_width * 10)
-        field_layout.addWidget(label)
-        field_layout.addWidget(input_field)
-        self.inputs[key] = input_field
-        self.main_layout.addLayout(field_layout) # Add horizontal layout to main vertical layout
-
-    def cancel(self, _=None):
-        """ null function"""
-        self.reject()
-
     def unmount_partition(self, uuid):
         """Attempt to unmount the partition."""
         # Here you would implement the unmount logic.
@@ -391,20 +460,6 @@ class MountDialog(QDialog):
             self.alert_errors(errs)
         tray.update_menu()
         self.accept()
-
-    def alert_errors(self, error_lines):
-        """Callback to show errors if present."""
-        if error_lines:  # Check if there are any errors
-            error_text = '\n'.join(error_lines)  # Join the list of error lines into one string
-
-            error_dialog = QMessageBox(self)
-            error_dialog.setIcon(QMessageBox.Critical)  # Set the icon to show it's an error
-            error_dialog.setWindowTitle("Errors Detected")
-            error_dialog.setText("The following errors were encountered:")
-            error_dialog.setInformativeText(error_text)
-            error_dialog.setStandardButtons(QMessageBox.Ok)  # Add a dismiss button
-            error_dialog.exec_()  # Show the message box
-
 
     def mount_partition(self, uuid):
         """Attempt to mount the partition."""
@@ -467,7 +522,7 @@ class MountDialog(QDialog):
                     errs.append(f'ERR: value (text) for {key} must be an integer')
             else:
                 errs.append(f'ERR: unknown key({key})')
-            
+
         luks_device = ''
         if len(container.filesystems) == 1:
             luks_device = container.filesystems[0].name
@@ -488,9 +543,8 @@ class MountDialog(QDialog):
             vital.password, vital.upon = values['password'], values['upon']
             vital.delay_min, vital.repeat_min = values['delay'], values['repeat']
             tray.history.put_vital(vital)
-            
+
         tray.update_menu()
-            
         self.accept()
 
     def hide_partition(self, uuid):

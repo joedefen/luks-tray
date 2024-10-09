@@ -4,18 +4,27 @@
 # pylint: disable=invalid-name,broad-exception-caught
 
 
-import sys
+import os
+# import sys
 import json
 from types import SimpleNamespace
+import hashlib
+import base64
+from cryptography.fernet import Fernet
 from luks_tray.Utils import prt
 
 
 class HistoryClass:
     """ TBD """
-    def __init__(self, path):
+    def __init__(self, path, master_password=''):
+        self.status = None # 'clear_text', 'unlocked', 'locked'
+        self.master_password = master_password
         self.path = path
         self.dirty = False
         self.vitals = {}
+        self.last_mtime = None
+        self.file_existed = False
+
 
     @staticmethod
     def make_ns(uuid):
@@ -28,8 +37,25 @@ class HistoryClass:
                 upon='', # "primary" mount only
             )
 
+    def _has_file_changed(self):
+        file_exists_now = os.path.exists(self.path)
+        if not file_exists_now and not self.file_existed:
+            return False  # Unchanged
+        if file_exists_now:
+            current_mtime = os.path.getmtime(self.path)
+            if self.last_mtime is None or self.last_mtime != current_mtime:
+                self.last_mtime = current_mtime
+                self.file_existed = True
+                return True  # Changed
+        if not file_exists_now and self.file_existed:
+            self.file_existed = False
+            self.last_mtime = None
+            return True  # File was removed
+        return False  # Unchanged
+
+
     def get_vital(self, uuid):
-        """ Get vitals """
+        """ Get vital one specific entry """
         vital = self.vitals.get(uuid, None)
         if not vital: # should not happen
             vital = self.make_ns(uuid)
@@ -39,7 +65,7 @@ class HistoryClass:
         """ Put vitals """
         self.vitals[vital.uuid] = vital
         self.dirty = True
-        self.save()
+        return self.save()
 
     def ensure_container(self, uuid, upon):
         """Ensure a discovered container is in the history"""
@@ -52,24 +78,56 @@ class HistoryClass:
             self.vitals[uuid].upon = upon
             self.dirty = True
 
-    def save(self):
+    def _namespaces_to_json_data(self):
         """ TBD """
-        if not self.dirty:
-            return
         entries = {}
         for uuid, vital in self.vitals.items():
+            legit = vars(vital)
+            if not self.master_password:
+                legit['password'] = '' # zap password w/o master password
             entries[uuid] = vars(vital)
+        return entries
+    
+    def _password_to_fernet_key(self) -> bytes:
+        """Derive a Fernet-compatible key directly from a password using SHA256."""
+        # Hash the password to create a 32-byte key
+        key = hashlib.sha256(self.master_password.encode()).digest()
+        # Base64 encode the key to make it suitable for Fernet
+        fernet_key = base64.urlsafe_b64encode(key)
+        return fernet_key
+
+    def save(self):
+        """Save the history file with or without a master password (encryption)."""
+        if not self.dirty:
+            return None
+        try:
+            entries = self._namespaces_to_json_data()
+            if self.master_password:
+                cipher = Fernet(self._password_to_fernet_key())
+                encrypted_data = cipher.encrypt(json.dumps(entries).encode())
+                with open(self.path, 'wb') as file:
+                    file.write(encrypted_data)
+            else:
+                with open(self.path, 'w', encoding='utf-8') as file:
+                    json.dump(entries, file, indent=4)
+        except Exception as e:
+            return f'failed saving history: {e}'
+        self.dirty = False
+        return None
+
+    def is_encrypted_history(self, file_path):  # FIXME
+        """Check if the history file is encrypted or plain text."""
+        if not os.path.exists(file_path):
+            return False  # No file means it's not encrypted yet.
 
         try:
-            jason_str = json.dumps(entries)
-            with open(self.path, 'w', encoding='utf-8') as f:
-                f.write(jason_str + '\n')
-            self.dirty = False
-        except Exception as e:
-            print(f"An error occurred while saving history: {e}", file=sys.stderr)
+            with open(file_path, 'r', encoding='utf-8') as file:
+                json.load(file)  # Try to load as JSON
+            return False  # If JSON loads, it's plain text
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return True  # If we can't load JSON, it's likely encrypted
 
-
-    def restore(self):
+    def old_restore(self): # TODO: remove
         """ TBD """
         try:
             with open(self.path, 'r', encoding='utf-8') as handle:
@@ -84,3 +142,44 @@ class HistoryClass:
         except Exception as e:
             prt(f'restored picks FAILED: {e}')
             return True
+
+    def _json_data_to_namespaces(self, entries):
+        self.vitals = {}
+        if not isinstance(entries, dict):
+            self.status = 'locked'
+            return False
+        for uuid, entry in entries.items():
+            legit = vars(self.make_ns(uuid))
+            for key, value in legit.items():
+                if key in entry:
+                    legit[key] = value
+            self.vitals[uuid] = SimpleNamespace(**legit)
+        return True
+
+    def restore(self):  # TODO: only if unchanged
+        """Load the history file, decrypting if necessary."""
+        if not os.path.exists(self.path):
+            self.status = 'clear_text'
+            return self._json_data_to_namespaces({})
+
+        if self.master_password:
+            try:
+                cipher = Fernet(self._password_to_fernet_key())
+                with open(self.path, 'rb') as file:
+                    encrypted_data = file.read()
+                    decrypted_str = cipher.decrypt(encrypted_data).decode()
+                    decrypted_data = json.loads(decrypted_str)
+                    self.status = 'unlocked'
+                    return self._json_data_to_namespaces(decrypted_data)
+            except Exception:
+                self._json_data_to_namespaces(None)
+                return False
+        else:
+            try:
+                with open(self.path, 'r', encoding='utf-8') as file:
+                    decrypted_data = json.load(file)
+                    self.status = 'clear_text'
+                    return self._json_data_to_namespaces(decrypted_data)
+            except Exception:
+                self._json_data_to_namespaces(None)
+                return False
