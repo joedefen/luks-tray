@@ -152,7 +152,7 @@ class HistoryClass:
             legit = vars(self.make_ns(uuid))
             for key, value in legit.items():
                 if key in entry:
-                    legit[key] = value
+                    legit[key] = entry[key]
             self.vitals[uuid] = SimpleNamespace(**legit)
         return True
 

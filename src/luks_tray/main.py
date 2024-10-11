@@ -226,8 +226,8 @@ class LuksTray():
                         mountpoint = f'[{vital.upon}]'
 
                 # Set the title based on the state
-                title = '■ ' if mountpoint.startswith('/') else '□ '
-                title += '🗹' if container.opened else '—'
+                title = ('■ ' if mountpoint.startswith('/') else
+                            '🗹 ' if container.opened else '□ ')
                 title += f' {container.name} {mountpoint}'
 
                 # Create the action for the partition
@@ -251,11 +251,6 @@ class LuksTray():
                 exit_action = QAction(f'{verb} Master Password', self.app)
                 exit_action.setFont(mono_font)
                 exit_action.triggered.connect(self.prompt_master_password)
-                menu.addAction(exit_action)
-            if self.history.status in ('unlocked',):
-                exit_action = QAction('Clear Master Password (TODO)', self.app)
-                exit_action.setFont(mono_font)
-                # exit_action.triggered.connect(self.prompt_master_password)
                 menu.addAction(exit_action)
 
         # Add options to exit
@@ -307,6 +302,8 @@ class CommonDialog(QDialog):
         super().__init__()
         self.main_layout = QVBoxLayout()
         self.button_layout = QHBoxLayout()
+        self.password_toggle = None
+        self.password_input = None
         self.items = []
         self.inputs = {}
 
@@ -321,7 +318,7 @@ class CommonDialog(QDialog):
         button.clicked.connect(lambda: method(arg))
         self.button_layout.addWidget(button)
 
-    def add_input_field(self, key, label_text, placeholder_text, char_width=5):
+    def add_input_field(self, key, label_text, placeholder_text, char_width=5, is_password=False):
         """ Adds a label and a line edit input to the main layout. """
         field_layout = QHBoxLayout() # Create a horizontal layout for the label and input field
         label = QLabel(label_text) # Create a QLabel for the label text
@@ -335,8 +332,31 @@ class CommonDialog(QDialog):
         input_field.setFixedWidth(char_width * 10)
         field_layout.addWidget(label)
         field_layout.addWidget(input_field)
+        if is_password:
+            input_field.setEchoMode(QLineEdit.Password)  # Set the initial mode to hide the password
+            self.password_input = input_field
+            self.password_toggle = QPushButton("👁️")
+            self.password_toggle.setFixedWidth(30)
+            self.password_toggle.setCheckable(True)
+            self.password_toggle.setFocusPolicy(Qt.NoFocus)
+            self.password_toggle.clicked.connect(self.toggle_password_visibility)
+            field_layout.addWidget(self.password_toggle)
+
+     
         self.inputs[key] = input_field
         self.main_layout.addLayout(field_layout) # Add horizontal layout to main vertical layout
+    
+    def toggle_password_visibility(self):
+        """Toggle password visibility."""
+        if not self.password_input or not self.password_toggle:
+            return
+        if self.password_toggle.isChecked():
+            self.password_input.setEchoMode(QLineEdit.Normal)  # Show the password
+            self.password_toggle.setText("●")
+        else:
+            self.password_input.setEchoMode(QLineEdit.Password)  # Hide the password
+            self.password_toggle.setText("👁️")
+
 
     def cancel(self, _=None):
         """ null function"""
@@ -360,7 +380,7 @@ class MasterPasswordDialog(CommonDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Master Password Dialog')
-        self.add_input_field('password', "Master Password", '', 24)
+        self.add_input_field('password', "Master Password", '', 24, is_password=True)
         self.add_push_button('OK', self.set_master_password)
         self.add_push_button('Cancel', self.cancel)
         self.main_layout.addLayout(self.button_layout)
@@ -414,7 +434,8 @@ class MountDialog(CommonDialog):
             self.setWindowTitle('Mount Container')
             vital = tray.history.get_vital(container.uuid)
             self.add_line(f'{container.name}')
-            self.add_input_field('password', "Enter Password", f'{vital.password}', 24)
+            self.add_input_field('password', "Enter Password", f'{vital.password}',
+                                24, is_password=True)
             self.add_input_field('upon', "Mount At", f'{vital.upon}', 36)
             self.add_input_field('delay', "Auto-Unmount Delay (min)", f'{vital.delay_min}', 5)
             self.add_input_field('repeat', "Auto-Unmount Repeat (min)", f'{vital.repeat_min}', 5)
@@ -463,6 +484,15 @@ class MountDialog(CommonDialog):
 
     def mount_partition(self, uuid):
         """Attempt to mount the partition."""
+        def get_mount_points():
+            mount_points = set()
+            with open('/proc/mounts', 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        mount_points.add(parts[1])  # The mount point is the second field
+            return mount_points
+
         def mount_it(container, password, upon, luks_device):
             try:
                 # 1. Unlock the LUKS partition if needed
@@ -501,6 +531,8 @@ class MountDialog(CommonDialog):
         errs, values = [], {}
         errs.append(f'{container.name}')
 
+        mount_points = get_mount_points()
+
         for key, field in self.inputs.items():
             text = field.text().strip()
             values[key] = text
@@ -515,6 +547,9 @@ class MountDialog(CommonDialog):
                     length = len(os.listdir(text))
                 if not isabs or not isdir or length > 0:
                     errs.append(f'ERR: mount point ({text}) is not absolute path to empty folder')
+                elif text in mount_points:
+                    errs.append(f'ERR: mount point ({text}) occupied')
+            
             elif key in ('delay', 'repeat'):
                 try:
                     values[key] = max(int(text), 0)
