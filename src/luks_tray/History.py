@@ -69,6 +69,8 @@ class HistoryClass:
 
     def ensure_container(self, uuid, upon):
         """Ensure a discovered container is in the history"""
+        # do not save auto-mounts by file managers or gnome-disks
+        upon = '' if upon.startswith(('/run/', '/media/')) else upon
         if uuid not in self.vitals:
             ns = self.make_ns(uuid)
             ns.uuid, ns.upon = uuid, upon

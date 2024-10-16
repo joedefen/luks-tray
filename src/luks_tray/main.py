@@ -4,8 +4,10 @@
 # pylint: disable=unused-import,broad-exception-caught, invalid-name
 # pylint: disable=no-name-in-module,import-outside-toplevel,too-many-instance-attributes
 # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+# pylint: disable=too-many-arguments
 import os
 import sys
+import stat
 import json
 import signal
 import subprocess
@@ -13,6 +15,7 @@ import traceback
 from types import SimpleNamespace
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
+from PyQt5.QtWidgets import QFileDialog
 from PyQt5.QtGui import QIcon, QCursor, QFont
 from PyQt5.QtCore import QTimer, Qt
 
@@ -149,6 +152,9 @@ class LuksTray():
 
     def __init__(self, ini_tool, opts):
         LuksTray.singleton = self
+        self.uid = os.environ.get('SUDO_UID', os.getuid())
+        self.gid = os.environ.get('SUDO_GID', os.getgid())
+
         self.ini_tool = ini_tool
         self.app = QApplication([])
         self.app.setQuitOnLastWindowClosed(False)
@@ -226,8 +232,8 @@ class LuksTray():
                         mountpoint = f'[{vital.upon}]'
 
                 # Set the title based on the state
-                title = ('■ ' if mountpoint.startswith('/') else
-                            '🗹 ' if container.opened else '□ ')
+                title = ('🡅 ' if mountpoint.startswith('/') else
+                            '□ ' if container.opened else '⛛ ')
                 title += f' {container.name} {mountpoint}'
 
                 # Create the action for the partition
@@ -247,7 +253,7 @@ class LuksTray():
 
             menu.addSeparator()
             if self.history.status in ('clear_text', 'unlocked'):
-                verb = 'Set' if self.history.status == 'clear_text' else 'Update'
+                verb = 'Set' if self.history.status == 'clear_text' else 'Update/Clear'
                 exit_action = QAction(f'{verb} Master Password', self.app)
                 exit_action.setFont(mono_font)
                 exit_action.triggered.connect(self.prompt_master_password)
@@ -318,13 +324,14 @@ class CommonDialog(QDialog):
         button.clicked.connect(lambda: method(arg))
         self.button_layout.addWidget(button)
 
-    def add_input_field(self, key, label_text, placeholder_text, char_width=5, is_password=False):
+    def add_input_field(self, key, label_text, placeholder_text, char_width=5, is_password=False, is_folder=False):
         """ Adds a label and a line edit input to the main layout. """
         field_layout = QHBoxLayout() # Create a horizontal layout for the label and input field
         label = QLabel(label_text) # Create a QLabel for the label text
 
         input_field = QLineEdit()
-        input_field.setText(placeholder_text)
+        input_field.setText(placeholder_text.strip())
+
         char_width = max(len(placeholder_text), char_width)
         # Set the width of the input field based on character width
         # Approximation: assuming an average of 8 pixels per character for a monospace font
@@ -341,11 +348,37 @@ class CommonDialog(QDialog):
             self.password_toggle.setFocusPolicy(Qt.NoFocus)
             self.password_toggle.clicked.connect(self.toggle_password_visibility)
             field_layout.addWidget(self.password_toggle)
+            
+        if is_folder: # Create a Browse button
+            browse_button = QPushButton("Browse...", self)
+            browse_button.setFocusPolicy(Qt.NoFocus)  # Prevent the button from gaining focus
+            browse_button.clicked.connect(lambda: self.browse_folder(input_field))
+            field_layout.addWidget(browse_button)
 
-     
         self.inputs[key] = input_field
         self.main_layout.addLayout(field_layout) # Add horizontal layout to main vertical layout
     
+    @staticmethod
+    def get_real_user_home_directory():
+        """Returns the home directory of the real user when running under sudo."""
+        real_user = os.environ.get('SUDO_USER')
+        if real_user:
+            return os.path.join("/home", real_user)  # Assumes standard home directory structure
+        return os.path.expanduser("~")  # Fallback to current user's home directory
+
+    def browse_folder(self, input_field):
+        """ Open a dialog to select a folder and update the input field with the selected path. """
+        # Determine the initial directory to open
+        initial_dir = input_field.text()
+        initial_dir = initial_dir if initial_dir else self.get_real_user_home_directory()
+
+        # Open the folder dialog starting at the determined directory
+        folder_path = QFileDialog.getExistingDirectory(self, "Select Folder", initial_dir)
+        if folder_path:
+            input_field.setText(folder_path)  # Update the input field with the selected folder path
+
+
+
     def toggle_password_visibility(self):
         """Toggle password visibility."""
         if not self.password_input or not self.password_toggle:
@@ -405,8 +438,10 @@ class MasterPasswordDialog(CommonDialog):
             if err:
                 tray.history.master_password = ''
                 errs.append(err)
-            else:
+            elif password:
                 tray.history.status = 'unlocked'
+            else:
+                tray.history.status = 'clear_text'
         if errs:
             self.alert_errors(errs)
         self.accept()
@@ -425,7 +460,7 @@ class MountDialog(CommonDialog):
             self.setWindowTitle('Unmount and Close Container')
             # self.setFixedSize(300, 200)
             self.add_line(f'{container.name}')
-            self.add_line(f'Unmount {mounts}?')
+            self.add_line(f'Unmount {",".join(mounts)}?')
             self.add_push_button('OK', self.unmount_partition, container.uuid)
             self.add_push_button('Cancel', self.cancel)
             self.main_layout.addLayout(self.button_layout)
@@ -436,7 +471,7 @@ class MountDialog(CommonDialog):
             self.add_line(f'{container.name}')
             self.add_input_field('password', "Enter Password", f'{vital.password}',
                                 24, is_password=True)
-            self.add_input_field('upon', "Mount At", f'{vital.upon}', 36)
+            self.add_input_field('upon', "Mount At", f'{vital.upon}', 36, is_folder=True)
             self.add_input_field('delay', "Auto-Unmount Delay (min)", f'{vital.delay_min}', 5)
             self.add_input_field('repeat', "Auto-Unmount Repeat (min)", f'{vital.repeat_min}', 5)
 #           if container.fstype:
@@ -453,6 +488,7 @@ class MountDialog(CommonDialog):
             self.main_layout.addLayout(self.button_layout)
 
         self.setLayout(self.main_layout)
+
     def unmount_partition(self, uuid):
         """Attempt to unmount the partition."""
         # Here you would implement the unmount logic.
@@ -471,12 +507,22 @@ class MountDialog(CommonDialog):
                         errs.append(f'umount {mount}: {sub.stdout} {sub.stderr} [rc={sub.returncode}]')
                 if err_cnt > 0:
                     continue
-                sub = subprocess.run(["cryptsetup", "luksClose", filesystem.name],
-                    capture_output=True, text=True, check=False)
-                if sub.returncode != 0:
-                    err_cnt += 1
-                    errs.append(f'cryptsetup luksClose {filesystem.name}: '
-                                + f'{sub.stdout} {sub.stderr} [rc={sub.returncode}]')
+                mapped_device = f'/dev/mapper/{filesystem.name}'
+                if os.path.exists(mapped_device) and stat.S_ISBLK(os.stat(mapped_device).st_mode):
+
+                    sub = subprocess.run(["umount", mapped_device],
+                        capture_output=True, text=True, check=False)
+                    if sub.returncode != 0:
+                        err_cnt += 1
+                        errs.append(f'umount {mapped_device}: '
+                                    + f'{sub.stdout} {sub.stderr} [rc={sub.returncode}]')
+
+                    sub = subprocess.run(["cryptsetup", "luksClose", filesystem.name],
+                        capture_output=True, text=True, check=False)
+                    if sub.returncode != 0:
+                        err_cnt += 1
+                        errs.append(f'cryptsetup luksClose {filesystem.name}: '
+                                    + f'{sub.stdout} {sub.stderr} [rc={sub.returncode}]')
         if errs:
             self.alert_errors(errs)
         tray.update_menu()
@@ -494,6 +540,7 @@ class MountDialog(CommonDialog):
             return mount_points
 
         def mount_it(container, password, upon, luks_device):
+            nonlocal tray
             try:
                 # 1. Unlock the LUKS partition if needed
                 if not container.opened:
@@ -508,10 +555,18 @@ class MountDialog(CommonDialog):
                              + f' rc={prc.returncode}')
 
                 # 2. Mount the unlocked LUKS partition
+                # cmd = ['mount', '-o', f'uid={tray.uid},gid={tray.gid}', f'/dev/mapper/{luks_device}', upon]
                 cmd = ['mount', f'/dev/mapper/{luks_device}', upon]
                 prc = subprocess.run(cmd, check=False,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if prc.returncode != 0:
+                    return (f'ERR: {cmd} failed: {prc.stderr.decode()}'
+                            + f' rc={prc.returncode}')
 
+                # 3. Run binfs to make mount point available
+                cmd = ['bindfs', '-u', str(tray.uid), '-g', str(tray.gid), upon, upon]
+                prc = subprocess.run(cmd, check=False,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 if prc.returncode != 0:
                     return (f'ERR: {cmd} failed: {prc.stderr.decode()}'
                             + f' rc={prc.returncode}')
@@ -521,6 +576,33 @@ class MountDialog(CommonDialog):
 
             except Exception as e:
                 return f"An error occurred: {str(e)}"
+
+        def mount_with_udisksctl(luks_device, mount_point):
+            """ TBD """
+            try:
+                # Unlock the LUKS partition
+                cmd = ['udisksctl', 'unlock', '-b', luks_device]
+                prc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                
+                # Get the unlocked device path (usually /dev/mapper/your_device)
+                # Here we assume the unlocked device name is based on the original LUKS device
+                unlocked_device = f'/dev/mapper/{luks_device.split("/")[-1]}'
+
+                # Mount the unlocked partition at the specified mount point
+                cmd = ['udisksctl', 'mount', '-b', unlocked_device, '--mount-options', f'dir={mount_point}']
+                prc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+                return f'Mount successful at {mount_point}'
+
+            except subprocess.CalledProcessError as e:
+                return f'Error during mount: {e.stderr.decode()}'
+
+
+    #       # Example usage
+    #       luks_device = '/dev/sdXn'
+    #       mount_point = '/test-upon5'
+    #       result = mount_with_udisksctl(luks_device, mount_point)
+    #       print(result)
 
         tray, container = LuksTray.singleton, None
         if tray:
@@ -549,7 +631,7 @@ class MountDialog(CommonDialog):
                     errs.append(f'ERR: mount point ({text}) is not absolute path to empty folder')
                 elif text in mount_points:
                     errs.append(f'ERR: mount point ({text}) occupied')
-            
+
             elif key in ('delay', 'repeat'):
                 try:
                     values[key] = max(int(text), 0)
