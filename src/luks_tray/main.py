@@ -12,6 +12,9 @@ import json
 import signal
 import subprocess
 import traceback
+import hashlib
+from io import StringIO
+from datetime import datetime
 from types import SimpleNamespace
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
@@ -24,6 +27,17 @@ from luks_tray.Utils import prt
 from luks_tray import Utils
 from luks_tray.IniTool import IniTool
 
+def generate_uuid_for_file_path(file_path):
+    """ Use SHA-256 to hash the file path """
+    file_hash = hashlib.sha256(file_path.encode('utf-8')).hexdigest()
+    
+    # Take the first 32 characters of the hash and format it as a UUID
+    # UUID is normally 32 hexadecimal digits, formatted as 8-4-4-4-12
+    generated_uuid = f"{file_hash[:8]}-{file_hash[8:12]}-{file_hash[12:16]}-{file_hash[16:20]}-{file_hash[20:32]}"
+    
+    return generated_uuid
+
+
 class DeviceInfo:
     """ Class to dig out the info we want from the system."""
     def __init__(self, opts):
@@ -33,16 +47,17 @@ class DeviceInfo:
         self.head_str = None
         self.partitions = None
         self.entries = {}
+        self.prev_entries_str = ''
 
     @staticmethod
     def _make_partition_namespace(name, size_str):
         return SimpleNamespace(name=name,       # /proc/partitions
             opened=None,    # or True or False
-            label='',       # blkid
-            fstype='',      # fstype OR /sys/class/block/{name}/device/model
-            size_str=size_str,  # /sys/block/{name}/...
-            uuid='',
             upon='',        # primary mount point
+            uuid='',
+            size_str=size_str,  # /sys/block/{name}/... (e.g., 3.5T)
+            fstype='',      # fstype OR /sys/class/block/{name}/device/model
+            label='',       # blkid
             mounts=[],      # /proc/mounts
             parent=None,    # a partition
             filesystems=[],        # child file systems
@@ -90,7 +105,7 @@ class DeviceInfo:
                 del mounts[0]
             entry.mounts = mounts
             return entry
-
+        
                # Run the `lsblk` command and get its output in JSON format with additional columns
         result = subprocess.run(['lsblk', '-J', '-o',
                     'NAME,MAJ:MIN,FSTYPE,LABEL,PARTLABEL,FSUSE%,SIZE,UUID,MOUNTPOINTS', ],
@@ -129,9 +144,24 @@ class DeviceInfo:
 
         self.entries = entries
         if self.DB:
-            print('\n\nDB: --->>> after parse_lsblk:')
+            #s = StringIO()
+            temps = []
             for entry in entries.values():
-                print(vars(entry))
+                tmp_row = {}
+                row = vars(entry)
+                for key, value in row.items():
+                #   if isinstance(value, SimpleNamespace):
+                #       tmp_row[key] = str(vars(value))
+                #   else:
+                    tmp_row[key] = str(value)
+                temps.append(tmp_row)
+                #print(vars(entry), file=s)
+            entries_str = json.dumps(temps, indent=4)
+            if entries_str != self.prev_entries_str:
+                dt = datetime.now().strftime('%m-%d^%H:%M:%S')
+                print(f'\n\nDB: {dt} --->>> after parse_lsblk:')
+                print(entries_str)
+                self.prev_entries_str = entries_str
 
         return entries
 
@@ -668,6 +698,63 @@ class MountDialog(CommonDialog):
         """ Hide the partition """
         # FIXME: need body
         return
+    
+    def mount_file(self, file_path):
+
+        def mount_luks_file(container, password, upon, luks_file, size=None):
+            nonlocal tray
+            try:
+                # 1. Create the file if it does not exist and a size is specified
+                if not os.path.exists(luks_file):
+                    if size is None:
+                        return f"ERR: File {luks_file!r} does not exist and size is not specified to create it."
+                    # Create a sparse file with the specified size (in MB)
+                    cmd = ['truncate', '-s', f'{size}M', luks_file]
+                    prc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    if prc.returncode != 0:
+                        return (f'ERR: Failed to create file {luks_file!r}: {prc.stderr.decode()}'
+                                + f' rc={prc.returncode}')
+
+                    # Set up the LUKS container on the file
+                    cmd = ['cryptsetup', 'luksFormat', luks_file]
+                    prc = subprocess.run(cmd, check=False, input=password.encode(),
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    if prc.returncode != 0:
+                        return (f'ERR: luksFormat {luks_file!r} failed: {prc.stderr.decode()}'
+                                + f' rc={prc.returncode}')
+
+                # 2. Unlock the LUKS file if needed
+                if not container.opened:
+                    luks_device = os.path.basename(luks_file) + '-luks'
+                    cmd = ['cryptsetup', 'luksOpen', luks_file, luks_device]
+                    prc = subprocess.run(cmd, check=False, input=password.encode(),
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    if prc.returncode != 0:
+                        return (f'ERR: luksOpen {luks_file!r} failed: {prc.stderr.decode()}'
+                                + f' rc={prc.returncode}')
+
+                # 3. Mount the unlocked LUKS file
+                cmd = ['mount', f'/dev/mapper/{luks_device}', upon]
+                prc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if prc.returncode != 0:
+                    return (f'ERR: {cmd} failed: {prc.stderr.decode()}'
+                            + f' rc={prc.returncode}')
+
+                # 4. Run bindfs to make mount point available
+                cmd = ['bindfs', '-u', str(tray.uid), '-g', str(tray.gid), upon, upon]
+                prc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if prc.returncode != 0:
+                    return (f'ERR: {cmd} failed: {prc.stderr.decode()}'
+                            + f' rc={prc.returncode}')
+
+                # Return success message if everything went well
+                return ''
+
+            except Exception as e:
+                return f"An error occurred: {str(e)}"
+    
+        tray = LuksTray.singleton, None
+
 
 def rerun_module_as_root(module_name):
     """ rerun using the module name """
