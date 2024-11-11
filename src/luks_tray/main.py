@@ -5,6 +5,7 @@
 # pylint: disable=no-name-in-module,import-outside-toplevel,too-many-instance-attributes
 # pylint: disable=too-many-locals,too-many-branches,too-many-statements
 # pylint: disable=too-many-arguments
+# pylint: disable=line-too-long
 import os
 import sys
 import stat
@@ -13,6 +14,7 @@ import signal
 import subprocess
 import traceback
 import hashlib
+import time
 from io import StringIO
 from datetime import datetime
 from types import SimpleNamespace
@@ -30,12 +32,33 @@ from luks_tray.IniTool import IniTool
 def generate_uuid_for_file_path(file_path):
     """ Use SHA-256 to hash the file path """
     file_hash = hashlib.sha256(file_path.encode('utf-8')).hexdigest()
-    
+
     # Take the first 32 characters of the hash and format it as a UUID
     # UUID is normally 32 hexadecimal digits, formatted as 8-4-4-4-12
     generated_uuid = f"{file_hash[:8]}-{file_hash[8:12]}-{file_hash[12:16]}-{file_hash[16:20]}-{file_hash[20:32]}"
-    
+
     return generated_uuid
+
+
+def run_cmd(args, errs=None, input=None):
+    """ TBD """
+    return rerun_if_busy(args, errs, repeat=0, delay=0.0, input=input)
+
+def rerun_if_busy(args, errs, repeat=3, delay=0.5, input=None):
+    """ Handles umounts if busy mostly"""
+    err = None
+    for loop in range(repeat+1):
+        if loop > 0:
+            time.sleep(delay)
+        sub = subprocess.run( args, capture_output=True, text=True, check=False, input=input)
+        if sub.returncode == 0:
+            return None
+        err = (f'FAIL: {' '.join(args)}: {sub.stdout} {sub.stderr} [rc={sub.returncode}]')
+        if 'busy' not in sub.stderr:
+            break
+    if err and errs:
+        errs.append(err)
+    return err
 
 
 class DeviceInfo:
@@ -44,23 +67,25 @@ class DeviceInfo:
         self.opts = opts
         self.DB = opts.debug
         self.wids = None
-        self.head_str = None
         self.partitions = None
         self.entries = {}
         self.prev_entries_str = ''
 
     @staticmethod
-    def _make_partition_namespace(name, size_str):
+    def make_partition_namespace(name, size_str):
+        """ TBD """
         return SimpleNamespace(name=name,       # /proc/partitions
             opened=None,    # or True or False
             upon='',        # primary mount point
             uuid='',
             size_str=size_str,  # /sys/block/{name}/... (e.g., 3.5T)
+            type='',        # e.g., loop, crypt, disk, part
             fstype='',      # fstype OR /sys/class/block/{name}/device/model
             label='',       # blkid
             mounts=[],      # /proc/mounts
             parent=None,    # a partition
             filesystems=[],        # child file systems
+            back_file='', # backing file
             )
 
 
@@ -87,9 +112,19 @@ class DeviceInfo:
 
     def parse_lsblk(self):
         """ Parse ls_blk for all the goodies we need """
+        def get_backing_file(loop_device):
+            try:
+                with open(f'/sys/block/{loop_device}/loop/backing_file', 'r',
+                          encoding='utf-8') as f:
+                    backing_file = f.read().strip()
+                return backing_file
+            except FileNotFoundError:
+                return ''
+
         def eat_one(device):
-            entry = self._make_partition_namespace('', '')
+            entry = self.make_partition_namespace('', '')
             entry.name=device.get('name', '')
+            entry.type = device.get('type', '')
             entry.fstype = device.get('fstype', '')
             if entry.fstype is None:
                 entry.fstype = ''
@@ -104,14 +139,16 @@ class DeviceInfo:
             while len(mounts) >= 1 and mounts[0] is None:
                 del mounts[0]
             entry.mounts = mounts
+            if entry.type == 'loop':
+                entry.back_file = get_backing_file(entry.name)
             return entry
-        
+
                # Run the `lsblk` command and get its output in JSON format with additional columns
         result = subprocess.run(['lsblk', '-J', '-o',
-                    'NAME,MAJ:MIN,FSTYPE,LABEL,PARTLABEL,FSUSE%,SIZE,UUID,MOUNTPOINTS', ],
+                    'NAME,MAJ:MIN,TYPE,FSTYPE,LABEL,PARTLABEL,FSUSE%,SIZE,UUID,MOUNTPOINTS', ],
                     stdout=subprocess.PIPE, text=True, check=False)
         parsed_data = json.loads(result.stdout)
-        entries = {}
+        dev_cons, file_cons = {}, {}
 
         # Parse each block device and its properties
         for device in parsed_data['blockdevices']:
@@ -121,15 +158,26 @@ class DeviceInfo:
                 entry = eat_one(child)
                 # entry.parent = parent.name
                 entry.parent = parent
+                if parent.type == 'loop':
+                    # IN the case of the loop device (or file container)
+                    # use the UUID of the container
+                    entry.uuid = parent.uuid
+                    entry.back_file = parent.back_file
                 if not parent.fstype:
                     parent.fstype = 'DISK'
                 elif 'luks' not in entry.fstype.lower():
                     continue
                 # if parent.name not in entries:
                     # entries[parent.name] = parent
-                entries[entry.uuid] = entry
+                if entry.type == 'crypt':
+                    file_cons[entry.uuid] = entry
+                else:
+                    dev_cons[entry.uuid] = entry
                 grandchildren = child.get('children', None)
-                if not isinstance(grandchildren, list):
+                if entry.type == 'crypt':
+                    if entry.mounts:
+                        entry.upon = entry.mounts[0]
+                elif not isinstance(grandchildren, list):
                     entry.opened = False
                     continue
                 entry.opened = True
@@ -142,11 +190,11 @@ class DeviceInfo:
                     if len(grandchildren) == 1 and len(subentry.mounts) == 1:
                         entry.upon = subentry.mounts[0]
 
-        self.entries = entries
+        self.entries = dev_cons | file_cons
         if self.DB:
             #s = StringIO()
             temps = []
-            for entry in entries.values():
+            for entry in self.entries.values():
                 tmp_row = {}
                 row = vars(entry)
                 for key, value in row.items():
@@ -162,8 +210,9 @@ class DeviceInfo:
                 print(f'\n\nDB: {dt} --->>> after parse_lsblk:')
                 print(entries_str)
                 self.prev_entries_str = entries_str
+#               print(f'{back_files=}')
 
-        return entries
+        return self.entries
 
     def get_relative(self, name):
         """ TBD """
@@ -172,7 +221,7 @@ class DeviceInfo:
 class LuksTray():
     """ TBD """
     singleton = None
-    svg_info = SimpleNamespace(version='03', subdir='resources/SetD'
+    svg_info = SimpleNamespace(version='04', subdir='resources/SetD'
                 , bases= [
                         'white-shield',  # no LUKS partitions
                         'green-shield',   # all partitions locked
@@ -205,6 +254,8 @@ class LuksTray():
         # ??? Load JSON data
         # ??? self.load_data()
         self.lsblk = DeviceInfo(opts=opts)
+        self.mounteds = set()
+        self.upons = set()
 
         self.tray_icon = QSystemTrayIcon(self.icons[0], self.app)
         self.tray_icon.setToolTip('luks-tray')
@@ -217,17 +268,39 @@ class LuksTray():
         self.timer.timeout.connect(self.update_menu)
         self.timer.start(3000)  # 3000 milliseconds = 3 seconds
 
+    def update_mounts(self):
+        """ TBD """
+        with open('/proc/mounts', 'r', encoding='utf-8') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    self.mounteds.add(parts[0]) # what is mounted is first
+                    self.upons.add(parts[1])  # The mount point is the second field
+
+    def is_mounted(self, thing):
+        """ TBD """
+        return thing in self.mounteds or thing in self.upons
+
     def update_menu(self):
         """ TBD """
         if self.history.status in ('unlocked', 'clear_text'):
             self.containers = self.lsblk.parse_lsblk()
             self.merge_containers_history()
+            for vital in self.history.vitals.values():
+                if not vital.back_file or vital.uuid in self.containers:
+                    continue
+                ns = DeviceInfo.make_partition_namespace('', '')
+                ns.type = 'crypt'
+                ns.back_file = vital.back_file
+                ns.opened = False
+                self.containers[ns.uuid] = ns
+
         self.update_menu_items()
 
     def merge_containers_history(self):
         """ TBD """
         for container in self.containers.values():
-            self.history.ensure_container(container.uuid, container.upon)
+            self.history.ensure_container(container)
         self.history.save()
 
     def show_partition_details(self, name):
@@ -249,30 +322,46 @@ class LuksTray():
             action.triggered.connect(self.prompt_master_password)
             menu.addAction(action)
         else:
-            for container in self.containers.values():
+            separated = False
+            for idx, container in enumerate(self.containers.values()):
                 mountpoint = ''
                 if container.opened:
-                    if len(container.filesystems) >= 1:
-                        mounts = container.filesystems[0].mounts
-                        if mounts:
-                            mountpoint = mounts[0]
+#                   if len(container.filesystems) >= 1:
+#                       mounts = container.filesystems[0].mounts
+#                       if mounts:
+#                           mountpoint = mounts[0]
+                    mountpoint = container.upon
                 else:
                     vital = self.history.get_vital(container.uuid)
                     if vital.upon:
                         mountpoint = f'[{vital.upon}]'
 
+                if idx > 0 and not separated and container.type == 'crypt':
+                    menu.addSeparator()
+                    separated = True
+                    
+                name = container.name
+                if container.back_file:
+                    name = container.back_file
+                    if name.startswith('/home/'):
+                        name = '~' + name[6:]
+
                 # Set the title based on the state
-                title = ('🡅 ' if mountpoint.startswith('/') else
-                            '□ ' if container.opened else '⛛ ')
-                title += f' {container.name} {mountpoint}'
+                title = ('🠋 ' if mountpoint.startswith('/') else
+                            '⛛ ' if container.opened else '🠉 ')
+                title += f' {name} {mountpoint}'
 
                 # Create the action for the partition
                 action = QAction(title, self.app)
                 action.setFont(mono_font)
 
                 # Connect the left-click action
-                action.triggered.connect(lambda checked,
-                                     x=container.uuid: self.handle_partition_click(x))
+                if container.back_file:
+                    action.triggered.connect(lambda checked,
+                                 x=container.uuid: self.handle_file_click(x))
+                else:
+                    action.triggered.connect(lambda checked,
+                                 x=container.uuid: self.handle_device_click(x))
 
                 # Use a custom event filter to detect right-click for showing details
                 # action.customContextMenuRequested.connect(
@@ -281,19 +370,26 @@ class LuksTray():
                 # Add action to the menu
                 menu.addAction(action)
 
+            if idx > 0 and not separated:
+                menu.addSeparator()
+                separated = True
+            action = QAction(f'Add Crypt File', self.app)
+            action.setFont(mono_font)
+            action.triggered.connect(self.handle_add_file_click)
+            menu.addAction(action)
             menu.addSeparator()
             if self.history.status in ('clear_text', 'unlocked'):
                 verb = 'Set' if self.history.status == 'clear_text' else 'Update/Clear'
-                exit_action = QAction(f'{verb} Master Password', self.app)
-                exit_action.setFont(mono_font)
-                exit_action.triggered.connect(self.prompt_master_password)
-                menu.addAction(exit_action)
+                action = QAction(f'{verb} Master Password', self.app)
+                action.setFont(mono_font)
+                action.triggered.connect(self.prompt_master_password)
+                menu.addAction(action)
 
         # Add options to exit
-        exit_action = QAction("Exit", self.app)
-        exit_action.setFont(mono_font)
-        exit_action.triggered.connect(self.exit_app)
-        menu.addAction(exit_action)
+        action = QAction("Exit", self.app)
+        action.setFont(mono_font)
+        action.triggered.connect(self.exit_app)
+        menu.addAction(action)
 
         return self.replace_menu_if_different(menu)
 
@@ -315,12 +411,23 @@ class LuksTray():
         return False
 
 
-    def handle_partition_click(self, uuid):
+    def handle_device_click(self, uuid):
         """Handle clicking a partition."""
         # Show a dialog to unmount or display info
         if uuid in self.containers:
-            dialog = MountDialog(self.containers[uuid])
+            dialog = MountDeviceDialog(self.containers[uuid])
             dialog.exec_()
+
+    def handle_file_click(self, uuid):
+        """Handle clicking a partition."""
+        # Show a dialog to unmount or display info
+        if uuid in self.containers:
+            dialog = MountFileDialog(self.containers[uuid])
+            dialog.exec_()
+
+    def handle_add_file_click(self):
+        dialog = MountFileDialog(None)
+        dialog.exec_()
 
     def exit_app(self):
         """Exit the application."""
@@ -336,12 +443,14 @@ class CommonDialog(QDialog):
     """ TBD """
     def __init__(self):
         super().__init__()
+        self.setAttribute(Qt.WA_DeleteOnClose)
         self.main_layout = QVBoxLayout()
         self.button_layout = QHBoxLayout()
         self.password_toggle = None
         self.password_input = None
         self.items = []
         self.inputs = {}
+
 
     def add_line(self, text):
         """ TBD """
@@ -354,40 +463,63 @@ class CommonDialog(QDialog):
         button.clicked.connect(lambda: method(arg))
         self.button_layout.addWidget(button)
 
-    def add_input_field(self, key, label_text, placeholder_text, char_width=5, is_password=False, is_folder=False):
+    def add_input_field(self, keys, label_texts, placeholder_texts, char_width=5,
+                       is_password=False, is_folder=False, is_file=False):
         """ Adds a label and a line edit input to the main layout. """
         field_layout = QHBoxLayout() # Create a horizontal layout for the label and input field
-        label = QLabel(label_text) # Create a QLabel for the label text
+        
+        if not isinstance(keys, list):
+            keys = [keys]
+        if not isinstance(label_texts, list):
+            text_str, label_texts = label_texts, [label_texts]
+            while len(label_texts) < len(keys):
+                placeholder_texts.append(text_str)
+        if not isinstance(placeholder_texts, list):
+            text_str, placeholder_texts = placeholder_texts, [placeholder_texts]
+            while len(placeholder_texts) < len(keys):
+                placeholder_texts.append(text_str)
 
-        input_field = QLineEdit()
-        input_field.setText(placeholder_text.strip())
+        for idx, key in enumerate(keys):
+            label_text = label_texts[idx]
+            placeholder_text = placeholder_texts[idx]
 
-        char_width = max(len(placeholder_text), char_width)
-        # Set the width of the input field based on character width
-        # Approximation: assuming an average of 8 pixels per character for a monospace font
-         # You can adjust this factor based on the font
-        input_field.setFixedWidth(char_width * 10)
-        field_layout.addWidget(label)
-        field_layout.addWidget(input_field)
-        if is_password:
-            input_field.setEchoMode(QLineEdit.Password)  # Set the initial mode to hide the password
-            self.password_input = input_field
-            self.password_toggle = QPushButton("👁️")
-            self.password_toggle.setFixedWidth(30)
-            self.password_toggle.setCheckable(True)
-            self.password_toggle.setFocusPolicy(Qt.NoFocus)
-            self.password_toggle.clicked.connect(self.toggle_password_visibility)
-            field_layout.addWidget(self.password_toggle)
-            
-        if is_folder: # Create a Browse button
-            browse_button = QPushButton("Browse...", self)
-            browse_button.setFocusPolicy(Qt.NoFocus)  # Prevent the button from gaining focus
-            browse_button.clicked.connect(lambda: self.browse_folder(input_field))
-            field_layout.addWidget(browse_button)
+            label = QLabel(label_text) # Create a QLabel for the label text
+            input_field = QLineEdit()
+            input_field.setText(placeholder_text.strip())
 
-        self.inputs[key] = input_field
+            char_width = max(len(placeholder_text), char_width)
+            # Set the width of the input field based on character width
+            # Approximation: assuming an average of 8 pixels per character for a monospace font
+             # You can adjust this factor based on the font
+            input_field.setFixedWidth(char_width * 10)
+            field_layout.addWidget(label)
+            field_layout.addWidget(input_field)
+            if is_password:
+                input_field.setEchoMode(QLineEdit.Password)  # Set the initial mode to hide the password
+                self.password_input = input_field
+                self.password_toggle = QPushButton("👁️")
+                self.password_toggle.setFixedWidth(30)
+                self.password_toggle.setCheckable(True)
+                self.password_toggle.setFocusPolicy(Qt.NoFocus)
+                self.password_toggle.clicked.connect(self.toggle_password_visibility)
+                field_layout.addWidget(self.password_toggle)
+
+            if is_folder: # Create a Browse button
+                button = QPushButton("Browse...", self)
+                button.setFocusPolicy(Qt.NoFocus)  # Prevent the button from gaining focus
+                button.clicked.connect(lambda: self.browse_folder(input_field))
+                field_layout.addWidget(button)
+
+            if is_file: # Create a Browse button
+                button = QPushButton("Browse...", self)
+                button.setFocusPolicy(Qt.NoFocus)  # Prevent the button from gaining focus
+                button.clicked.connect(lambda: self.browse_file(input_field))
+                field_layout.addWidget(button)
+
+
+            self.inputs[key] = input_field
         self.main_layout.addLayout(field_layout) # Add horizontal layout to main vertical layout
-    
+
     @staticmethod
     def get_real_user_home_directory():
         """Returns the home directory of the real user when running under sudo."""
@@ -407,7 +539,17 @@ class CommonDialog(QDialog):
         if folder_path:
             input_field.setText(folder_path)  # Update the input field with the selected folder path
 
+    def browse_file(self, input_field):
+        """ Open a dialog to select a folder and update the input field with the selected path. """
+        # Determine the initial directory to open
+        initial_dir = input_field.text()
+        initial_dir = initial_dir if initial_dir else self.get_real_user_home_directory()
 
+        # Open the folder dialog starting at the determined directory
+        file_path = QFileDialog.getSaveFileName(self, "Select File", initial_dir)
+        # returns tuple (path, type of file)
+        if file_path[0]:
+            input_field.setText(file_path[0])  # Update the input field with the selected folder path
 
     def toggle_password_visibility(self):
         """Toggle password visibility."""
@@ -419,6 +561,17 @@ class CommonDialog(QDialog):
         else:
             self.password_input.setEchoMode(QLineEdit.Password)  # Hide the password
             self.password_toggle.setText("👁️")
+            
+    @staticmethod
+    def get_mount_points():
+        mount_points = set()
+        with open('/proc/mounts', 'r', encoding='utf-8') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    mount_points.add(parts[1])  # The mount point is the second field
+        return mount_points
+
 
 
     def cancel(self, _=None):
@@ -476,7 +629,7 @@ class MasterPasswordDialog(CommonDialog):
             self.alert_errors(errs)
         self.accept()
 
-class MountDialog(CommonDialog):
+class MountDeviceDialog(CommonDialog):
     """ TBD """
     def __init__(self, container):
         super().__init__()
@@ -487,23 +640,27 @@ class MountDialog(CommonDialog):
             mounts = container.filesystems[0].mounts
         # mounts if there are
         if mounts:  # unmount dialog
-            self.setWindowTitle('Unmount and Close Container')
+            self.setWindowTitle('Unmount and Close Device')
             # self.setFixedSize(300, 200)
             self.add_line(f'{container.name}')
             self.add_line(f'Unmount {",".join(mounts)}?')
-            self.add_push_button('OK', self.unmount_partition, container.uuid)
+            self.add_push_button('OK', self.unmount_device, container.uuid)
             self.add_push_button('Cancel', self.cancel)
             self.main_layout.addLayout(self.button_layout)
 
         else:
-            self.setWindowTitle('Mount Container')
+            self.setWindowTitle('Mount Device')
             vital = tray.history.get_vital(container.uuid)
             self.add_line(f'{container.name}')
             self.add_input_field('password', "Enter Password", f'{vital.password}',
                                 24, is_password=True)
             self.add_input_field('upon', "Mount At", f'{vital.upon}', 36, is_folder=True)
-            self.add_input_field('delay', "Auto-Unmount Delay (min)", f'{vital.delay_min}', 5)
-            self.add_input_field('repeat', "Auto-Unmount Repeat (min)", f'{vital.repeat_min}', 5)
+            # self.add_input_field('delay', "Auto-Unmount Delay (min)", f'{vital.delay_min}', 5)
+            # self.add_input_field('repeat', "Auto-Unmount Repeat (min)", f'{vital.repeat_min}', 5)
+            keys = ['delay', 'repeat']
+            labels = ['Auto-Umount (minutes):  Delay', 'Repeat']
+            defaults = [f'{vital.delay_min}', f'{vital.repeat_min}']
+            self.add_input_field(keys, labels, defaults, 5)
 #           if container.fstype:
 #               self.add_line(f'Filesystem: {container.fstype}')
             if container.label:
@@ -512,138 +669,77 @@ class MountDialog(CommonDialog):
                 self.add_line(f'Size: {container.size_str}')
             self.add_line(f'UUID: {container.uuid}')
 
-            self.add_push_button('OK', self.mount_partition, container.uuid)
+            self.add_push_button('OK', self.mount_device, container.uuid)
             self.add_push_button('Cancel', self.cancel)
             self.add_push_button('Hide', self.hide_partition, container.uuid)
             self.main_layout.addLayout(self.button_layout)
 
         self.setLayout(self.main_layout)
 
-    def unmount_partition(self, uuid):
+    def unmount_device(self, uuid):
         """Attempt to unmount the partition."""
         # Here you would implement the unmount logic.
         errs, container = [], None
         tray = LuksTray.singleton
-        if tray:
-            container = tray.containers.get(uuid, None)
+        container = tray.containers.get(uuid, None)
+        tray.update_mounts()
         if container:
             for filesystem in container.filesystems:
-                err_cnt = 0
+                prev_err_cnt = len(errs)
                 for mount in filesystem.mounts:
-                    sub = subprocess.run( ["umount", mount],
-                        capture_output=True, text=True, check=False)
-                    if sub.returncode != 0:
-                        err_cnt += 1
-                        errs.append(f'umount {mount}: {sub.stdout} {sub.stderr} [rc={sub.returncode}]')
-                if err_cnt > 0:
+                    if tray.is_mounted(mount):
+                        err = rerun_if_busy(["umount", mount], errs)
+                if prev_err_cnt < len(errs):
                     continue
                 mapped_device = f'/dev/mapper/{filesystem.name}'
                 if os.path.exists(mapped_device) and stat.S_ISBLK(os.stat(mapped_device).st_mode):
-
-                    sub = subprocess.run(["umount", mapped_device],
-                        capture_output=True, text=True, check=False)
-                    if sub.returncode != 0:
-                        err_cnt += 1
-                        errs.append(f'umount {mapped_device}: '
-                                    + f'{sub.stdout} {sub.stderr} [rc={sub.returncode}]')
-
-                    sub = subprocess.run(["cryptsetup", "luksClose", filesystem.name],
-                        capture_output=True, text=True, check=False)
-                    if sub.returncode != 0:
-                        err_cnt += 1
-                        errs.append(f'cryptsetup luksClose {filesystem.name}: '
-                                    + f'{sub.stdout} {sub.stderr} [rc={sub.returncode}]')
+                    if tray.is_mounted(mapped_device):
+                        rerun_if_busy(["umount", mapped_device], errs)
+                    run_cmd(["cryptsetup", "luksClose", filesystem.name], err)
         if errs:
             self.alert_errors(errs)
         tray.update_menu()
         self.accept()
 
-    def mount_partition(self, uuid):
+    def mount_device(self, uuid):
         """Attempt to mount the partition."""
-        def get_mount_points():
-            mount_points = set()
-            with open('/proc/mounts', 'r', encoding='utf-8') as f:
-                for line in f:
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        mount_points.add(parts[1])  # The mount point is the second field
-            return mount_points
-
         def mount_it(container, password, upon, luks_device):
             nonlocal tray
+            err = None
             try:
                 # 1. Unlock the LUKS partition if needed
                 if not container.opened:
                     if not luks_device:
                         luks_device = f'{uuid}-luks'
                     dev_path = f'/dev/{container.name}'
-                    cmd = ['cryptsetup', 'luksOpen', dev_path, luks_device]
-                    prc = subprocess.run(cmd, check=False,
-                        input=password.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    if prc.returncode != 0:
-                        return (f'ERR: unlock {dev_path!r} failed: {prc.stderr.decode()}'
-                             + f' rc={prc.returncode}')
+                    err = run_cmd(['cryptsetup', 'luksOpen', dev_path, luks_device],
+                                  input=password)
 
                 # 2. Mount the unlocked LUKS partition
-                # cmd = ['mount', '-o', f'uid={tray.uid},gid={tray.gid}', f'/dev/mapper/{luks_device}', upon]
-                cmd = ['mount', f'/dev/mapper/{luks_device}', upon]
-                prc = subprocess.run(cmd, check=False,
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                if prc.returncode != 0:
-                    return (f'ERR: {cmd} failed: {prc.stderr.decode()}'
-                            + f' rc={prc.returncode}')
+                if not err:
+                    err = run_cmd(['mount', f'/dev/mapper/{luks_device}', upon])
 
-                # 3. Run binfs to make mount point available
-                cmd = ['bindfs', '-u', str(tray.uid), '-g', str(tray.gid), upon, upon]
-                prc = subprocess.run(cmd, check=False,
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                if prc.returncode != 0:
-                    return (f'ERR: {cmd} failed: {prc.stderr.decode()}'
-                            + f' rc={prc.returncode}')
-
-                # Return success message if everything went well
-                return ''
+                # 3. Run bindfs to make mount point available
+                if not err:
+                    err = run_cmd(['bindfs', '-u',
+                               str(tray.uid), '-g', str(tray.gid), upon, upon])
+                # Return error (or None if success)
+                return err
 
             except Exception as e:
                 return f"An error occurred: {str(e)}"
 
-        def mount_with_udisksctl(luks_device, mount_point):
-            """ TBD """
-            try:
-                # Unlock the LUKS partition
-                cmd = ['udisksctl', 'unlock', '-b', luks_device]
-                prc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                
-                # Get the unlocked device path (usually /dev/mapper/your_device)
-                # Here we assume the unlocked device name is based on the original LUKS device
-                unlocked_device = f'/dev/mapper/{luks_device.split("/")[-1]}'
-
-                # Mount the unlocked partition at the specified mount point
-                cmd = ['udisksctl', 'mount', '-b', unlocked_device, '--mount-options', f'dir={mount_point}']
-                prc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-                return f'Mount successful at {mount_point}'
-
-            except subprocess.CalledProcessError as e:
-                return f'Error during mount: {e.stderr.decode()}'
-
-
-    #       # Example usage
-    #       luks_device = '/dev/sdXn'
-    #       mount_point = '/test-upon5'
-    #       result = mount_with_udisksctl(luks_device, mount_point)
-    #       print(result)
-
         tray, container = LuksTray.singleton, None
+        errs, values = [], {}
         if tray:
             container = tray.containers.get(uuid, None)
         if not container:
+            errs.append(f'ERR: container w UUID={uuid} not found')
             return
         vital = tray.history.get_vital(uuid)
-        errs, values = [], {}
         errs.append(f'{container.name}')
 
-        mount_points = get_mount_points()
+        mount_points = self.get_mount_points()
 
         for key, field in self.inputs.items():
             text = field.text().strip()
@@ -698,62 +794,217 @@ class MountDialog(CommonDialog):
         """ Hide the partition """
         # FIXME: need body
         return
-    
-    def mount_file(self, file_path):
+
+class MountFileDialog(CommonDialog):
+    """ TBD """
+    def __init__(self, container):
+        super().__init__()
+        tray = LuksTray.singleton
+
+        # mounts if there are
+        if container and container.opened:  # unmount dialog
+            if container.mounts:
+                self.setWindowTitle('Unmount/Close Crypt File')
+                self.add_line(f'{container.back_file}')
+                self.add_line(f'Unmount {container.upon}')
+            else:
+                self.setWindowTitle('Close Crypt File')
+                self.add_line(f'{container.back_file}')
+            self.add_push_button('OK', self.unmount_file, container.uuid)
+            self.add_push_button('Cancel', self.cancel)
+            self.main_layout.addLayout(self.button_layout)
+
+        elif container:
+            self.setWindowTitle('Mount Crypt File')
+            vital = tray.history.get_vital(container.uuid)
+            self.add_line(f'{container.back_file}')
+            self.add_input_field('password', "Enter Password", f'{vital.password}',
+                                24, is_password=True)
+            self.add_input_field('upon', "Mount At", f'{vital.upon}', 36, is_folder=True)
+            # self.add_input_field('delay', "Auto-Unmount Delay (min)", f'{vital.delay_min}', 5)
+            # self.add_input_field('repeat', "Auto-Unmount Repeat (min)", f'{vital.repeat_min}', 5)
+            keys = ['delay', 'repeat']
+            labels = ['Auto-Umount (minutes):  Delay', 'Repeat']
+            defaults = [f'{vital.delay_min}', f'{vital.repeat_min}']
+            self.add_input_field(keys, labels, defaults, 5)
+#           if container.fstype:
+#               self.add_line(f'Filesystem: {container.fstype}')
+#           if container.label:
+#               self.add_line(f'Label: {container.label}')
+            if container.size_str:
+                self.add_line(f'Size: {container.size_str}')
+            if container.uuid:
+                self.add_line(f'UUID: {container.uuid}')
+
+            self.add_push_button('OK', self.mount_file, container.uuid)
+            self.add_push_button('Cancel', self.cancel)
+            # self.add_push_button('Hide', self.hide_partition, container.uuid)
+            self.main_layout.addLayout(self.button_layout)
+        else: # no container ... add file
+            self.setWindowTitle('Add Crypt File')
+            # vital = tray.history.get_vital(container.uuid)
+            # self.add_line(f'{container.back_file}')
+            self.add_input_field('password', "Enter Password", '',
+                                24, is_password=True)
+            self.add_input_field('size_str', "Size (MiB)", '32', 8)
+            self.add_input_field('back_file', "Crypt File", '', 48, is_file=True)
+            self.add_input_field('upon', "Mount At", '', 36, is_folder=True)
+            self.add_input_field('delay', "Auto-Unmount Delay (min)", '60', 5)
+            self.add_input_field('repeat', "Auto-Unmount Repeat (min)", '5', 5)
+#           if container.fstype:
+#               self.add_line(f'Filesystem: {container.fstype}')
+#           if container.label:
+#               self.add_line(f'Label: {container.label}')
+#           if container.size_str:
+#               self.add_line(f'Size: {container.size_str}')
+#           self.add_line(f'UUID: {container.uuid}')
+
+            self.add_push_button('OK', self.mount_file, None)
+            self.add_push_button('Cancel', self.cancel)
+            # self.add_push_button('Hide', self.hide_partition, container.uuid)
+            self.main_layout.addLayout(self.button_layout)
+
+        self.setLayout(self.main_layout)
+
+    def unmount_file(self, uuid):
+        """Attempt to unmount the partition."""
+        # Here you would implement the unmount logic.
+        errs, container = [], None
+        tray = LuksTray.singleton
+        container = tray.containers.get(uuid, None)
+        tray.update_mounts()
+        if container:
+            for mount in container.mounts:
+                if tray.is_mounted(mount):
+                    rerun_if_busy(["umount", mount], errs=errs)
+
+            if not errs:
+                run_cmd(["cryptsetup", "close", container.name], errs=errs)
+        if errs:
+            self.alert_errors(errs)
+        tray.update_menu()
+        self.accept()
+
+    def mount_file(self, uuid):
 
         def mount_luks_file(container, password, upon, luks_file, size=None):
             nonlocal tray
             try:
+                needs_filesystem, err = False, None
                 # 1. Create the file if it does not exist and a size is specified
                 if not os.path.exists(luks_file):
                     if size is None:
                         return f"ERR: File {luks_file!r} does not exist and size is not specified to create it."
                     # Create a sparse file with the specified size (in MB)
-                    cmd = ['truncate', '-s', f'{size}M', luks_file]
-                    prc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    if prc.returncode != 0:
-                        return (f'ERR: Failed to create file {luks_file!r}: {prc.stderr.decode()}'
-                                + f' rc={prc.returncode}')
+                    err = run_cmd(['truncate', '-s', f'{size}', luks_file])
+                    needs_filesystem = True
 
                     # Set up the LUKS container on the file
-                    cmd = ['cryptsetup', 'luksFormat', luks_file]
-                    prc = subprocess.run(cmd, check=False, input=password.encode(),
-                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    if prc.returncode != 0:
-                        return (f'ERR: luksFormat {luks_file!r} failed: {prc.stderr.decode()}'
-                                + f' rc={prc.returncode}')
+                    if not err:
+                        err = run_cmd(['cryptsetup', 'luksFormat', '-q', luks_file])
 
                 # 2. Unlock the LUKS file if needed
-                if not container.opened:
+                if not err and not container.opened:
                     luks_device = os.path.basename(luks_file) + '-luks'
-                    cmd = ['cryptsetup', 'luksOpen', luks_file, luks_device]
-                    prc = subprocess.run(cmd, check=False, input=password.encode(),
-                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    if prc.returncode != 0:
-                        return (f'ERR: luksOpen {luks_file!r} failed: {prc.stderr.decode()}'
-                                + f' rc={prc.returncode}')
+                    err = run_cmd(['cryptsetup', 'luksOpen', luks_file, luks_device],
+                                input=password)
 
                 # 3. Mount the unlocked LUKS file
-                cmd = ['mount', f'/dev/mapper/{luks_device}', upon]
-                prc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                if prc.returncode != 0:
-                    return (f'ERR: {cmd} failed: {prc.stderr.decode()}'
-                            + f' rc={prc.returncode}')
+                if not err and needs_filesystem:
+                    err = run_cmd(['mkfs.ext4', f'/dev/mapper/{luks_device}'])
 
-                # 4. Run bindfs to make mount point available
-                cmd = ['bindfs', '-u', str(tray.uid), '-g', str(tray.gid), upon, upon]
-                prc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                if prc.returncode != 0:
-                    return (f'ERR: {cmd} failed: {prc.stderr.decode()}'
-                            + f' rc={prc.returncode}')
+                # 4. Mount the unlocked LUKS file
+                if not err:
+                    err = run_cmd(['mount', f'/dev/mapper/{luks_device}', upon])
 
-                # Return success message if everything went well
-                return ''
+                # 5. Run bindfs to make mount point available
+                if not err:
+                    err = run_cmd(['bindfs', '-u', str(tray.uid), '-g', str(tray.gid), upon, upon])
+
+                # Return error (or None if all OK)
+                return err
 
             except Exception as e:
                 return f"An error occurred: {str(e)}"
-    
-        tray = LuksTray.singleton, None
+
+        tray, container = LuksTray.singleton, None
+        errs, values = [], {}
+        assert tray
+            
+        if uuid is None:
+            container = DeviceInfo.make_partition_namespace('', '')
+            container.opened = False
+        else:
+            container = tray.containers.get(uuid, None)
+            if not container:
+                errs.append(f'ERR: container w UUID={uuid} not found')
+                return
+        vital = tray.history.get_vital(uuid)
+        errs.append(f'{container.name}')
+
+        mount_points = self.get_mount_points()
+
+        for key, field in self.inputs.items():
+            text = field.text().strip()
+            values[key] = text
+            if key == 'password':
+                if not text:
+                    errs.append('ERR: cannot leave password empty')
+            elif key == 'upon':
+                isabs = os.path.isabs(text)
+                isdir = os.path.isdir(text)
+                length = 0
+                if isabs and isdir:
+                    length = len(os.listdir(text))
+                if not isabs or not isdir or length > 0:
+                    errs.append(f'ERR: mount point ({text}) is not absolute path to empty folder')
+                elif text in mount_points:
+                    errs.append(f'ERR: mount point ({text}) occupied')
+
+            elif key in ('delay', 'repeat', 'size_str'):
+                try:
+                    int_val = max(int(text), 0)
+                    if key in ('size_str', ):
+                        string = f'{int_val}M'
+                        values[key] = string
+                    else:
+                        values[key] = int_val
+                    continue
+                except Exception:
+                    errs.append(f'ERR: value (text) for {key} must be an integer')
+            elif key == 'back_file':
+                path = os.path.abspath(text)
+                values[key] = path
+                if not os.path.isdir(os.path.dirname(path)):
+                    errs.append(f'ERR: Crypt File {path} must be in an existing directory')
+
+            else:
+                errs.append(f'ERR: unknown key({key})')
+
+        if len(errs) <= 1:
+            if container.back_file:
+                back_file = container.back_file
+            else:
+                back_file = values['back_file']
+            err = mount_luks_file(container, values['password'], values['upon'],
+                                  back_file, values.get('size_str', None))
+            if err:
+                errs.append(err)
+        if len(errs) > 1:
+            self.alert_errors(errs)  # FIXME: need to actually do the mount if no errors
+            self.accept()
+            return
+
+        # update history with new values if mount works
+        vital = tray.history.get_vital(container.uuid)
+        if (values['password'] != vital.password or values['upon'] != vital.upon
+                or values['delay'] != vital.delay_min or values['repeat'] != vital.repeat_min):
+            vital.password, vital.upon = values['password'], values['upon']
+            vital.delay_min, vital.repeat_min = values['delay'], values['repeat']
+            tray.history.put_vital(vital)
+
+        tray.update_menu()
+        self.accept()
 
 
 def rerun_module_as_root(module_name):

@@ -7,6 +7,7 @@
 import os
 # import sys
 import json
+import subprocess
 from types import SimpleNamespace
 import hashlib
 import base64
@@ -30,11 +31,12 @@ class HistoryClass:
     def make_ns(uuid):
         """ TBD """
         return SimpleNamespace(
-                uuid=uuid,
-                password='', # this is temporary and belongs in "secrets"
+                uuid=uuid, # can be full path
+                password='',
                 delay_min=60,
                 repeat_min=5,
                 upon='', # "primary" mount only
+                back_file='', # backing file if any
             )
 
     def _has_file_changed(self):
@@ -67,18 +69,24 @@ class HistoryClass:
         self.dirty = True
         return self.save()
 
-    def ensure_container(self, uuid, upon):
+    def ensure_container(self, container):
         """Ensure a discovered container is in the history"""
         # do not save auto-mounts by file managers or gnome-disks
+        upon = container.upon
         upon = '' if upon.startswith(('/run/', '/media/')) else upon
+        uuid = container.uuid
         if uuid not in self.vitals:
             ns = self.make_ns(uuid)
-            ns.uuid, ns.upon = uuid, upon
+            ns.uuid = uuid
+            ns.upon = upon
+            ns.back_file = container.back_file
             self.vitals[uuid] = ns
             self.dirty = True
         elif self.vitals[uuid].upon != upon and upon:
             self.vitals[uuid].upon = upon
             self.dirty = True
+        elif self.vitals[uuid].back_file != container.back_file:
+            self.vitals[uuid].back_file = container.back_file
 
     def _namespaces_to_json_data(self):
         """ TBD """
@@ -146,16 +154,33 @@ class HistoryClass:
             return True
 
     def _json_data_to_namespaces(self, entries):
+        def get_luks_uuid(path):
+            try:
+                # Run blkid on the file and capture the output
+                result = subprocess.run(['blkid', '-o', 'value', '-s', 'UUID', path],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        text=True, check=True)
+                return result.stdout.strip()  # Return the UUID as a string
+            except subprocess.CalledProcessError:
+                return ''
+
         self.vitals = {}
+        purges = []
         if not isinstance(entries, dict):
             self.status = 'locked'
             return False
         for uuid, entry in entries.items():
             legit = vars(self.make_ns(uuid))
-            for key, value in legit.items():
+            for key in legit.keys():
                 if key in entry:
                     legit[key] = entry[key]
-            self.vitals[uuid] = SimpleNamespace(**legit)
+            ns = SimpleNamespace(**legit)
+            if ns.back_file and get_luks_uuid(ns.back_file) != uuid:
+                purges.append(uuid)
+            self.vitals[uuid] = ns
+        for uuid in purges:
+            del self.vitals[uuid]
+            self.dirty = True
         return True
 
     def restore(self):  # TODO: only if unchanged
