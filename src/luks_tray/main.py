@@ -495,9 +495,11 @@ class CommonDialog(QDialog):
             field_layout.addWidget(label)
             field_layout.addWidget(input_field)
             if is_password:
-                input_field.setEchoMode(QLineEdit.Password)  # Set the initial mode to hide the password
+                input_field.setEchoMode(QLineEdit.Normal)
+                # input_field.setEchoMode(QLineEdit.Password)  # hide password
                 self.password_input = input_field
-                self.password_toggle = QPushButton("👁️")
+                # self.password_toggle = QPushButton("👁️")
+                self.password_toggle = QPushButton("●")
                 self.password_toggle.setFixedWidth(30)
                 self.password_toggle.setCheckable(True)
                 self.password_toggle.setFocusPolicy(Qt.NoFocus)
@@ -556,11 +558,11 @@ class CommonDialog(QDialog):
         if not self.password_input or not self.password_toggle:
             return
         if self.password_toggle.isChecked():
-            self.password_input.setEchoMode(QLineEdit.Normal)  # Show the password
-            self.password_toggle.setText("●")
-        else:
             self.password_input.setEchoMode(QLineEdit.Password)  # Hide the password
             self.password_toggle.setText("👁️")
+        else:
+            self.password_input.setEchoMode(QLineEdit.Normal)  # Show the password
+            self.password_toggle.setText("●")
             
     @staticmethod
     def get_mount_points():
@@ -671,7 +673,7 @@ class MountDeviceDialog(CommonDialog):
 
             self.add_push_button('OK', self.mount_device, container.uuid)
             self.add_push_button('Cancel', self.cancel)
-            self.add_push_button('Hide', self.hide_partition, container.uuid)
+            # self.add_push_button('Hide', self.hide_partition, container.uuid)
             self.main_layout.addLayout(self.button_layout)
 
         self.setLayout(self.main_layout)
@@ -790,10 +792,10 @@ class MountDeviceDialog(CommonDialog):
         tray.update_menu()
         self.accept()
 
-    def hide_partition(self, uuid):
-        """ Hide the partition """
-        # FIXME: need body
-        return
+#   def hide_partition(self, uuid):
+#       """ Hide the partition """
+#       # FIXME: need body
+#       return
 
 class MountFileDialog(CommonDialog):
     """ TBD """

@@ -13,8 +13,8 @@ System tray applet to help mount/unmount LUKS containers (on Linux)
   - whether mounted (shows ■ for mounted, □ for not mounted, ❢ for trying to dismount  TODO)
   - whether open/unlocked or closed/locked (🗹 for open, — for closed)
 - each time the menu is opened, the state is re-establish TODO;  and that is done periodically in the background
-- optionally, the user can enabled a "master password"
-  - w/o a master password, adding one is a menu option TODO
+- optionally, the user can enabled a "master password" using the "Set Master Password" menu item.
+  - w/o a master password, adding one is a menu option
   - with a master password and locked, the only menu item is "Enter master password"
 - a "history" file (json) will be updated with retained info. It will have entries with:
   - UUID
@@ -37,7 +37,6 @@ System tray applet to help mount/unmount LUKS containers (on Linux)
   - a list of mount points that hides containers (mostly for full disk encryption). Default is (/,/home,/var,/var/log,/swap) TODO
   - a section which is a list of hidden file containers TODO
 - TODO to handle files that are luks containers, there will be a section in the menu for "registered" file containers and a menu item to add one.  Registered file containers are recorded the history file. If registered and not present, it is not shown but not unregistered. NOTE: file handling requires that the distro shows mounted file containers as "loop" devices by lsblk.
-- the "mount container" dialog will have a "Hide" button in addition to OK and cancel. TODO  The hide will unregister a file container and remove it from the "Registered" section of .ini file and for partitions, will put the UUID in a "Hidden" section of the .ini.  To take a partition out of the "Hidden" section, then you have to edit the .ini and know the UUID.  If opened, unregistered and hidden items are shown in the menu, affect the icon state, and can be dismounted/closed.
 - Edge cases (with caveats in the README):
   - no filesystems in a LUKS container
   - multiple filesystem in a LUKS container ... pretend there is just one
@@ -63,3 +62,6 @@ Test Notes:
 
 "Full disk encryption" is usually just / (but might also include /home, /var, /var/log, /swap/, /tmp/, /svr, /opt, /usr, /var/log)
 
+---
+Discarded Features
+- the "mount container" dialog will have a "Hide" button in addition to OK and cancel. TODO  The hide will unregister a file container and remove it from the "Registered" section of .ini file and for partitions, will put the UUID in a "Hidden" section of the .ini.  To take a partition out of the "Hidden" section, then you have to edit the .ini and know the UUID.  If opened, unregistered and hidden items are shown in the menu, affect the icon state, and can be dismounted/closed.
