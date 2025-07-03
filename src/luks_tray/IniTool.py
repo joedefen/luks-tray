@@ -11,6 +11,7 @@ TBD
 # pylint: disable=
 
 import os
+import pwd
 import configparser
 from types import SimpleNamespace
 import copy
@@ -20,6 +21,17 @@ from luks_tray.Utils import prt
 class IniTool:
     """ Configured Params for this class"""
     def __init__(self, paths_only=False):
+        def get_user_home():
+            """Get the original user's home directory, even when running as root"""
+            if os.geteuid() == 0:  # Running as root
+                # Try to get original user from sudo environment
+                original_user = os.environ.get('SUDO_USER')
+                if original_user:
+                    return pwd.getpwnam(original_user).pw_dir
+            
+            # Fallback to current user
+            return os.path.expanduser("~")
+
         self.defaults = {
             'Settings': {
                 'gui_editor': 'geany',
@@ -27,7 +39,7 @@ class IniTool:
             #   'dim_pct_lock_min': 100,
             }
         }
-        self.folder = os.path.expanduser("~/.config/luks-tray")
+        self.folder = os.path.join(get_user_home(), ".config/luks-tray")
         self.ini_path =  os.path.join(self.folder, "config.ini")
         self.log_path =  os.path.join(self.folder, "debug.log")
         self.history_path =  os.path.join(self.folder, "history.json")

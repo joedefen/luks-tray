@@ -5,24 +5,28 @@
 # pylint: disable=no-name-in-module,import-outside-toplevel,too-many-instance-attributes
 # pylint: disable=too-many-locals,too-many-branches,too-many-statements
 # pylint: disable=too-many-arguments
-# pylint: disable=line-too-long
+# pylint: disable=line-too-long,too-many-lines
 import os
 import sys
 import stat
 import json
 import signal
 import subprocess
+import shutil
 import traceback
 import hashlib
 import time
+import importlib.resources
+from pathlib import Path
+from functools import partial
 from io import StringIO
 from datetime import datetime
 from types import SimpleNamespace
-from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
-from PyQt5.QtWidgets import QFileDialog
-from PyQt5.QtGui import QIcon, QCursor, QFont
-from PyQt5.QtCore import QTimer, Qt
+from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
+from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
+from PyQt6.QtWidgets import QFileDialog
+from PyQt6.QtGui import QIcon, QCursor, QAction, QFont
+from PyQt6.QtCore import QTimer, Qt
 
 from luks_tray.History import HistoryClass
 from luks_tray.Utils import prt
@@ -40,20 +44,20 @@ def generate_uuid_for_file_path(file_path):
     return generated_uuid
 
 
-def run_cmd(args, errs=None, input=None):
+def run_cmd(args, errs=None, input_str=None):
     """ TBD """
-    return rerun_if_busy(args, errs, repeat=0, delay=0.0, input=input)
+    return rerun_if_busy(args, errs, repeat=0, delay=0.0, input_str=input_str)
 
-def rerun_if_busy(args, errs, repeat=3, delay=0.5, input=None):
+def rerun_if_busy(args, errs, repeat=3, delay=0.5, input_str=None):
     """ Handles umounts if busy mostly"""
     err = None
     for loop in range(repeat+1):
         if loop > 0:
             time.sleep(delay)
-        sub = subprocess.run( args, capture_output=True, text=True, check=False, input=input)
+        sub = subprocess.run( args, capture_output=True, text=True, check=False, input=input_str)
         if sub.returncode == 0:
             return None
-        err = (f'FAIL: {' '.join(args)}: {sub.stdout} {sub.stderr} [rc={sub.returncode}]')
+        err = f'FAIL: {' '.join(args)}: {sub.stdout} {sub.stderr} [rc={sub.returncode}]'
         if 'busy' not in sub.stderr:
             break
     if err and errs:
@@ -241,15 +245,29 @@ class LuksTray():
         self.history.restore()
 
         self.icons, self.svgs = [], []
+
         for base in self.svg_info.bases:
             self.svgs.append(f'{base}-v{self.svg_info.version}.svg')
-        for resource in self.svgs:
-            if not os.path.isfile(resource):
-                Utils.copy_to_folder(resource, ini_tool.folder)
-            if not os.path.isfile(resource):
-                prt(f'WARN: cannot find {repr(resource)}')
+
+        for resource_filename in self.svgs:
+            dest_path = os.path.join(ini_tool.folder, resource_filename)
+            if not os.path.isfile(dest_path):
+                try:
+                    with importlib.resources.as_file(
+                        importlib.resources.files('luks_tray.resources').joinpath(resource_filename)
+                    ) as source_path:
+                        # Copy directly instead of using Utils.copy_to_folder()
+                        shutil.copy2(source_path, dest_path)
+                except (FileNotFoundError, AttributeError):
+                    prt(f'WARN: cannot find source resource {repr(resource_filename)}')
+                    continue
+            
+            if not os.path.isfile(dest_path):
+                prt(f'WARN: cannot find destination file {repr(dest_path)}')
                 continue
-            self.icons.append(QIcon(os.path.join(self.ini_tool.folder, resource)))
+            
+            self.icons.append(QIcon(dest_path))
+
 
         # ??? Load JSON data
         # ??? self.load_data()
@@ -323,6 +341,7 @@ class LuksTray():
             menu.addAction(action)
         else:
             separated = False
+            idx = -1 # so idx can be used after loop
             for idx, container in enumerate(self.containers.values()):
                 mountpoint = ''
                 if container.opened:
@@ -339,7 +358,7 @@ class LuksTray():
                 if idx > 0 and not separated and container.type == 'crypt':
                     menu.addSeparator()
                     separated = True
-                    
+
                 name = container.name
                 if container.back_file:
                     name = container.back_file
@@ -373,7 +392,7 @@ class LuksTray():
             if idx > 0 and not separated:
                 menu.addSeparator()
                 separated = True
-            action = QAction(f'Add Crypt File', self.app)
+            action = QAction('Add Crypt File', self.app)
             action.setFont(mono_font)
             action.triggered.connect(self.handle_add_file_click)
             menu.addAction(action)
@@ -426,6 +445,7 @@ class LuksTray():
             dialog.exec_()
 
     def handle_add_file_click(self):
+        """ TBD """
         dialog = MountFileDialog(None)
         dialog.exec_()
 
@@ -467,7 +487,7 @@ class CommonDialog(QDialog):
                        is_password=False, is_folder=False, is_file=False):
         """ Adds a label and a line edit input to the main layout. """
         field_layout = QHBoxLayout() # Create a horizontal layout for the label and input field
-        
+
         if not isinstance(keys, list):
             keys = [keys]
         if not isinstance(label_texts, list):
@@ -509,13 +529,13 @@ class CommonDialog(QDialog):
             if is_folder: # Create a Browse button
                 button = QPushButton("Browse...", self)
                 button.setFocusPolicy(Qt.NoFocus)  # Prevent the button from gaining focus
-                button.clicked.connect(lambda: self.browse_folder(input_field))
+                button.clicked.connect(partial(self.browse_folder, input_field))
                 field_layout.addWidget(button)
 
             if is_file: # Create a Browse button
                 button = QPushButton("Browse...", self)
                 button.setFocusPolicy(Qt.NoFocus)  # Prevent the button from gaining focus
-                button.clicked.connect(lambda: self.browse_file(input_field))
+                button.clicked.connect(partial(self.browse_file, input_field))
                 field_layout.addWidget(button)
 
 
@@ -563,9 +583,10 @@ class CommonDialog(QDialog):
         else:
             self.password_input.setEchoMode(QLineEdit.Normal)  # Show the password
             self.password_toggle.setText("●")
-            
+
     @staticmethod
     def get_mount_points():
+        """ TBD """
         mount_points = set()
         with open('/proc/mounts', 'r', encoding='utf-8') as f:
             for line in f:
@@ -715,7 +736,7 @@ class MountDeviceDialog(CommonDialog):
                         luks_device = f'{uuid}-luks'
                     dev_path = f'/dev/{container.name}'
                     err = run_cmd(['cryptsetup', 'luksOpen', dev_path, luks_device],
-                                  input=password)
+                                  input_str=password)
 
                 # 2. Mount the unlocked LUKS partition
                 if not err:
@@ -888,6 +909,7 @@ class MountFileDialog(CommonDialog):
         self.accept()
 
     def mount_file(self, uuid):
+        """ TBD """
 
         def mount_luks_file(container, password, upon, luks_file, size=None):
             nonlocal tray
@@ -909,7 +931,7 @@ class MountFileDialog(CommonDialog):
                 if not err and not container.opened:
                     luks_device = os.path.basename(luks_file) + '-luks'
                     err = run_cmd(['cryptsetup', 'luksOpen', luks_file, luks_device],
-                                input=password)
+                                input_str=password)
 
                 # 3. Mount the unlocked LUKS file
                 if not err and needs_filesystem:
@@ -932,7 +954,7 @@ class MountFileDialog(CommonDialog):
         tray, container = LuksTray.singleton, None
         errs, values = [], {}
         assert tray
-            
+
         if uuid is None:
             container = DeviceInfo.make_partition_namespace('', '')
             container.opened = False
@@ -1059,7 +1081,7 @@ def main():
         Utils.prt_path = ini_tool.log_path
 
         tray = LuksTray(ini_tool, opts)
-        sys.exit(tray.app.exec_())
+        sys.exit(tray.app.exec())
 
     except Exception as exce:
         print("exception:", str(exce))
@@ -1067,7 +1089,7 @@ def main():
         sys.exit(15)
 
 
-# Basic PyQt5 Tray Icon example
+# Basic PyQt6 Tray Icon example
 def mainBasic():
     """ TBD """
     signal.signal(signal.SIGINT, signal.SIG_DFL)

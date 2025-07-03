@@ -4,7 +4,7 @@
 #   python3 -m venv lt-venv
 #   source lt-venv/bin/activate # set up activation in vscode too
 #   pip install build twine wheel
-#   pip install PyQt5 psutil
+#   pip install PyQt6 psutil
 #
 # Optionally, `python3 -m venv venv`, and then  # NOTE: done automatically with vscode
 #   - source env/bin/activate # to activate
@@ -58,7 +58,7 @@ classifiers = [
 dependencies = [
     'importlib-metadata; python_version<"3.8"',
     'psutil>=5.9',
-    'PyQt5>=5.15',
+    'PyQt6>=5.15',
 ]
 
 [project.urls]
