@@ -36,7 +36,12 @@ System tray applet to help mount/unmount LUKS containers (on Linux)
   - default repeat minutes for auto-lock (0 means none, default=60) TODO
   - a list of mount points that hides containers (mostly for full disk encryption). Default is (/,/home,/var,/var/log,/swap) TODO
   - a section which is a list of hidden file containers TODO
-- TODO to handle files that are luks containers, there will be a section in the menu for "registered" file containers and a menu item to add one.  Registered file containers are recorded the history file. If registered and not present, it is not shown but not unregistered. NOTE: file handling requires that the distro shows mounted file containers as "loop" devices by lsblk.
+- handling of files that are luks containers
+  - there will be a section in the menu for "registered" file containers and a menu item
+    ("Add Crypt File") to add one.
+  - Registered file containers are recorded the history file.
+  - If registered and not present, it is not shown but not unregistered.
+  - NOTE: file handling requires that the distro shows mounted file containers as "loop" devices by lsblk.
 - Edge cases (with caveats in the README):
   - no filesystems in a LUKS container
   - multiple filesystem in a LUKS container ... pretend there is just one
@@ -45,6 +50,30 @@ System tray applet to help mount/unmount LUKS containers (on Linux)
   - yellow with with big red exclamation inside - some are in dismounting in progress or unlocked but unmounted
   - yellow - some mounted (info exposed) w/o any being dismounted or unlocked but unmounted
   - green - none mounted (no info exposed)
+  
+- Your tool can definitely be smart enough to detect and work with udisks2-managed LUKS containers.
+  - Here's what you can detect and handle:
+    - Parse /proc/mounts - This shows all mounted filesystems regardless of how they were mounted.
+      You can identify LUKS volumes by their /dev/mapper/ entries and see where they're actually
+      mounted (including udisks2's /run/media/username/ paths).
+    - Check /dev/mapper/ - List all active device mapper entries. LUKS containers appear here
+      whether opened by cryptsetup or udisks2.
+    - Query udisks2 directly - You can call udisksctl info -b /dev/sdX or use D-Bus to check if
+      a device is managed by udisks2 and get its status.
+    - Cross-reference with your tracking - Compare what's actually on the system vs.
+      what your tool thinks it has managed.
+  - What you can handle:
+
+    - Detect udisks2 mounts - Even if mounted to /run/media/username/volume-name instead of your preferred location
+    - Unmount udisks2 volumes - Use udisksctl unmount -b /dev/mapper/luks-uuid or regular umount
+    - Close udisks2 containers - Use udisksctl lock -b /dev/sdX or cryptsetup luksClose
+    - Update your state tracking - Incorporate externally-managed volumes into your three-state model
+
+  - Smart behavior:
+    - Your tool could show these "foreign" LUKS volumes with a different icon or indicator
+      (like "managed externally") and still allow you to unmount/close them.
+    - This gives you a unified view of all LUKS activity on your system while preserving
+      your preferred workflow for volumes you manage directly.
 
 ---
 Test Notes:
@@ -59,8 +88,8 @@ Test Notes:
       sudo lvcreate -L 20M -n lv2 test_vg
       sudo mkfs.ext4 /dev/test_vg/lv1
       sudo mkfs.ext4 /dev/test_vg/lv2
-
-"Full disk encryption" is usually just / (but might also include /home, /var, /var/log, /swap/, /tmp/, /svr, /opt, /usr, /var/log)
+  - "Full disk encryption" is usually just / (but might also include /home,
+    /var, /var/log, /swap/, /tmp/, /svr, /opt, /usr, /var/log)
 
 ---
 Discarded Features

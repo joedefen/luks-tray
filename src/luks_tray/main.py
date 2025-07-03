@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
 from PyQt6.QtWidgets import QFileDialog
+from PyQt6.QtWidgets import QProgressBar
 from PyQt6.QtGui import QIcon, QCursor, QAction, QFont
 from PyQt6.QtCore import QTimer, Qt
 
@@ -366,8 +367,10 @@ class LuksTray():
                         name = '~' + name[6:]
 
                 # Set the title based on the state
-                title = ('🠋 ' if mountpoint.startswith('/') else
-                            '⛛ ' if container.opened else '🠉 ')
+                # title = ('✅🠋 ' if mountpoint.startswith('/') else
+                #           '🟡⛛ ' if container.opened else '⭕🠉 ')
+                title = ('✅ ' if mountpoint.startswith('/') else
+                            '🟡 ' if container.opened else '⭕ ')
                 title += f' {name} {mountpoint}'
 
                 # Create the action for the partition
@@ -415,10 +418,20 @@ class LuksTray():
     def replace_menu_if_different(self, menu):
         """ TBD """
         def replace_menu():
+            was_visible = self.menu and self.menu.isVisible()
+            
             self.menu = menu
             self.tray_icon.setContextMenu(self.menu)
             self.tray_icon.show()
+            
+            # Reopen menu if it was previously open
+            if was_visible:
+                # Show menu at cursor position
+                cursor_pos = QCursor.pos()
+                self.menu.popup(cursor_pos)
+            
             return True
+        
 
         if not self.menu: # or menu.actions() != self.menu.actions():
             return replace_menu()
@@ -435,19 +448,19 @@ class LuksTray():
         # Show a dialog to unmount or display info
         if uuid in self.containers:
             dialog = MountDeviceDialog(self.containers[uuid])
-            dialog.exec_()
+            dialog.exec()
 
     def handle_file_click(self, uuid):
         """Handle clicking a partition."""
         # Show a dialog to unmount or display info
         if uuid in self.containers:
             dialog = MountFileDialog(self.containers[uuid])
-            dialog.exec_()
+            dialog.exec()
 
     def handle_add_file_click(self):
         """ TBD """
         dialog = MountFileDialog(None)
-        dialog.exec_()
+        dialog.exec()
 
     def exit_app(self):
         """Exit the application."""
@@ -457,13 +470,13 @@ class LuksTray():
     def prompt_master_password(self):
         """ Prompt for master passdword"""
         dialog = MasterPasswordDialog()
-        dialog.exec_()
+        dialog.exec()
 
 class CommonDialog(QDialog):
     """ TBD """
     def __init__(self):
         super().__init__()
-        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.main_layout = QVBoxLayout()
         self.button_layout = QHBoxLayout()
         self.password_toggle = None
@@ -515,26 +528,26 @@ class CommonDialog(QDialog):
             field_layout.addWidget(label)
             field_layout.addWidget(input_field)
             if is_password:
-                input_field.setEchoMode(QLineEdit.Normal)
-                # input_field.setEchoMode(QLineEdit.Password)  # hide password
+                input_field.setEchoMode(QLineEdit.EchoMode.Normal)
+                # input_field.setEchoMode(QLineEdit.EchoMode.Password)  # hide password
                 self.password_input = input_field
                 # self.password_toggle = QPushButton("👁️")
                 self.password_toggle = QPushButton("●")
                 self.password_toggle.setFixedWidth(30)
                 self.password_toggle.setCheckable(True)
-                self.password_toggle.setFocusPolicy(Qt.NoFocus)
+                self.password_toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 self.password_toggle.clicked.connect(self.toggle_password_visibility)
                 field_layout.addWidget(self.password_toggle)
 
             if is_folder: # Create a Browse button
                 button = QPushButton("Browse...", self)
-                button.setFocusPolicy(Qt.NoFocus)  # Prevent the button from gaining focus
+                button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Prevent the button from gaining focus
                 button.clicked.connect(partial(self.browse_folder, input_field))
                 field_layout.addWidget(button)
 
             if is_file: # Create a Browse button
                 button = QPushButton("Browse...", self)
-                button.setFocusPolicy(Qt.NoFocus)  # Prevent the button from gaining focus
+                button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Prevent the button from gaining focus
                 button.clicked.connect(partial(self.browse_file, input_field))
                 field_layout.addWidget(button)
 
@@ -578,10 +591,10 @@ class CommonDialog(QDialog):
         if not self.password_input or not self.password_toggle:
             return
         if self.password_toggle.isChecked():
-            self.password_input.setEchoMode(QLineEdit.Password)  # Hide the password
+            self.password_input.setEchoMode(QLineEdit.EchoMode.Password)  # Hide the password
             self.password_toggle.setText("👁️")
         else:
-            self.password_input.setEchoMode(QLineEdit.Normal)  # Show the password
+            self.password_input.setEchoMode(QLineEdit.EchoMode.Normal)  # Show the password
             self.password_toggle.setText("●")
 
     @staticmethod
@@ -607,12 +620,16 @@ class CommonDialog(QDialog):
             error_text = '\n'.join(error_lines)  # Join the list of error lines into one string
 
             error_dialog = QMessageBox(self)
-            error_dialog.setIcon(QMessageBox.Critical)  # Set the icon to show it's an error
+            error_dialog.setIcon(QMessageBox.Icon.Critical)  # Set the icon to show it's an error
             error_dialog.setWindowTitle("Errors Detected")
             error_dialog.setText("The following errors were encountered:")
             error_dialog.setInformativeText(error_text)
-            error_dialog.setStandardButtons(QMessageBox.Ok)  # Add a dismiss button
-            error_dialog.exec_()  # Show the message box
+            error_dialog.setStandardButtons(QMessageBox.StandardButton.Ok)  # Add a dismiss button
+            error_dialog.exec()  # Show the message box
+            
+                    # Ensure the parent dialog regains focus
+            self.raise_()
+            self.activateWindow()
 
 class MasterPasswordDialog(CommonDialog):
     """ TBD """
@@ -699,31 +716,6 @@ class MountDeviceDialog(CommonDialog):
 
         self.setLayout(self.main_layout)
 
-    def unmount_device(self, uuid):
-        """Attempt to unmount the partition."""
-        # Here you would implement the unmount logic.
-        errs, container = [], None
-        tray = LuksTray.singleton
-        container = tray.containers.get(uuid, None)
-        tray.update_mounts()
-        if container:
-            for filesystem in container.filesystems:
-                prev_err_cnt = len(errs)
-                for mount in filesystem.mounts:
-                    if tray.is_mounted(mount):
-                        err = rerun_if_busy(["umount", mount], errs)
-                if prev_err_cnt < len(errs):
-                    continue
-                mapped_device = f'/dev/mapper/{filesystem.name}'
-                if os.path.exists(mapped_device) and stat.S_ISBLK(os.stat(mapped_device).st_mode):
-                    if tray.is_mounted(mapped_device):
-                        rerun_if_busy(["umount", mapped_device], errs)
-                    run_cmd(["cryptsetup", "luksClose", filesystem.name], err)
-        if errs:
-            self.alert_errors(errs)
-        tray.update_menu()
-        self.accept()
-
     def mount_device(self, uuid):
         """Attempt to mount the partition."""
         def mount_it(container, password, upon, luks_device):
@@ -770,14 +762,21 @@ class MountDeviceDialog(CommonDialog):
             if key == 'password':
                 if not text:
                     errs.append('ERR: cannot leave password empty')
+
             elif key == 'upon':
                 isabs = os.path.isabs(text)
-                isdir = os.path.isdir(text)
-                length = 0
-                if isabs and isdir:
-                    length = len(os.listdir(text))
-                if not isabs or not isdir or length > 0:
-                    errs.append(f'ERR: mount point ({text}) is not absolute path to empty folder')
+                parent_dir = os.path.dirname(text)
+                parent_exists = os.path.isdir(parent_dir)
+                
+                if not isabs:
+                    errs.append(f'ERR: mount point ({text}) must be absolute path')
+                elif not parent_exists:
+                    errs.append(f'ERR: parent directory ({parent_dir}) does not exist')
+                elif os.path.exists(text):
+                    if not os.path.isdir(text):
+                        errs.append(f'ERR: mount point ({text}) exists but is not a directory')
+                    elif len(os.listdir(text)) > 0:
+                        errs.append(f'ERR: mount point ({text}) exists but is not empty')
                 elif text in mount_points:
                     errs.append(f'ERR: mount point ({text}) occupied')
 
@@ -794,12 +793,15 @@ class MountDeviceDialog(CommonDialog):
             luks_device = container.filesystems[0].name
 
         if len(errs) <= 1:
+                        # Before mounting, ensure the mount point exists
+            if not os.path.exists(values['upon']):
+                os.makedirs(values['upon'], exist_ok=True)
             err = mount_it(container, values['password'], values['upon'], luks_device)
             if err:
                 errs.append(err)
         if len(errs) > 1:
             self.alert_errors(errs)  # FIXME: need to actually do the mount if no errors
-            self.accept()
+            # self.accept() # don't call ... it closes the dialog box
             return
 
         # update history with new values if mount works
@@ -813,6 +815,96 @@ class MountDeviceDialog(CommonDialog):
         tray.update_menu()
         self.accept()
 
+#   def unmount_device(self, uuid):
+#       """Attempt to unmount the partition."""
+#       # Here you would implement the unmount logic.
+#       errs, container = [], None
+#       tray = LuksTray.singleton
+#       container = tray.containers.get(uuid, None)
+#       tray.update_mounts()
+#       if container:
+#           for filesystem in container.filesystems:
+#               prev_err_cnt = len(errs)
+#               for mount in filesystem.mounts:
+#                   if tray.is_mounted(mount):
+#                       err = rerun_if_busy(["umount", mount], errs)
+#               if prev_err_cnt < len(errs):
+#                   continue
+#               mapped_device = f'/dev/mapper/{filesystem.name}'
+#               if os.path.exists(mapped_device) and stat.S_ISBLK(os.stat(mapped_device).st_mode):
+#                   if tray.is_mounted(mapped_device):
+#                       rerun_if_busy(["umount", mapped_device], errs)
+#                   run_cmd(["cryptsetup", "luksClose", filesystem.name], err)
+#       if errs:
+#           self.alert_errors(errs)
+#           return # don't close dialog box
+
+#       tray.update_menu()
+#       self.accept()
+
+    def unmount_device(self, uuid):
+        """Attempt to unmount the partition."""
+        
+        # Show progress - disable buttons and add progress indicator
+        self.show_progress("Unmounting device...")
+        
+        # Force UI update before starting potentially slow operation
+        QApplication.processEvents()
+        
+        # Your existing unmount logic (unchanged)
+        errs, container = [], None
+        tray = LuksTray.singleton
+        container = tray.containers.get(uuid, None)
+        tray.update_mounts()
+        
+        if container:
+            for filesystem in container.filesystems:
+                prev_err_cnt = len(errs)
+                for mount in filesystem.mounts:
+                    if tray.is_mounted(mount):
+                        err = rerun_if_busy(["umount", mount], errs)
+                        if prev_err_cnt < len(errs):
+                            continue
+                mapped_device = f'/dev/mapper/{filesystem.name}'
+                if os.path.exists(mapped_device) and stat.S_ISBLK(os.stat(mapped_device).st_mode):
+                    if tray.is_mounted(mapped_device):
+                        rerun_if_busy(["umount", mapped_device], errs)
+                    run_cmd(["cryptsetup", "luksClose", filesystem.name], errs)
+        
+        # Hide progress indicator
+        self.hide_progress()
+        
+        if errs:
+            self.alert_errors(errs)
+            return # don't close dialog box
+        
+        tray.update_menu()
+        self.accept()
+
+    def show_progress(self, message):
+        """Show progress indicator and disable buttons."""
+        for button in self.findChildren(QPushButton):
+            button.setEnabled(False)
+        
+        if not hasattr(self, 'progress_label'):
+            self.progress_label = QLabel()
+            self.progress_bar = QProgressBar()
+            self.progress_bar.setRange(0, 0)  # Indeterminate
+            self.main_layout.addWidget(self.progress_label)
+            self.main_layout.addWidget(self.progress_bar)
+        
+        self.progress_label.setText(message)
+        self.progress_label.show()
+        self.progress_bar.show()
+
+    def hide_progress(self):
+        """Hide progress indicator and re-enable buttons."""
+        if hasattr(self, 'progress_label'):
+            self.progress_label.hide()
+            self.progress_bar.hide()
+        
+        for button in self.findChildren(QPushButton):
+            button.setEnabled(True)
 #   def hide_partition(self, uuid):
 #       """ Hide the partition """
 #       # FIXME: need body
