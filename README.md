@@ -1,7 +1,71 @@
 > **THIS IS A WORK IN PROGRESS.  BE PATIENT.**
 
-# luks-tray
-System tray applet to help mount/unmount LUKS containers (on Linux)
+# LUKS Tray
+
+A system tray applet for Linux that simplifies mounting and unmounting LUKS-encrypted containers (partitions and files).
+
+## Features
+
+- **System tray integration** - Simple click-to-mount/unmount interface
+- **Visual status indicators** - Clear icons showing mounted (✅), unmounted (🔴), and open-but-unmounted (🟡) states
+- **Password management** - Optional master password to encrypt stored credentials
+- **Auto-unmount** - Configurable automatic unmounting with customizable delays and retries
+- **File container support** - Mount encrypted files as loop devices
+- **Mount point history** - Remembers previous mount locations for convenience
+- **Background monitoring** - Automatically detects newly inserted devices with LUKS containers
+
+## Quick Start
+
+1. Install and run `luks-tray`
+2. Insert a device with LUKS containers or register an encrypted file
+3. Click the tray icon to see available containers
+4. Click a container to mount (🔴) or unmount (✅/🟡)
+5. Enter password and choose mount point in the dialog
+
+## Visual Interface
+
+The tray icon changes color based on container states:
+- 🟢 **Green**: No containers mounted (secure)
+- 🟡 **Yellow**: Some containers mounted (data accessible)
+- 🟡❗ **Yellow with warning**: Containers unmounting or unlocked but not mounted
+
+Menu entries show:
+- **✅ device → /mount/point** - Mounted container (click to unmount)
+- **🔴 device [/mount/point]** - Unmounted container (click to mount)
+- **🟡 device** - Unlocked but not mounted (click to close)
+
+## Limitations
+
+- **Not for whole disk encryption** - Excludes system mount points like `/`, `/home`, `/var` to avoid interfering with boot-time encrypted volumes
+- **No udisks2 integration** - May conflict with desktop auto-mounting tools
+- **Loop device requirement** - File containers require `lsblk` to show them as loop devices (standard on most distros)
+- **Single filesystem focus** - Containers with multiple filesystems are treated as having one filesystem
+
+## Configuration
+
+Settings are stored in `~/.config/luks-tray/`:
+- **History file** - Encrypted storage of passwords and mount preferences (when master password enabled)
+- **Configuration file** - Auto-unmount defaults, hidden mount points, registered file containers
+
+## Security Notes
+
+- Passwords are only stored when master password feature is enabled
+- History file is encrypted using the master password
+- Auto-unmount helps ensure containers don't stay mounted indefinitely
+- System mount points are excluded by default to prevent interference with disk encryption
+
+## Requirements
+
+- Linux with LUKS/cryptsetup support
+- PyQt6
+- Standard utilities: `lsblk`, `cryptsetup`, `mount`, `umount`
+
+---
+
+*This tool is designed for users who regularly work with portable encrypted storage, not as a replacement for full disk encryption management.*
+
+
+# DESIGN/TEST NOTE (THIS SECTION IS TEMPORARY)
 
 ## Immediate TODOs
 - updating the master password to '' should clear it
