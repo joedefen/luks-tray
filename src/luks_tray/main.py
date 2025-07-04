@@ -68,6 +68,9 @@ def rerun_if_busy(args, errs, repeat=3, delay=0.5, input_str=None):
 
 class DeviceInfo:
     """ Class to dig out the info we want from the system."""
+    bans = ('/', '/home', '/var', '/usr', '/tmp', '/opt', '/srv',
+            '/boot', '/sys', '/proc', '/dev', '/run')
+
     def __init__(self, opts):
         self.opts = opts
         self.DB = opts.debug
@@ -147,6 +150,12 @@ class DeviceInfo:
             if entry.type == 'loop':
                 entry.back_file = get_backing_file(entry.name)
             return entry
+        
+        def is_banned(mounts):
+            for mount in mounts:
+                if mount in DeviceInfo.bans:
+                    return True
+            return False
 
                # Run the `lsblk` command and get its output in JSON format with additional columns
         result = subprocess.run(['lsblk', '-J', '-o',
@@ -181,6 +190,8 @@ class DeviceInfo:
                 grandchildren = child.get('children', None)
                 if entry.type == 'crypt':
                     if entry.mounts:
+                        if is_banned(entry.mounts):
+                            continue # skip whole disk entries
                         entry.upon = entry.mounts[0]
                 elif not isinstance(grandchildren, list):
                     entry.opened = False
@@ -194,6 +205,8 @@ class DeviceInfo:
                     # entries[subentry.name] = subentry
                     if len(grandchildren) == 1 and len(subentry.mounts) == 1:
                         entry.upon = subentry.mounts[0]
+                    if is_banned(entry.mounts):
+                        continue # skip whole disk entries
 
         self.entries = dev_cons | file_cons
         if self.DB:
@@ -219,6 +232,7 @@ class DeviceInfo:
 
         return self.entries
 
+
     def get_relative(self, name):
         """ TBD """
         return self.entries.get(name, None)
@@ -226,12 +240,17 @@ class DeviceInfo:
 class LuksTray():
     """ TBD """
     singleton = None
-    svg_info = SimpleNamespace(version='04', subdir='resources/SetD'
-                , bases= [
-                        'white-shield',  # no LUKS partitions
-                        'green-shield',   # all partitions locked
-                        'orange-shield',  # some partitions locked
-                        'yellow-shield',  # no partitions locked (all locked)
+    svg_info = SimpleNamespace(version='04', bases=[
+                            'white-shield',  # no LUKS partitions unlocked
+                            'alert-shield',  # some partitions unlocked but not mounted
+                            'green-shield',   # some partitions unlocked and mounted
+                            # 'orange-shield',  # some partitions locked
+                            # 'yellow-shield',  # no partitions locked (all locked)
+                        ],
+                        nicknames=[
+                            'none',
+                            'alert',
+                            'ok',
                         ] )
 
     def __init__(self, ini_tool, opts):
@@ -245,12 +264,13 @@ class LuksTray():
         self.history = HistoryClass(ini_tool.history_path)
         self.history.restore()
 
-        self.icons, self.svgs = [], []
+        self.icons, self.svgs = {}, {}
 
-        for base in self.svg_info.bases:
-            self.svgs.append(f'{base}-v{self.svg_info.version}.svg')
+        for idx, base in enumerate(self.svg_info.bases):
+            key = self.svg_info.nicknames[idx]
+            self.svgs[key] = f'{base}-v{self.svg_info.version}.svg'
 
-        for resource_filename in self.svgs:
+        for key, resource_filename in self.svgs.items():
             dest_path = os.path.join(ini_tool.folder, resource_filename)
             if not os.path.isfile(dest_path):
                 try:
@@ -267,7 +287,8 @@ class LuksTray():
                 prt(f'WARN: cannot find destination file {repr(dest_path)}')
                 continue
             
-            self.icons.append(QIcon(dest_path))
+            self.icons[key] = QIcon(dest_path)
+        assert len(self.icons) == len(self.svgs)
 
 
         # ??? Load JSON data
@@ -276,7 +297,7 @@ class LuksTray():
         self.mounteds = set()
         self.upons = set()
 
-        self.tray_icon = QSystemTrayIcon(self.icons[0], self.app)
+        self.tray_icon = QSystemTrayIcon(self.icons['none'], self.app)
         self.tray_icon.setToolTip('luks-tray')
         self.tray_icon.setVisible(True)
 
@@ -335,6 +356,7 @@ class LuksTray():
         """Update context menu with LUKS partitions."""
         menu = QMenu()
         mono_font = QFont("Consolas", 10)
+        icon_key = 'none'
 
         if self.history.status == 'locked':
             action = QAction('Click to enter master password', self.app)
@@ -372,6 +394,11 @@ class LuksTray():
                 title = ('✅ ' if mountpoint.startswith('/') else
                             '🟡 ' if container.opened else '⭕ ')
                 title += f' {name} {mountpoint}'
+
+                if mountpoint.startswith('/') and icon_key != 'alert':
+                    icon_key = 'ok'
+                elif container.opened:
+                    icon_key = 'alert'
 
                 # Create the action for the partition
                 action = QAction(title, self.app)
@@ -413,14 +440,15 @@ class LuksTray():
         action.triggered.connect(self.exit_app)
         menu.addAction(action)
 
-        return self.replace_menu_if_different(menu)
+        return self.replace_menu_if_different(menu, icon_key)
 
-    def replace_menu_if_different(self, menu):
+    def replace_menu_if_different(self, menu, icon_key):
         """ TBD """
         def replace_menu():
             was_visible = self.menu and self.menu.isVisible()
             
             self.menu = menu
+            self.tray_icon.setIcon(self.icons[icon_key])
             self.tray_icon.setContextMenu(self.menu)
             self.tray_icon.show()
             
@@ -667,7 +695,8 @@ class MasterPasswordDialog(CommonDialog):
                 tray.history.status = 'clear_text'
         if errs:
             self.alert_errors(errs)
-        self.accept()
+        else:
+            self.accept()
 
 class MountDeviceDialog(CommonDialog):
     """ TBD """
@@ -684,6 +713,15 @@ class MountDeviceDialog(CommonDialog):
             # self.setFixedSize(300, 200)
             self.add_line(f'{container.name}')
             self.add_line(f'Unmount {",".join(mounts)}?')
+            self.add_push_button('OK', self.unmount_device, container.uuid)
+            self.add_push_button('Cancel', self.cancel)
+            self.main_layout.addLayout(self.button_layout)
+
+        elif container.opened:  # unmount dialog
+            self.setWindowTitle('Close Unmounted Device')
+            # self.setFixedSize(300, 200)
+            self.add_line(f'{container.name}')
+            self.add_line(f'Close {",".join(mounts)}?')
             self.add_push_button('OK', self.unmount_device, container.uuid)
             self.add_push_button('Cancel', self.cancel)
             self.main_layout.addLayout(self.button_layout)
@@ -716,145 +754,169 @@ class MountDeviceDialog(CommonDialog):
 
         self.setLayout(self.main_layout)
 
+
     def mount_device(self, uuid):
         """Attempt to mount the partition."""
-        def mount_it(container, password, upon, luks_device):
+        
+        def find_udisks_command():
+            """Find the available udisks command on the system"""
+            import shutil
+            commands = ['udisksctl', 'udisks', 'udisks2']
+            for cmd in commands:
+                if shutil.which(cmd):
+                    return cmd
+            return None
+        def mount_container(container, password, upon=None, luks_device=None):
+            """
+            Mounts a LUKS container.
+            
+            - If `upon` is specified: uses cryptsetup + mount + bindfs.
+            - If `upon` is None: uses cryptsetup to unlock, then udisksctl/udisks to mount.
+            """
             nonlocal tray
             err = None
+
             try:
-                # 1. Unlock the LUKS partition if needed
+                luks_device = luks_device or f'{container.name}-luks'
+                dev_path = f'/dev/{container.name}'
+                
+                # If loop file (e.g. file container), ensure device is attached
+                if hasattr(container, 'back_file') and container.back_file:
+                    if not container.opened:
+                        err = run_cmd(['losetup', '-f', container.back_file])
+                        if err:
+                            return err
+                    dev_path = f'/dev/{container.name}'  # updated to loop device name
+                
+                # ==== Manual mounting path ====
+                if upon:
+                    if not container.opened:
+                        err = run_cmd(['cryptsetup', 'luksOpen', dev_path, luks_device],
+                                      input_str=password)
+                    if not err:
+                        err = run_cmd(['mount', f'/dev/mapper/{luks_device}', upon])
+                    if not err:
+                        err = run_cmd(['bindfs', '-u', str(tray.uid), '-g', str(tray.gid), upon, upon])
+                    return err
+                
+                # ==== Automatic mount path, but cryptsetup unlock first ====
                 if not container.opened:
-                    if not luks_device:
-                        luks_device = f'{uuid}-luks'
-                    dev_path = f'/dev/{container.name}'
                     err = run_cmd(['cryptsetup', 'luksOpen', dev_path, luks_device],
                                   input_str=password)
+                    if err:
+                        return err
 
-                # 2. Mount the unlocked LUKS partition
-                if not err:
-                    err = run_cmd(['mount', f'/dev/mapper/{luks_device}', upon])
+                # Mount with udisksctl (which will mount /dev/mapper/{luks_device})
+                udisks_cmd = find_udisks_command()
+                if not udisks_cmd:
+                    return "Error: No udisks command found. Install udisks2."
 
-                # 3. Run bindfs to make mount point available
-                if not err:
-                    err = run_cmd(['bindfs', '-u',
-                               str(tray.uid), '-g', str(tray.gid), upon, upon])
-                # Return error (or None if success)
+                mapper_path = f'/dev/mapper/{luks_device}'
+                if udisks_cmd == 'udisksctl':
+                    err = run_cmd([udisks_cmd, 'mount', '-b', mapper_path])
+                else:
+                    err = run_cmd([udisks_cmd, '--mount', mapper_path])
+
                 return err
 
             except Exception as e:
                 return f"An error occurred: {str(e)}"
 
+        
         tray, container = LuksTray.singleton, None
         errs, values = [], {}
+        
         if tray:
             container = tray.containers.get(uuid, None)
+        
         if not container:
             errs.append(f'ERR: container w UUID={uuid} not found')
             return
+        
         vital = tray.history.get_vital(uuid)
         errs.append(f'{container.name}')
-
         mount_points = self.get_mount_points()
-
+        
+        # Parse and validate inputs
         for key, field in self.inputs.items():
             text = field.text().strip()
             values[key] = text
+            
             if key == 'password':
                 if not text:
                     errs.append('ERR: cannot leave password empty')
-
             elif key == 'upon':
-                isabs = os.path.isabs(text)
-                parent_dir = os.path.dirname(text)
-                parent_exists = os.path.isdir(parent_dir)
-                
-                if not isabs:
-                    errs.append(f'ERR: mount point ({text}) must be absolute path')
-                elif not parent_exists:
-                    errs.append(f'ERR: parent directory ({parent_dir}) does not exist')
-                elif os.path.exists(text):
-                    if not os.path.isdir(text):
-                        errs.append(f'ERR: mount point ({text}) exists but is not a directory')
-                    elif len(os.listdir(text)) > 0:
-                        errs.append(f'ERR: mount point ({text}) exists but is not empty')
-                elif text in mount_points:
-                    errs.append(f'ERR: mount point ({text}) occupied')
-
+                # Empty mount point is valid (means auto-mount)
+                if text:  # Only validate if not empty
+                    if text.startswith('/media/'):
+                        errs.append('ERR: use empty field for automatic /media mounting')
+                    elif not os.path.isabs(text):
+                        errs.append(f'ERR: mount point ({text}) must be absolute path')
+                    else:
+                        parent_dir = os.path.dirname(text)
+                        parent_exists = os.path.isdir(parent_dir)
+                        if not parent_exists:
+                            errs.append(f'ERR: parent directory ({parent_dir}) does not exist')
+                        elif os.path.exists(text):
+                            if not os.path.isdir(text):
+                                errs.append(f'ERR: mount point ({text}) exists but is not a directory')
+                            elif len(os.listdir(text)) > 0:
+                                errs.append(f'ERR: mount point ({text}) exists but is not empty')
+                        elif text in mount_points:
+                            errs.append(f'ERR: mount point ({text}) occupied')
             elif key in ('delay', 'repeat'):
                 try:
                     values[key] = max(int(text), 0)
                 except Exception:
-                    errs.append(f'ERR: value (text) for {key} must be an integer')
+                    errs.append(f'ERR: value ({text}) for {key} must be an integer')
             else:
                 errs.append(f'ERR: unknown key({key})')
-
+        
+        # Determine LUKS device name
         luks_device = ''
         if len(container.filesystems) == 1:
             luks_device = container.filesystems[0].name
-
+        
+        # Proceed with mounting if no errors
         if len(errs) <= 1:
-                        # Before mounting, ensure the mount point exists
-            if not os.path.exists(values['upon']):
-                os.makedirs(values['upon'], exist_ok=True)
-            err = mount_it(container, values['password'], values['upon'], luks_device)
+            mount_point = values['upon']
+            
+            if mount_point and not os.path.exists(mount_point):
+                os.makedirs(mount_point, exist_ok=True)
+            err = mount_container(container, values['password'], mount_point, luks_device)
+            
             if err:
                 errs.append(err)
+        
         if len(errs) > 1:
-            self.alert_errors(errs)  # FIXME: need to actually do the mount if no errors
-            # self.accept() # don't call ... it closes the dialog box
+            self.alert_errors(errs)
             return
-
-        # update history with new values if mount works
-        vital = tray.history.get_vital(container.uuid)
-        if (values['password'] != vital.password or values['upon'] != vital.upon
+        
+        # Update history ONLY if mount point was explicitly provided (not auto-mount)
+        if values['upon']:  # Only update history for explicit mount points
+            vital = tray.history.get_vital(container.uuid)
+            if (values['password'] != vital.password or values['upon'] != vital.upon
                 or values['delay'] != vital.delay_min or values['repeat'] != vital.repeat_min):
-            vital.password, vital.upon = values['password'], values['upon']
-            vital.delay_min, vital.repeat_min = values['delay'], values['repeat']
-            tray.history.put_vital(vital)
-
+                vital.password, vital.upon = values['password'], values['upon']
+                vital.delay_min, vital.repeat_min = values['delay'], values['repeat']
+                tray.history.put_vital(vital)
+        
         tray.update_menu()
         self.accept()
-
-#   def unmount_device(self, uuid):
-#       """Attempt to unmount the partition."""
-#       # Here you would implement the unmount logic.
-#       errs, container = [], None
-#       tray = LuksTray.singleton
-#       container = tray.containers.get(uuid, None)
-#       tray.update_mounts()
-#       if container:
-#           for filesystem in container.filesystems:
-#               prev_err_cnt = len(errs)
-#               for mount in filesystem.mounts:
-#                   if tray.is_mounted(mount):
-#                       err = rerun_if_busy(["umount", mount], errs)
-#               if prev_err_cnt < len(errs):
-#                   continue
-#               mapped_device = f'/dev/mapper/{filesystem.name}'
-#               if os.path.exists(mapped_device) and stat.S_ISBLK(os.stat(mapped_device).st_mode):
-#                   if tray.is_mounted(mapped_device):
-#                       rerun_if_busy(["umount", mapped_device], errs)
-#                   run_cmd(["cryptsetup", "luksClose", filesystem.name], err)
-#       if errs:
-#           self.alert_errors(errs)
-#           return # don't close dialog box
-
-#       tray.update_menu()
-#       self.accept()
 
     def unmount_device(self, uuid):
         """Attempt to unmount the partition."""
         
-        # Show progress - disable buttons and add progress indicator
-        self.show_progress("Unmounting device...")
-        
-        # Force UI update before starting potentially slow operation
-        QApplication.processEvents()
-        
-        # Your existing unmount logic (unchanged)
         errs, container = [], None
         tray = LuksTray.singleton
         container = tray.containers.get(uuid, None)
+
+        # Show progress - disable buttons and add progress indicator
+        self.show_progress("Unmount/Close device...")
+        
+        # Force UI update before starting potentially slow operation
+        QApplication.processEvents()
+
         tray.update_mounts()
         
         if container:
@@ -995,10 +1057,11 @@ class MountFileDialog(CommonDialog):
 
             if not errs:
                 run_cmd(["cryptsetup", "close", container.name], errs=errs)
+        tray.update_menu()
         if errs:
             self.alert_errors(errs)
-        tray.update_menu()
-        self.accept()
+        else:
+            self.accept()
 
     def mount_file(self, uuid):
         """ TBD """
@@ -1108,7 +1171,7 @@ class MountFileDialog(CommonDialog):
                 errs.append(err)
         if len(errs) > 1:
             self.alert_errors(errs)  # FIXME: need to actually do the mount if no errors
-            self.accept()
+            # self.accept()
             return
 
         # update history with new values if mount works

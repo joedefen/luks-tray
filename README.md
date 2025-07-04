@@ -24,15 +24,15 @@ A system tray applet for Linux that simplifies mounting and unmounting LUKS-encr
 
 ## Visual Interface
 
-The tray icon changes color based on container states:
-- 🟢 **Green**: No containers mounted (secure)
-- 🟡 **Yellow**: Some containers mounted (data accessible)
-- 🟡❗ **Yellow with warning**: Containers unmounting or unlocked but not mounted
+The tray icon shaped like a shield changes based on container states:
+- <img src="src/luks_tray/resources/white-shield-v04.svg" alt="White Shield Icon" width="24" height="24"> - All containers are locked and unmounted (i.e., all data is secure).
+- <img src="src/luks_tray/resources/alert-shield-v04.svg" alt="Alert Shield Icon" width="24" height="24"> - Some containers are unlocked but unmounted (i.e., one or more anomalies).
+- <img src="src/luks_tray/resources/green-shield-v04.svg" alt="Green Shield Icon" width="24" height="24"> - Some containers are mounted w/o any anomalies (i.e., some of the encrypted data is available)
 
 Menu entries show:
-- **✅ device → /mount/point** - Mounted container (click to unmount)
-- **🔴 device [/mount/point]** - Unmounted container (click to mount)
-- **🟡 device** - Unlocked but not mounted (click to close)
+- **✅ device /mount/point** - Mounted container (click to unmount and lock)
+- **🟡 device** - Unlocked but not mounted (click to lock)
+- **🔴 device [/mount/point]** - Unmounted container (click to unlock and mount)
 
 ## Limitations
 
