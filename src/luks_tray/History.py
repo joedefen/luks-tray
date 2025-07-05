@@ -33,8 +33,6 @@ class HistoryClass:
         return SimpleNamespace(
                 uuid=uuid, # can be full path
                 password='',
-                delay_min=60,
-                repeat_min=5,
                 upon='', # "primary" mount only
                 back_file='', # backing file if any
                 when=0,  # last update

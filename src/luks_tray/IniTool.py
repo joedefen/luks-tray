@@ -33,10 +33,9 @@ class IniTool:
             return os.path.expanduser("~")
 
         self.defaults = {
-            'Settings': {
-                'hide_password': 'false',
-                'umount_delay_min': 60,
-                'umount_repeat': 5,
+            'ui': {
+                'show_passwords_by_default': True,
+                'show_anomaly_alerts': True,
             }
         }
         self.folder = os.path.join(get_user_home(), ".config/luks-tray")
@@ -45,7 +44,7 @@ class IniTool:
         self.history_path =  os.path.join(self.folder, "history.json")
         self.config = configparser.ConfigParser()
         self.last_mod_time = None
-        self.section_params = {'Settings': {}, }
+        self.section_params = {'ui': {}, }
         self.params_by_selector = {}
         if not paths_only:
             self.ensure_ini_file()
@@ -54,13 +53,13 @@ class IniTool:
     @staticmethod
     def get_selectors():
         """ Returns the in right "order" """
-        return 'Settings'.split()
+        return 'ui'.split()
 
-    def the_default(self, key, selector='Settings'):
+    def the_default(self, key, selector='ui'):
         """ return the default value given the selector and key """
         return self.defaults[selector][key]
 
-    def get_current_vals(self, key, selector='Settings'):
+    def get_current_val(self, key, selector='ui'):
         """ Expecting a list of two or more non-zero ints """
         if selector in self.params_by_selector and hasattr(self.params_by_selector[selector], key):
             val = getattr(self.params_by_selector[selector], key)
@@ -122,7 +121,7 @@ class IniTool:
         self.config.read(self.ini_path)
         self.last_mod_time = current_mod_time
 
-        goldens = self.defaults['Settings']
+        goldens = self.defaults['ui']
         running = goldens
         all_params = {}
 
@@ -185,6 +184,6 @@ class IniTool:
 
         self.params_by_selector = all_params
 
-        prt('DONE parsing config.ini...')
+        prt(f'DONE parsing config.ini... {all_params=}')
 
         return True # updated

@@ -265,6 +265,7 @@ class LuksTray():
         self.history.restore()
 
         self.icons, self.svgs = {}, {}
+        self.prev_icon_key = ''
 
         for idx, base in enumerate(self.svg_info.bases):
             key = self.svg_info.nicknames[idx]
@@ -323,6 +324,7 @@ class LuksTray():
 
     def update_menu(self):
         """ TBD """
+        self.ini_tool.update_config()
         if self.history.status in ('unlocked', 'clear_text'):
             self.containers = self.lsblk.parse_lsblk()
             self.merge_containers_history()
@@ -359,6 +361,7 @@ class LuksTray():
         menu = QMenu()
         mono_font = QFont("Consolas", 10)
         icon_key = 'none'
+        do_alerts = self.ini_tool.get_current_val('show_anomaly_alerts')
 
         if self.history.status == 'locked':
             action = QAction('Click to enter master password', self.app)
@@ -369,6 +372,9 @@ class LuksTray():
             idx = -1 # so idx can be used after loop
             for idx, container in enumerate(self.containers.values()):
                 mountpoint = container.upon
+                if not container.opened:
+                    mountpoint = f'[{container.upon}]'
+
 
                 if idx > 0 and not separated and container.type == 'crypt':
                     menu.addSeparator()
@@ -386,12 +392,6 @@ class LuksTray():
                 title = ('✅ ' if mountpoint.startswith('/') else
                             '‼️ ' if container.opened else '🔳 ')
 
-                if mountpoint.startswith('/') and icon_key != 'alert':
-                    icon_key = 'ok'
-                elif container.opened:
-                    icon_key = 'alert'
-
-
                 if title.startswith('‼️'):
                     title += f' {name} CLICK-to-LOCK'
                 else:
@@ -400,7 +400,7 @@ class LuksTray():
 
                 if mountpoint.startswith('/') and icon_key != 'alert':
                     icon_key = 'ok'
-                elif container.opened:
+                elif container.opened and do_alerts:
                     icon_key = 'alert'
 
                 # Create the action for the partition
@@ -472,6 +472,10 @@ class LuksTray():
 
         if not self.menu: # or menu.actions() != self.menu.actions():
             return replace_menu()
+        if self.prev_icon_key != icon_key:
+            self.prev_icon_key = icon_key
+            return replace_menu()
+
         if len(menu.actions()) != len(self.menu.actions()):
             return replace_menu()
         for new_action, old_action in zip(menu.actions(), self.menu.actions()):
@@ -521,10 +525,8 @@ class LuksTray():
         if not hasattr(vital, 'when'):
             vital.when = 0
         if (values['password'] != vital.password or mount_point != vital.upon
-                or values['delay'] != vital.delay_min or values['repeat'] != vital.repeat_min
                 or time.time() - 24*3600 >= vital.when):
             vital.password = values['password']
-            vital.delay_min, vital.repeat_min = values['delay'], values['repeat']
             self.history.put_vital(vital)
             if mount_point:
                 vital.upon = mount_point
@@ -558,6 +560,7 @@ class CommonDialog(QDialog):
     def add_input_field(self, keys, label_texts, placeholder_texts, char_width=5,
                        field_type='text', add_on=''):
         """ Adds a label and a line edit input to the main layout. """
+        tray = LuksTray.singleton
         field_layout = QHBoxLayout() # Create a horizontal layout for the label and input field
 
         if not isinstance(keys, list):
@@ -597,8 +600,11 @@ class CommonDialog(QDialog):
                 assert False, f'invalid field_type{field_type}'
 
             if add_on == 'password':
-                input_field.setEchoMode(QLineEdit.EchoMode.Normal)
-                # input_field.setEchoMode(QLineEdit.EchoMode.Password)  # hide password
+                val = tray.ini_tool.get_current_val('show_passwords_by_default')
+                if val:
+                    input_field.setEchoMode(QLineEdit.EchoMode.Normal)
+                else:
+                    input_field.setEchoMode(QLineEdit.EchoMode.Password)
                 self.password_input = input_field
                 # self.password_toggle = QPushButton("👁️")
                 self.password_toggle = QPushButton("●")
@@ -1033,14 +1039,6 @@ class MountDeviceDialog(CommonDialog):
             self.add_input_field('password', "Enter Password", f'{vital.password}',
                                 24, add_on='password')
             self.add_input_field('upon', "Mount At", f'{vital.upon}', 36, add_on='folder')
-            # self.add_input_field('delay', "Auto-Unmount Delay (min)", f'{vital.delay_min}', 5)
-            # self.add_input_field('repeat', "Auto-Unmount Repeat (min)", f'{vital.repeat_min}', 5)
-            keys = ['delay', 'repeat']
-            labels = ['Auto-Umount (minutes):  Delay', 'Repeat']
-            defaults = [f'{vital.delay_min}', f'{vital.repeat_min}']
-            self.add_input_field(keys, labels, defaults, 5)
-#           if container.fstype:
-#               self.add_line(f'Filesystem: {container.fstype}')
             if container.label:
                 self.add_line(f'Label: {container.label}')
             if container.size_str:
@@ -1083,11 +1081,6 @@ class MountDeviceDialog(CommonDialog):
                 err = self.check_upon(text, mount_points)
                 if err:
                     errs.append(err)
-            elif key in ('delay', 'repeat'):
-                try:
-                    values[key] = max(int(text), 0)
-                except Exception:
-                    errs.append(f'ERR: value ({text}) for {key} must be an integer')
             else:
                 errs.append(f'ERR: unknown key({key})')
 
@@ -1186,16 +1179,6 @@ class MountFileDialog(CommonDialog):
             self.add_input_field('password', "Enter Password", f'{vital.password}',
                                 24, add_on='password')
             self.add_input_field('upon', "Mount At", f'{vital.upon}', 36, add_on='folder')
-            # self.add_input_field('delay', "Auto-Unmount Delay (min)", f'{vital.delay_min}', 5)
-            # self.add_input_field('repeat', "Auto-Unmount Repeat (min)", f'{vital.repeat_min}', 5)
-            keys = ['delay', 'repeat']
-            labels = ['Auto-Umount (minutes):  Delay', 'Repeat']
-            defaults = [f'{vital.delay_min}', f'{vital.repeat_min}']
-            self.add_input_field(keys, labels, defaults, 5)
-#           if container.fstype:
-#               self.add_line(f'Filesystem: {container.fstype}')
-#           if container.label:
-#               self.add_line(f'Label: {container.label}')
             if container.size_str:
                 self.add_line(f'Size: {container.size_str}')
             if container.uuid:
@@ -1214,8 +1197,6 @@ class MountFileDialog(CommonDialog):
                                 24, add_on='password')
             self.add_input_field('back_file', "Crypt File", '', 48, add_on='file')
             self.add_input_field('upon', "Mount At", '', 36, add_on='folder')
-            self.add_input_field('delay', "Auto-Unmount Delay (min)", '60', 5)
-            self.add_input_field('repeat', "Auto-Unmount Repeat (min)", '5', 5)
 
             self.add_push_button('OK', self.mount_file, None)
             self.add_push_button('Cancel', self.cancel)
@@ -1224,8 +1205,6 @@ class MountFileDialog(CommonDialog):
 
         else: # no container ... create crypt file
             self.setWindowTitle('Create New Crypt File')
-            # vital = tray.history.get_vital(container.uuid)
-            # self.add_line(f'{container.back_file}')
             self.add_input_field('password', "Enter Password", '',
                                 24, add_on='password')
             self.add_input_field('size_str', "Size (MiB)", '32', 8)
@@ -1233,8 +1212,6 @@ class MountFileDialog(CommonDialog):
             self.add_input_field('overwrite_ok', "Enable Overwrite of Existing File",
                                  '', 48, field_type='checkbox')
             self.add_input_field('upon', "Mount At", '', 36, add_on='folder')
-            self.add_input_field('delay', "Auto-Unmount Delay (min)", '60', 5)
-            self.add_input_field('repeat', "Auto-Unmount Repeat (min)", '5', 5)
 
             self.add_push_button('OK', self.mount_file, None)
             self.add_push_button('Cancel', self.cancel)
@@ -1308,17 +1285,6 @@ class MountFileDialog(CommonDialog):
                 if err:
                     errs.append(err)
 
-            elif key in ('delay', 'repeat', 'size_str'):
-                try:
-                    int_val = max(int(text), 0)
-                    if key in ('size_str', ):
-                        string = f'{int_val}M'
-                        values[key] = string
-                    else:
-                        values[key] = int_val
-                    continue
-                except Exception:
-                    errs.append(f'ERR: value (text) for {key} must be an integer')
             elif key == 'back_file':
                 path = os.path.abspath(text)
                 values[key] = path
