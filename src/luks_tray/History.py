@@ -5,7 +5,7 @@
 
 
 import os
-# import sys
+import time
 import json
 import subprocess
 from types import SimpleNamespace
@@ -37,6 +37,7 @@ class HistoryClass:
                 repeat_min=5,
                 upon='', # "primary" mount only
                 back_file='', # backing file if any
+                when=0,  # last update
             )
 
     def _has_file_changed(self):
@@ -66,6 +67,7 @@ class HistoryClass:
     def put_vital(self, vital):
         """ Put vitals """
         self.vitals[vital.uuid] = vital
+        vital.when = time.time()
         self.dirty = True
         return self.save()
 

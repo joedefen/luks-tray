@@ -24,7 +24,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
-from PyQt6.QtWidgets import QFileDialog
+from PyQt6.QtWidgets import QFileDialog, QCheckBox
 from PyQt6.QtWidgets import QProgressBar
 from PyQt6.QtGui import QIcon, QCursor, QAction, QFont
 from PyQt6.QtCore import QTimer, Qt
@@ -521,6 +521,21 @@ class LuksTray():
         """ Prompt for master passdword"""
         dialog = MasterPasswordDialog()
         dialog.exec()
+        
+    def update_history(self, uuid, values):
+        """ TBD """
+        vital = self.history.get_vital(uuid)
+        mount_point = values['upon']
+        if not hasattr(vital, 'when'):
+            vital.when = 0
+        if (values['password'] != vital.password or mount_point != vital.upon
+                or values['delay'] != vital.delay_min or values['repeat'] != vital.repeat_min
+                or time.time() - 24*3600 >= vital.when):
+            vital.password = values['password']
+            vital.delay_min, vital.repeat_min = values['delay'], values['repeat']
+            self.history.put_vital(vital)
+            if mount_point:
+                vital.upon = mount_point
 
 class CommonDialog(QDialog):
     """ TBD """
@@ -549,7 +564,7 @@ class CommonDialog(QDialog):
         self.button_layout.addWidget(button)
 
     def add_input_field(self, keys, label_texts, placeholder_texts, char_width=5,
-                       is_password=False, is_folder=False, is_file=False, is_new_file=False):
+                       field_type='text', add_on=''):
         """ Adds a label and a line edit input to the main layout. """
         field_layout = QHBoxLayout() # Create a horizontal layout for the label and input field
 
@@ -569,17 +584,27 @@ class CommonDialog(QDialog):
             placeholder_text = placeholder_texts[idx]
 
             label = QLabel(label_text) # Create a QLabel for the label text
-            input_field = QLineEdit()
-            input_field.setText(placeholder_text.strip())
-
-            char_width = max(len(placeholder_text), char_width)
             # Set the width of the input field based on character width
             # Approximation: assuming an average of 8 pixels per character for a monospace font
              # You can adjust this factor based on the font
-            input_field.setFixedWidth(char_width * 10)
-            field_layout.addWidget(label)
-            field_layout.addWidget(input_field)
-            if is_password:
+            if field_type == 'checkbox':
+                input_field = QCheckBox()
+                # For checkbox, use placeholder_text as the checkbox label instead of separate label
+                input_field.setText(label_text)
+                input_field.setChecked(False)  # Default unchecked
+                field_layout.addWidget(input_field)
+
+            elif field_type == 'text':
+                input_field = QLineEdit()
+                input_field.setText(placeholder_text.strip())
+                char_width = max(len(placeholder_text), char_width)
+                input_field.setFixedWidth(char_width * 10)
+                field_layout.addWidget(label)
+                field_layout.addWidget(input_field)
+            else:
+                assert False, f'invalid field_type{field_type}'
+
+            if add_on == 'password':
                 input_field.setEchoMode(QLineEdit.EchoMode.Normal)
                 # input_field.setEchoMode(QLineEdit.EchoMode.Password)  # hide password
                 self.password_input = input_field
@@ -591,19 +616,19 @@ class CommonDialog(QDialog):
                 self.password_toggle.clicked.connect(self.toggle_password_visibility)
                 field_layout.addWidget(self.password_toggle)
 
-            if is_folder: # Create a Browse button
+            if add_on == 'folder': # Create a Browse button
                 button = QPushButton("Browse...", self)
                 button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Prevent the button from gaining focus
                 button.clicked.connect(partial(self.browse_folder, input_field))
                 field_layout.addWidget(button)
 
-            if is_file: # Create a Browse button
+            if add_on == 'file': # Create a Browse button for existing file
                 button = QPushButton("Browse...", self)
                 button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Prevent the button from gaining focus
                 button.clicked.connect(partial(self.browse_file, input_field))
                 field_layout.addWidget(button)
 
-            if is_new_file: # Create a Browse button
+            if add_on == 'new_file': # Create a Browse button for new file
                 button = QPushButton("Browse...", self)
                 button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Prevent the button from gaining focus
                 button.clicked.connect(partial(self.browse_new_file, input_field))
@@ -736,6 +761,31 @@ class CommonDialog(QDialog):
             if shutil.which(cmd):
                 return cmd
         return None
+
+    @staticmethod
+    def check_upon(text, mount_points):
+        """ Validate candidate mount point.
+            Returns error (or None if no error)
+        """
+        # Empty mount point is valid (means auto-mount)
+        if text:  # Only validate if not empty
+            if text.startswith('/media/'):
+                return 'ERR: use empty field for automatic /media mounting'
+            if not os.path.isabs(text):
+                return f'ERR: mount point ({text}) must be absolute path'
+            parent_dir = os.path.dirname(text)
+            parent_exists = os.path.isdir(parent_dir)
+            if not parent_exists:
+                return f'ERR: parent directory ({parent_dir}) does not exist'
+            if os.path.exists(text):
+                if not os.path.isdir(text):
+                    return f'ERR: mount point ({text}) exists but is not a directory'
+                if len(os.listdir(text)) > 0:
+                    return f'ERR: mount point ({text}) exists but is not empty'
+            if text in mount_points:
+                return f'ERR: mount point ({text}) occupied'
+        return None
+
     ####################################################
     # LUKS Primitives
     ####################################################
@@ -751,7 +801,7 @@ class CommonDialog(QDialog):
         udisks_cmd = self.find_udisks_command()
         if not udisks_cmd:
             return "Error: No udisks command found. Install udisks2."
-        
+
         if udisks_cmd == 'udisksctl':
             # Unlock first with --no-user-interaction to force stdin usage
             err = run_cmd([udisks_cmd, 'unlock', '-b', device_path, '--no-user-interaction'],
@@ -770,7 +820,7 @@ class CommonDialog(QDialog):
         udisks_cmd = self.find_udisks_command()
         if not udisks_cmd:
             return "Error: No udisks command found. Install udisks2."
-        
+
         # Just mount the already-unlocked mapper device
         if udisks_cmd == 'udisksctl':
             return run_cmd([udisks_cmd, 'mount', '-b', mapper_path])
@@ -796,7 +846,7 @@ class CommonDialog(QDialog):
 #   def _mount_manual(self, tray, mapper_path, upon):
 #       """Mount using udisks2 as the original user"""
 #       # Run udisks2 as the original user, not root
-#       cmd = ['sudo', '-u', f'#{tray.uid}', 'udisksctl', 'mount', 
+#       cmd = ['sudo', '-u', f'#{tray.uid}', 'udisksctl', 'mount',
 #              '-b', mapper_path, '--mountpoint', upon]
 #       err = run_cmd(cmd)
 #       return err
@@ -804,7 +854,7 @@ class CommonDialog(QDialog):
 #   def _mount_manual(self, tray, mapper_path, upon):
 #       """Regular mount with ownership options"""
 #       # Try mount options that work with the filesystem type
-#       err = run_cmd(['mount', '-o', f'uid={tray.uid},gid={tray.gid}', 
+#       err = run_cmd(['mount', '-o', f'uid={tray.uid},gid={tray.gid}',
 #                      mapper_path, upon])
 #       return err
 
@@ -812,16 +862,16 @@ class CommonDialog(QDialog):
         """Set up loop device for file-based containers"""
         if hasattr(self, 'opened') and self.opened:
             return None, f'/dev/{container.name}'
-        
+
         # Use --show to get the loop device name
         result = run_cmd(['losetup', '-f', '--show', container.back_file])
         if result.startswith('FAIL:'):
             return result, None
-        
+
         loop_device = result.strip()
         # Update container.name to match the loop device (e.g., 'loop0')
         container.name = os.path.basename(loop_device)
-        
+
         return None, loop_device
 
     ####################################################
@@ -831,7 +881,7 @@ class CommonDialog(QDialog):
                             luks_file=None, size=None):
         """
         Unified function to mount any LUKS container (device or file).
-        
+
         Args:
             container: Container object
             password: LUKS password
@@ -843,80 +893,77 @@ class CommonDialog(QDialog):
         try:
             # Determine if this is a file or device container
             is_file_container = luks_file is not None
-            
+
             if is_file_container:
                 # Handle file container setup
                 needs_filesystem = False
                 luks_device = os.path.basename(luks_file) + '-luks'
                 device_path = luks_file
-                
+
                 # Create file if needed
-                if not os.path.exists(luks_file):
-                    if size is None:
-                        return f"ERR: File {luks_file!r} does not exist and size is not specified."
-                    
+                if size is not None:
                     err = run_cmd(['truncate', '-s', f'{size}', luks_file])
                     if not err:
-                        err = run_cmd(['cryptsetup', 'luksFormat', '-q', '--batch-mode', luks_file], 
+                        err = run_cmd(['cryptsetup', 'luksFormat', '-q', '--batch-mode', luks_file],
                                      input_str=password)
                     if err:
                         return err
                     needs_filesystem = True
-                
+
                 # For file containers, we need to set up a loop device for udisks2
                 if not upon:  # Auto-mounting case
                     # Use losetup with --show to get the loop device name directly
-                    sub = subprocess.run(['losetup', '-f', '--show', luks_file], 
+                    sub = subprocess.run(['losetup', '-f', '--show', luks_file],
                                        capture_output=True, text=True, check=False)
                     if sub.returncode != 0:
                         return f'FAIL: losetup -f --show {luks_file}: {sub.stderr.strip()}'
-                    
+
                     device_path = sub.stdout.strip()  # This will be something like /dev/loop0
             else:
                 # Handle device container setup
                 luks_device = luks_device or f'{container.name}-luks'
                 device_path = f'/dev/{container.name}'
                 needs_filesystem = False
-                
+
                 # Setup loop device if needed
                 if hasattr(container, 'back_file') and container.back_file:
                     err, device_path = self._setup_loop_device(container)
                     if err:
                         return err
-            
+
             # Choose mounting strategy
             if upon:
                 # Manual mounting: unlock with cryptsetup, then mount manually
                 err = self._unlock_luks(device_path, password, luks_device)
                 if err:
                     return err
-                
+
                 mapper_path = f'/dev/mapper/{luks_device}'
-                
+
                 # Create filesystem if needed (for new files)
                 if needs_filesystem:
                     err = run_cmd(['mkfs.ext4', mapper_path])
                     if err:
                         return err
-                
+
                 return self._mount_manual(tray, mapper_path, upon)
             else:
                 # Auto-mounting: use hybrid approach (cryptsetup unlock + udisks2 mount)
                 err = self._unlock_luks(device_path, password, luks_device)
                 if err:
                     return err
-                
+
                 mapper_path = f'/dev/mapper/{luks_device}'
-                
+
                 # Create filesystem if needed (for new files)
                 if needs_filesystem:
                     err = run_cmd(['mkfs.ext4', mapper_path])
                     if err:
                         return err
-                
+
                 # Use udisks2 just for mounting (no unlock needed)
                 return self._mount_with_udisks_mapper(mapper_path)
-                
+
         except Exception as e:
             return f"An error occurred: {str(e)}"
 
@@ -925,7 +972,7 @@ class MasterPasswordDialog(CommonDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Master Password Dialog')
-        self.add_input_field('password', "Master Password", '', 24, is_password=True)
+        self.add_input_field('password', "Master Password", '', 24, add_on='password')
         self.add_push_button('OK', self.set_master_password)
         self.add_push_button('Cancel', self.cancel)
         self.main_layout.addLayout(self.button_layout)
@@ -992,8 +1039,8 @@ class MountDeviceDialog(CommonDialog):
             vital = tray.history.get_vital(container.uuid)
             self.add_line(f'{container.name}')
             self.add_input_field('password', "Enter Password", f'{vital.password}',
-                                24, is_password=True)
-            self.add_input_field('upon', "Mount At", f'{vital.upon}', 36, is_folder=True)
+                                24, add_on='password')
+            self.add_input_field('upon', "Mount At", f'{vital.upon}', 36, add_on='folder')
             # self.add_input_field('delay', "Auto-Unmount Delay (min)", f'{vital.delay_min}', 5)
             # self.add_input_field('repeat', "Auto-Unmount Repeat (min)", f'{vital.repeat_min}', 5)
             keys = ['delay', 'repeat']
@@ -1029,7 +1076,6 @@ class MountDeviceDialog(CommonDialog):
             errs.append(f'ERR: container w UUID={uuid} not found')
             return
 
-        vital = tray.history.get_vital(uuid)
         errs.append(f'{container.name}')
         mount_points = self.get_mount_points()
 
@@ -1042,24 +1088,9 @@ class MountDeviceDialog(CommonDialog):
                 if not text:
                     errs.append('ERR: cannot leave password empty')
             elif key == 'upon':
-                # Empty mount point is valid (means auto-mount)
-                if text:  # Only validate if not empty
-                    if text.startswith('/media/'):
-                        errs.append('ERR: use empty field for automatic /media mounting')
-                    elif not os.path.isabs(text):
-                        errs.append(f'ERR: mount point ({text}) must be absolute path')
-                    else:
-                        parent_dir = os.path.dirname(text)
-                        parent_exists = os.path.isdir(parent_dir)
-                        if not parent_exists:
-                            errs.append(f'ERR: parent directory ({parent_dir}) does not exist')
-                        elif os.path.exists(text):
-                            if not os.path.isdir(text):
-                                errs.append(f'ERR: mount point ({text}) exists but is not a directory')
-                            elif len(os.listdir(text)) > 0:
-                                errs.append(f'ERR: mount point ({text}) exists but is not empty')
-                        elif text in mount_points:
-                            errs.append(f'ERR: mount point ({text}) occupied')
+                err = self.check_upon(text, mount_points)
+                if err:
+                    errs.append(err)
             elif key in ('delay', 'repeat'):
                 try:
                     values[key] = max(int(text), 0)
@@ -1076,9 +1107,9 @@ class MountDeviceDialog(CommonDialog):
         # Proceed with mounting if no errors
         if len(errs) <= 1:
             mount_point = values['upon']
-
             if mount_point and not os.path.exists(mount_point):
                 os.makedirs(mount_point, exist_ok=True)
+
             self.show_progress('Mount device...')
             err = self.mount_luks_container(tray, container, values['password'],
                             upon=mount_point, luks_device=luks_device)
@@ -1091,14 +1122,7 @@ class MountDeviceDialog(CommonDialog):
             self.alert_errors(errs)
             return
 
-        # Update history ONLY if mount point was explicitly provided (not auto-mount)
-        if values['upon']:  # Only update history for explicit mount points
-            vital = tray.history.get_vital(container.uuid)
-            if (values['password'] != vital.password or values['upon'] != vital.upon
-                or values['delay'] != vital.delay_min or values['repeat'] != vital.repeat_min):
-                vital.password, vital.upon = values['password'], values['upon']
-                vital.delay_min, vital.repeat_min = values['delay'], values['repeat']
-                tray.history.put_vital(vital)
+        tray.update_history(uuid, values)
 
         tray.update_menu()
         self.accept()
@@ -1168,8 +1192,8 @@ class MountFileDialog(CommonDialog):
             vital = tray.history.get_vital(container.uuid)
             self.add_line(f'{container.back_file}')
             self.add_input_field('password', "Enter Password", f'{vital.password}',
-                                24, is_password=True)
-            self.add_input_field('upon', "Mount At", f'{vital.upon}', 36, is_folder=True)
+                                24, add_on='password')
+            self.add_input_field('upon', "Mount At", f'{vital.upon}', 36, add_on='folder')
             # self.add_input_field('delay', "Auto-Unmount Delay (min)", f'{vital.delay_min}', 5)
             # self.add_input_field('repeat', "Auto-Unmount Repeat (min)", f'{vital.repeat_min}', 5)
             keys = ['delay', 'repeat']
@@ -1195,9 +1219,9 @@ class MountFileDialog(CommonDialog):
             # vital = tray.history.get_vital(container.uuid)
             # self.add_line(f'{container.back_file}')
             self.add_input_field('password', "Enter Password", '',
-                                24, is_password=True)
-            self.add_input_field('back_file', "Crypt File", '', 48, is_file=True)
-            self.add_input_field('upon', "Mount At", '', 36, is_folder=True)
+                                24, add_on='password')
+            self.add_input_field('back_file', "Crypt File", '', 48, add_on='file')
+            self.add_input_field('upon', "Mount At", '', 36, add_on='folder')
             self.add_input_field('delay', "Auto-Unmount Delay (min)", '60', 5)
             self.add_input_field('repeat', "Auto-Unmount Repeat (min)", '5', 5)
 
@@ -1211,10 +1235,12 @@ class MountFileDialog(CommonDialog):
             # vital = tray.history.get_vital(container.uuid)
             # self.add_line(f'{container.back_file}')
             self.add_input_field('password', "Enter Password", '',
-                                24, is_password=True)
+                                24, add_on='password')
             self.add_input_field('size_str', "Size (MiB)", '32', 8)
-            self.add_input_field('back_file', "Crypt File", '', 48, is_new_file=True)
-            self.add_input_field('upon', "Mount At", '', 36, is_folder=True)
+            self.add_input_field('back_file', "Crypt File", '', 48, add_on='new_file')
+            self.add_input_field('overwrite_ok', "Enable Overwrite of Existing File",
+                                 '', 48, field_type='checkbox')
+            self.add_input_field('upon', "Mount At", '', 36, add_on='folder')
             self.add_input_field('delay', "Auto-Unmount Delay (min)", '60', 5)
             self.add_input_field('repeat', "Auto-Unmount Repeat (min)", '5', 5)
 
@@ -1232,15 +1258,18 @@ class MountFileDialog(CommonDialog):
         tray = LuksTray.singleton
         container = tray.containers.get(uuid, None)
         self.show_progress('Unmount/Close crypt file...')
-        tray.update_mounts()
         if container:
-            for mount in container.mounts:
-                if tray.is_mounted(mount):
-                    rerun_if_busy(["umount", mount], errs=errs)
+            for _ in range(2):
+                # it may take two dismounts, one for the regular mount, and
+                # one for the bindfs mount
+                tray.update_mounts()
+                for mount in container.mounts:
+                    if tray.is_mounted(mount):
+                        rerun_if_busy(["umount", mount], errs=errs)
 
             if not errs:
                 run_cmd(["cryptsetup", "luksClose", container.name], errs=errs)
-                            # If this is a file container with a loop device, detach it
+                    # If this is a file container with a loop device, detach it
             if not errs and container.back_file:
                 run_cmd(["losetup", "-d", f"/dev/{container.name}"], errs=errs)
 
@@ -1267,29 +1296,25 @@ class MountFileDialog(CommonDialog):
             if not container:
                 errs.append(f'ERR: container w UUID={uuid} not found')
                 return
-        vital = tray.history.get_vital(uuid)
         errs.append(f'{container.name}')
 
         mount_points = self.get_mount_points()
 
         for key, field in self.inputs.items():
+            if isinstance(field, QCheckBox):
+                values[key] = field.isChecked()
+                continue
+
+            # Assume text fields..
             text = field.text().strip()
             values[key] = text
             if key == 'password':
                 if not text:
                     errs.append('ERR: cannot leave password empty')
             elif key == 'upon':
-                # empty is OK ... auto-mount
-                if len(text):
-                    isabs = os.path.isabs(text)
-                    isdir = os.path.isdir(text)
-                    length = 0
-                    if isabs and isdir:
-                        length = len(os.listdir(text))
-                    if not isabs or not isdir or length > 0:
-                        errs.append(f'ERR: mount point ({text}) is not absolute path to empty folder')
-                    if text in mount_points:
-                        errs.append(f'ERR: mount point ({text}) occupied')
+                err = self.check_upon(text, mount_points)
+                if err:
+                    errs.append(err)
 
             elif key in ('delay', 'repeat', 'size_str'):
                 try:
@@ -1316,10 +1341,21 @@ class MountFileDialog(CommonDialog):
                 back_file = container.back_file
             else:
                 back_file = values['back_file']
+                
+            if 'overwrite_ok' in values:
+                overwrite_ok = values['overwrite_ok']
+                if os.path.exists(back_file) and not overwrite_ok:
+                    errs.append('cannot overwrite {back_file!r} w/o checking allowed')
+
+        if len(errs) <= 1:
             self.show_progress('Mount file...')
+            mount_point = values['upon']
+            if mount_point and not os.path.exists(mount_point):
+                os.makedirs(mount_point, exist_ok=True)
             err = self.mount_luks_container(tray, container, values['password'],
-                    values['upon'], luks_file=back_file, size=values.get('size_str', None))
+                    mount_point, luks_file=back_file, size=values.get('size_str', None))
             self.hide_progress()
+
             if err:
                 errs.append(err)
         if len(errs) > 1:
@@ -1327,13 +1363,8 @@ class MountFileDialog(CommonDialog):
             # self.accept()
             return
 
-        # update history with new values if mount works
-        vital = tray.history.get_vital(container.uuid)
-        if (values['password'] != vital.password or values['upon'] != vital.upon
-                or values['delay'] != vital.delay_min or values['repeat'] != vital.repeat_min):
-            vital.password, vital.upon = values['password'], values['upon']
-            vital.delay_min, vital.repeat_min = values['delay'], values['repeat']
-            tray.history.put_vital(vital)
+        # update history with new values if mount worked
+        tray.update_history(uuid, values)
 
         tray.update_menu()
         self.accept()

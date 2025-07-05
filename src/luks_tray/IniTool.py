@@ -35,6 +35,9 @@ class IniTool:
         self.defaults = {
             'Settings': {
                 'gui_editor': 'geany',
+                'hide_password': 'false',
+                'umount_delay_min': 60,
+                'umount_repeat': 5,
             #   'dim_pct_brightness': 100,
             #   'dim_pct_lock_min': 100,
             }
