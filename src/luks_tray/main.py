@@ -332,8 +332,10 @@ class LuksTray():
                 ns = DeviceInfo.make_partition_namespace('', '')
                 ns.type = 'crypt'
                 ns.back_file = vital.back_file
+                ns.upon = vital.upon
                 ns.opened = False
-                self.containers[ns.uuid] = ns
+                ns.uuid = vital.uuid
+                self.containers[vital.uuid] = ns
 
         self.update_menu_items()
 
@@ -366,17 +368,7 @@ class LuksTray():
             separated = False
             idx = -1 # so idx can be used after loop
             for idx, container in enumerate(self.containers.values()):
-                mountpoint = ''
-                if container.opened:
-#                   if len(container.filesystems) >= 1:
-#                       mounts = container.filesystems[0].mounts
-#                       if mounts:
-#                           mountpoint = mounts[0]
-                    mountpoint = container.upon
-                else:
-                    vital = self.history.get_vital(container.uuid)
-                    if vital.upon:
-                        mountpoint = f'[{vital.upon}]'
+                mountpoint = container.upon
 
                 if idx > 0 and not separated and container.type == 'crypt':
                     menu.addSeparator()

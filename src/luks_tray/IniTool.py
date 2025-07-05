@@ -34,12 +34,9 @@ class IniTool:
 
         self.defaults = {
             'Settings': {
-                'gui_editor': 'geany',
                 'hide_password': 'false',
                 'umount_delay_min': 60,
                 'umount_repeat': 5,
-            #   'dim_pct_brightness': 100,
-            #   'dim_pct_lock_min': 100,
             }
         }
         self.folder = os.path.join(get_user_home(), ".config/luks-tray")
@@ -57,28 +54,35 @@ class IniTool:
     @staticmethod
     def get_selectors():
         """ Returns the in right "order" """
-        return 'Settings HiBattery LoBattery'.split()
+        return 'Settings'.split()
 
-    def the_default(self, selector, key):
+    def the_default(self, key, selector='Settings'):
         """ return the default value given the selector and key """
         return self.defaults[selector][key]
 
-    def get_current_vals(self, selector, list_name):
+    def get_current_vals(self, key, selector='Settings'):
         """ Expecting a list of two or more non-zero ints """
-        if selector in self.params_by_selector and hasattr(self.params_by_selector[selector], list_name):
-            vals = getattr(self.params_by_selector[selector], list_name)
-            if isinstance(vals, list) and len(vals) >= 2:
-                return vals
-        return self.the_default(selector, list_name) # should not get here
+        if selector in self.params_by_selector and hasattr(self.params_by_selector[selector], key):
+            val = getattr(self.params_by_selector[selector], key)
+            return val
+        return self.the_default(key, selector) # should not get here
 
-    def get_rotated_vals(self, selector, list_name, first):
-        """ TBD """
-        vals = self.get_current_vals(selector, list_name)
-        if first in vals:
-            while vals[0] != first:
-                vals = vals[1:] + vals[:1]
-            setattr(self.params_by_selector[selector], list_name, vals)
-        return vals
+#   def get_current_vals(self, selector, list_name):
+#       """ Expecting a list of two or more non-zero ints """
+#       if selector in self.params_by_selector and hasattr(self.params_by_selector[selector], list_name):
+#           vals = getattr(self.params_by_selector[selector], list_name)
+#           if isinstance(vals, list) and len(vals) >= 2:
+#               return vals
+#       return self.the_default(selector, list_name) # should not get here
+
+#   def get_rotated_vals(self, selector, list_name, first):
+#       """ TBD """
+#       vals = self.get_current_vals(selector, list_name)
+#       if first in vals:
+#           while vals[0] != first:
+#               vals = vals[1:] + vals[:1]
+#           setattr(self.params_by_selector[selector], list_name, vals)
+#       return vals
 
     def ensure_ini_file(self):
         """Check if the config file exists, create it if not."""
