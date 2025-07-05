@@ -150,7 +150,7 @@ class DeviceInfo:
             if entry.type == 'loop':
                 entry.back_file = get_backing_file(entry.name)
             return entry
-        
+
         def is_banned(mounts):
             for mount in mounts:
                 if mount in DeviceInfo.bans:
@@ -282,11 +282,11 @@ class LuksTray():
                 except (FileNotFoundError, AttributeError):
                     prt(f'WARN: cannot find source resource {repr(resource_filename)}')
                     continue
-            
+
             if not os.path.isfile(dest_path):
                 prt(f'WARN: cannot find destination file {repr(dest_path)}')
                 continue
-            
+
             self.icons[key] = QIcon(dest_path)
         assert len(self.icons) == len(self.svgs)
 
@@ -422,10 +422,16 @@ class LuksTray():
             if idx > 0 and not separated:
                 menu.addSeparator()
                 separated = True
-            action = QAction('Add Crypt File', self.app)
+            action = QAction('Create New Crypt File', self.app)
+            action.setFont(mono_font)
+            action.triggered.connect(self.handle_create_file_click)
+            menu.addAction(action)
+
+            action = QAction('Add Existing Crypt File', self.app)
             action.setFont(mono_font)
             action.triggered.connect(self.handle_add_file_click)
             menu.addAction(action)
+
             menu.addSeparator()
             if self.history.status in ('clear_text', 'unlocked'):
                 verb = 'Set' if self.history.status == 'clear_text' else 'Update/Clear'
@@ -446,20 +452,20 @@ class LuksTray():
         """ TBD """
         def replace_menu():
             was_visible = self.menu and self.menu.isVisible()
-            
+
             self.menu = menu
             self.tray_icon.setIcon(self.icons[icon_key])
             self.tray_icon.setContextMenu(self.menu)
             self.tray_icon.show()
-            
+
             # Reopen menu if it was previously open
             if was_visible:
                 # Show menu at cursor position
                 cursor_pos = QCursor.pos()
                 self.menu.popup(cursor_pos)
-            
+
             return True
-        
+
 
         if not self.menu: # or menu.actions() != self.menu.actions():
             return replace_menu()
@@ -490,6 +496,11 @@ class LuksTray():
         dialog = MountFileDialog(None)
         dialog.exec()
 
+    def handle_create_file_click(self):
+        """ TBD """
+        dialog = MountFileDialog(None, create=True)
+        dialog.exec()
+
     def exit_app(self):
         """Exit the application."""
         self.tray_icon.hide()
@@ -511,6 +522,8 @@ class CommonDialog(QDialog):
         self.password_input = None
         self.items = []
         self.inputs = {}
+        self.progress_label = None
+        self.progress_bar = None
 
 
     def add_line(self, text):
@@ -525,7 +538,7 @@ class CommonDialog(QDialog):
         self.button_layout.addWidget(button)
 
     def add_input_field(self, keys, label_texts, placeholder_texts, char_width=5,
-                       is_password=False, is_folder=False, is_file=False):
+                       is_password=False, is_folder=False, is_file=False, is_new_file=False):
         """ Adds a label and a line edit input to the main layout. """
         field_layout = QHBoxLayout() # Create a horizontal layout for the label and input field
 
@@ -579,6 +592,12 @@ class CommonDialog(QDialog):
                 button.clicked.connect(partial(self.browse_file, input_field))
                 field_layout.addWidget(button)
 
+            if is_new_file: # Create a Browse button
+                button = QPushButton("Browse...", self)
+                button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Prevent the button from gaining focus
+                button.clicked.connect(partial(self.browse_new_file, input_field))
+                field_layout.addWidget(button)
+
 
             self.inputs[key] = input_field
         self.main_layout.addLayout(field_layout) # Add horizontal layout to main vertical layout
@@ -609,7 +628,19 @@ class CommonDialog(QDialog):
         initial_dir = initial_dir if initial_dir else self.get_real_user_home_directory()
 
         # Open the folder dialog starting at the determined directory
-        file_path = QFileDialog.getSaveFileName(self, "Select File", initial_dir)
+        file_path = QFileDialog.getOpenFileName(self, "Select Existing File", initial_dir)
+        # returns tuple (path, type of file)
+        if file_path[0]:
+            input_field.setText(file_path[0])  # Update the input field with the selected folder path
+
+    def browse_new_file(self, input_field):
+        """ Open a dialog to select a folder and update the input field with the selected path. """
+        # Determine the initial directory to open
+        initial_dir = input_field.text()
+        initial_dir = initial_dir if initial_dir else self.get_real_user_home_directory()
+
+        # Open the folder dialog starting at the determined directory
+        file_path = QFileDialog.getSaveFileName(self, "Select New File", initial_dir)
         # returns tuple (path, type of file)
         if file_path[0]:
             input_field.setText(file_path[0])  # Update the input field with the selected folder path
@@ -654,10 +685,206 @@ class CommonDialog(QDialog):
             error_dialog.setInformativeText(error_text)
             error_dialog.setStandardButtons(QMessageBox.StandardButton.Ok)  # Add a dismiss button
             error_dialog.exec()  # Show the message box
-            
+
                     # Ensure the parent dialog regains focus
             self.raise_()
             self.activateWindow()
+
+    def show_progress(self, message):
+        """Show progress indicator and disable buttons."""
+        for button in self.findChildren(QPushButton):
+            button.setEnabled(False)
+
+        if not self.progress_label:
+            self.progress_label = QLabel()
+            self.progress_bar = QProgressBar()
+            self.progress_bar.setRange(0, 0)  # Indeterminate
+            self.main_layout.addWidget(self.progress_label)
+            self.main_layout.addWidget(self.progress_bar)
+
+        self.progress_label.setText(message)
+        self.progress_label.show()
+        self.progress_bar.show()
+        # Force UI update before starting potentially slow operation
+        QApplication.processEvents()
+
+    def hide_progress(self):
+        """Hide progress indicator and re-enable buttons."""
+        if hasattr(self, 'progress_label'):
+            self.progress_label.hide()
+            self.progress_bar.hide()
+
+        for button in self.findChildren(QPushButton):
+            button.setEnabled(True)
+
+    @staticmethod
+    def find_udisks_command():
+        """Find the available udisks command on the system"""
+        commands = ['udisksctl', 'udisks', 'udisks2']
+        for cmd in commands:
+            if shutil.which(cmd):
+                return cmd
+        return None
+    ####################################################
+    # LUKS Primitives
+    ####################################################
+    def _unlock_luks(self, device_path, password, luks_device):
+        """Common LUKS unlock logic"""
+        if hasattr(self, 'opened') and self.opened:
+            return None  # Already unlocked
+        return run_cmd(['cryptsetup', 'luksOpen', device_path, luks_device],
+                      input_str=password)
+
+    def _mount_with_udisks_full(self, device_path, password):
+        """Mount using udisks2 for auto-mounting with password (handles unlock + mount)"""
+        udisks_cmd = self.find_udisks_command()
+        if not udisks_cmd:
+            return "Error: No udisks command found. Install udisks2."
+        
+        if udisks_cmd == 'udisksctl':
+            # Unlock first with --no-user-interaction to force stdin usage
+            err = run_cmd([udisks_cmd, 'unlock', '-b', device_path, '--no-user-interaction'],
+                         input_str=password)
+            if err:
+                return err
+            # Then mount (udisksctl will figure out the mapper path)
+            return run_cmd([udisks_cmd, 'mount', '-b', device_path])
+        else:
+            # For older udisks
+            return run_cmd([udisks_cmd, '--unlock', device_path],
+                          input_str=password)
+
+    def _mount_with_udisks_mapper(self, mapper_path):
+        """Mount using udisks2 for auto-mounting (assumes already unlocked)"""
+        udisks_cmd = self.find_udisks_command()
+        if not udisks_cmd:
+            return "Error: No udisks command found. Install udisks2."
+        
+        # Just mount the already-unlocked mapper device
+        if udisks_cmd == 'udisksctl':
+            return run_cmd([udisks_cmd, 'mount', '-b', mapper_path])
+        else:
+            return run_cmd([udisks_cmd, '--mount', mapper_path])
+
+    def _mount_manual(self, tray, mapper_path, upon):
+        """Manual mounting with bindfs"""
+        err = run_cmd(['mount', mapper_path, upon])
+        if not err:
+            err = run_cmd(['bindfs', '-u', str(tray.uid), '-g', str(tray.gid),
+                          upon, upon])
+        return err
+
+    def _setup_loop_device(self, container):
+        """Set up loop device for file-based containers"""
+        if hasattr(self, 'opened') and self.opened:
+            return None, f'/dev/{container.name}'
+        
+        # Use --show to get the loop device name
+        result = run_cmd(['losetup', '-f', '--show', container.back_file])
+        if result.startswith('FAIL:'):
+            return result, None
+        
+        loop_device = result.strip()
+        # Update container.name to match the loop device (e.g., 'loop0')
+        container.name = os.path.basename(loop_device)
+        
+        return None, loop_device
+
+    ####################################################
+    # LUKS Generic Mounter
+    ####################################################
+    def mount_luks_container(self, tray, container, password, upon=None, luks_device=None,
+                            luks_file=None, size=None):
+        """
+        Unified function to mount any LUKS container (device or file).
+        
+        Args:
+            container: Container object
+            password: LUKS password
+            upon: Manual mount point (None for auto-mounting)
+            luks_device: Device mapper name (for devices)
+            luks_file: Path to LUKS file (for files)
+            size: Size for new file creation
+        """
+        try:
+            # Determine if this is a file or device container
+            is_file_container = luks_file is not None
+            
+            if is_file_container:
+                # Handle file container setup
+                needs_filesystem = False
+                luks_device = os.path.basename(luks_file) + '-luks'
+                device_path = luks_file
+                
+                # Create file if needed
+                if not os.path.exists(luks_file):
+                    if size is None:
+                        return f"ERR: File {luks_file!r} does not exist and size is not specified."
+                    
+                    err = run_cmd(['truncate', '-s', f'{size}', luks_file])
+                    if not err:
+                        err = run_cmd(['cryptsetup', 'luksFormat', '-q', '--batch-mode', luks_file], 
+                                     input_str=password)
+                    if err:
+                        return err
+                    needs_filesystem = True
+                
+                # For file containers, we need to set up a loop device for udisks2
+                if not upon:  # Auto-mounting case
+                    # Use losetup with --show to get the loop device name directly
+                    sub = subprocess.run(['losetup', '-f', '--show', luks_file], 
+                                       capture_output=True, text=True, check=False)
+                    if sub.returncode != 0:
+                        return f'FAIL: losetup -f --show {luks_file}: {sub.stderr.strip()}'
+                    
+                    device_path = sub.stdout.strip()  # This will be something like /dev/loop0
+            else:
+                # Handle device container setup
+                luks_device = luks_device or f'{container.name}-luks'
+                device_path = f'/dev/{container.name}'
+                needs_filesystem = False
+                
+                # Setup loop device if needed
+                if hasattr(container, 'back_file') and container.back_file:
+                    err, device_path = self._setup_loop_device(container)
+                    if err:
+                        return err
+            
+            # Choose mounting strategy
+            if upon:
+                # Manual mounting: unlock with cryptsetup, then mount manually
+                err = self._unlock_luks(device_path, password, luks_device)
+                if err:
+                    return err
+                
+                mapper_path = f'/dev/mapper/{luks_device}'
+                
+                # Create filesystem if needed (for new files)
+                if needs_filesystem:
+                    err = run_cmd(['mkfs.ext4', mapper_path])
+                    if err:
+                        return err
+                
+                return self._mount_manual(tray, mapper_path, upon)
+            else:
+                # Auto-mounting: use hybrid approach (cryptsetup unlock + udisks2 mount)
+                err = self._unlock_luks(device_path, password, luks_device)
+                if err:
+                    return err
+                
+                mapper_path = f'/dev/mapper/{luks_device}'
+                
+                # Create filesystem if needed (for new files)
+                if needs_filesystem:
+                    err = run_cmd(['mkfs.ext4', mapper_path])
+                    if err:
+                        return err
+                
+                # Use udisks2 just for mounting (no unlock needed)
+                return self._mount_with_udisks_mapper(mapper_path)
+                
+        except Exception as e:
+            return f"An error occurred: {str(e)}"
 
 class MasterPasswordDialog(CommonDialog):
     """ TBD """
@@ -757,91 +984,26 @@ class MountDeviceDialog(CommonDialog):
 
     def mount_device(self, uuid):
         """Attempt to mount the partition."""
-        
-        def find_udisks_command():
-            """Find the available udisks command on the system"""
-            import shutil
-            commands = ['udisksctl', 'udisks', 'udisks2']
-            for cmd in commands:
-                if shutil.which(cmd):
-                    return cmd
-            return None
-        def mount_container(container, password, upon=None, luks_device=None):
-            """
-            Mounts a LUKS container.
-            
-            - If `upon` is specified: uses cryptsetup + mount + bindfs.
-            - If `upon` is None: uses cryptsetup to unlock, then udisksctl/udisks to mount.
-            """
-            nonlocal tray
-            err = None
 
-            try:
-                luks_device = luks_device or f'{container.name}-luks'
-                dev_path = f'/dev/{container.name}'
-                
-                # If loop file (e.g. file container), ensure device is attached
-                if hasattr(container, 'back_file') and container.back_file:
-                    if not container.opened:
-                        err = run_cmd(['losetup', '-f', container.back_file])
-                        if err:
-                            return err
-                    dev_path = f'/dev/{container.name}'  # updated to loop device name
-                
-                # ==== Manual mounting path ====
-                if upon:
-                    if not container.opened:
-                        err = run_cmd(['cryptsetup', 'luksOpen', dev_path, luks_device],
-                                      input_str=password)
-                    if not err:
-                        err = run_cmd(['mount', f'/dev/mapper/{luks_device}', upon])
-                    if not err:
-                        err = run_cmd(['bindfs', '-u', str(tray.uid), '-g', str(tray.gid), upon, upon])
-                    return err
-                
-                # ==== Automatic mount path, but cryptsetup unlock first ====
-                if not container.opened:
-                    err = run_cmd(['cryptsetup', 'luksOpen', dev_path, luks_device],
-                                  input_str=password)
-                    if err:
-                        return err
-
-                # Mount with udisksctl (which will mount /dev/mapper/{luks_device})
-                udisks_cmd = find_udisks_command()
-                if not udisks_cmd:
-                    return "Error: No udisks command found. Install udisks2."
-
-                mapper_path = f'/dev/mapper/{luks_device}'
-                if udisks_cmd == 'udisksctl':
-                    err = run_cmd([udisks_cmd, 'mount', '-b', mapper_path])
-                else:
-                    err = run_cmd([udisks_cmd, '--mount', mapper_path])
-
-                return err
-
-            except Exception as e:
-                return f"An error occurred: {str(e)}"
-
-        
         tray, container = LuksTray.singleton, None
         errs, values = [], {}
-        
+
         if tray:
             container = tray.containers.get(uuid, None)
-        
+
         if not container:
             errs.append(f'ERR: container w UUID={uuid} not found')
             return
-        
+
         vital = tray.history.get_vital(uuid)
         errs.append(f'{container.name}')
         mount_points = self.get_mount_points()
-        
+
         # Parse and validate inputs
         for key, field in self.inputs.items():
             text = field.text().strip()
             values[key] = text
-            
+
             if key == 'password':
                 if not text:
                     errs.append('ERR: cannot leave password empty')
@@ -871,27 +1033,30 @@ class MountDeviceDialog(CommonDialog):
                     errs.append(f'ERR: value ({text}) for {key} must be an integer')
             else:
                 errs.append(f'ERR: unknown key({key})')
-        
+
         # Determine LUKS device name
         luks_device = ''
         if len(container.filesystems) == 1:
             luks_device = container.filesystems[0].name
-        
+
         # Proceed with mounting if no errors
         if len(errs) <= 1:
             mount_point = values['upon']
-            
+
             if mount_point and not os.path.exists(mount_point):
                 os.makedirs(mount_point, exist_ok=True)
-            err = mount_container(container, values['password'], mount_point, luks_device)
-            
+            self.show_progress('Mount device...')
+            err = self.mount_luks_container(tray, container, values['password'],
+                            upon=mount_point, luks_device=luks_device)
+            self.hide_progress()
+
             if err:
                 errs.append(err)
-        
+
         if len(errs) > 1:
             self.alert_errors(errs)
             return
-        
+
         # Update history ONLY if mount point was explicitly provided (not auto-mount)
         if values['upon']:  # Only update history for explicit mount points
             vital = tray.history.get_vital(container.uuid)
@@ -900,31 +1065,28 @@ class MountDeviceDialog(CommonDialog):
                 vital.password, vital.upon = values['password'], values['upon']
                 vital.delay_min, vital.repeat_min = values['delay'], values['repeat']
                 tray.history.put_vital(vital)
-        
+
         tray.update_menu()
         self.accept()
 
     def unmount_device(self, uuid):
         """Attempt to unmount the partition."""
-        
+
         errs, container = [], None
         tray = LuksTray.singleton
         container = tray.containers.get(uuid, None)
 
         # Show progress - disable buttons and add progress indicator
         self.show_progress("Unmount/Close device...")
-        
-        # Force UI update before starting potentially slow operation
-        QApplication.processEvents()
 
         tray.update_mounts()
-        
+
         if container:
             for filesystem in container.filesystems:
                 prev_err_cnt = len(errs)
                 for mount in filesystem.mounts:
                     if tray.is_mounted(mount):
-                        err = rerun_if_busy(["umount", mount], errs)
+                        rerun_if_busy(["umount", mount], errs)
                         if prev_err_cnt < len(errs):
                             continue
                 mapped_device = f'/dev/mapper/{filesystem.name}'
@@ -932,41 +1094,17 @@ class MountDeviceDialog(CommonDialog):
                     if tray.is_mounted(mapped_device):
                         rerun_if_busy(["umount", mapped_device], errs)
                     run_cmd(["cryptsetup", "luksClose", filesystem.name], errs)
-        
+
         # Hide progress indicator
         self.hide_progress()
-        
+
         if errs:
             self.alert_errors(errs)
             return # don't close dialog box
-        
+
         tray.update_menu()
         self.accept()
 
-    def show_progress(self, message):
-        """Show progress indicator and disable buttons."""
-        for button in self.findChildren(QPushButton):
-            button.setEnabled(False)
-        
-        if not hasattr(self, 'progress_label'):
-            self.progress_label = QLabel()
-            self.progress_bar = QProgressBar()
-            self.progress_bar.setRange(0, 0)  # Indeterminate
-            self.main_layout.addWidget(self.progress_label)
-            self.main_layout.addWidget(self.progress_bar)
-        
-        self.progress_label.setText(message)
-        self.progress_label.show()
-        self.progress_bar.show()
-
-    def hide_progress(self):
-        """Hide progress indicator and re-enable buttons."""
-        if hasattr(self, 'progress_label'):
-            self.progress_label.hide()
-            self.progress_bar.hide()
-        
-        for button in self.findChildren(QPushButton):
-            button.setEnabled(True)
 #   def hide_partition(self, uuid):
 #       """ Hide the partition """
 #       # FIXME: need body
@@ -974,7 +1112,7 @@ class MountDeviceDialog(CommonDialog):
 
 class MountFileDialog(CommonDialog):
     """ TBD """
-    def __init__(self, container):
+    def __init__(self, container, create=False):
         super().__init__()
         tray = LuksTray.singleton
 
@@ -1017,24 +1155,34 @@ class MountFileDialog(CommonDialog):
             self.add_push_button('Cancel', self.cancel)
             # self.add_push_button('Hide', self.hide_partition, container.uuid)
             self.main_layout.addLayout(self.button_layout)
-        else: # no container ... add file
-            self.setWindowTitle('Add Crypt File')
+
+        elif not create: # no container ... use existing file (not creating)
+            self.setWindowTitle('Add Existing Crypt File')
+            # vital = tray.history.get_vital(container.uuid)
+            # self.add_line(f'{container.back_file}')
+            self.add_input_field('password', "Enter Password", '',
+                                24, is_password=True)
+            self.add_input_field('back_file', "Crypt File", '', 48, is_file=True)
+            self.add_input_field('upon', "Mount At", '', 36, is_folder=True)
+            self.add_input_field('delay', "Auto-Unmount Delay (min)", '60', 5)
+            self.add_input_field('repeat', "Auto-Unmount Repeat (min)", '5', 5)
+
+            self.add_push_button('OK', self.mount_file, None)
+            self.add_push_button('Cancel', self.cancel)
+            # self.add_push_button('Hide', self.hide_partition, container.uuid)
+            self.main_layout.addLayout(self.button_layout)
+
+        else: # no container ... create crypt file
+            self.setWindowTitle('Create New Crypt File')
             # vital = tray.history.get_vital(container.uuid)
             # self.add_line(f'{container.back_file}')
             self.add_input_field('password', "Enter Password", '',
                                 24, is_password=True)
             self.add_input_field('size_str', "Size (MiB)", '32', 8)
-            self.add_input_field('back_file', "Crypt File", '', 48, is_file=True)
+            self.add_input_field('back_file', "Crypt File", '', 48, is_new_file=True)
             self.add_input_field('upon', "Mount At", '', 36, is_folder=True)
             self.add_input_field('delay', "Auto-Unmount Delay (min)", '60', 5)
             self.add_input_field('repeat', "Auto-Unmount Repeat (min)", '5', 5)
-#           if container.fstype:
-#               self.add_line(f'Filesystem: {container.fstype}')
-#           if container.label:
-#               self.add_line(f'Label: {container.label}')
-#           if container.size_str:
-#               self.add_line(f'Size: {container.size_str}')
-#           self.add_line(f'UUID: {container.uuid}')
 
             self.add_push_button('OK', self.mount_file, None)
             self.add_push_button('Cancel', self.cancel)
@@ -1049,6 +1197,7 @@ class MountFileDialog(CommonDialog):
         errs, container = [], None
         tray = LuksTray.singleton
         container = tray.containers.get(uuid, None)
+        self.show_progress('Unmount/Close crypt file...')
         tray.update_mounts()
         if container:
             for mount in container.mounts:
@@ -1056,7 +1205,13 @@ class MountFileDialog(CommonDialog):
                     rerun_if_busy(["umount", mount], errs=errs)
 
             if not errs:
-                run_cmd(["cryptsetup", "close", container.name], errs=errs)
+                run_cmd(["cryptsetup", "luksClose", container.name], errs=errs)
+                            # If this is a file container with a loop device, detach it
+            if not errs and container.back_file:
+                run_cmd(["losetup", "-d", f"/dev/{container.name}"], errs=errs)
+
+        self.hide_progress()
+
         tray.update_menu()
         if errs:
             self.alert_errors(errs)
@@ -1065,46 +1220,6 @@ class MountFileDialog(CommonDialog):
 
     def mount_file(self, uuid):
         """ TBD """
-
-        def mount_luks_file(container, password, upon, luks_file, size=None):
-            nonlocal tray
-            try:
-                needs_filesystem, err = False, None
-                # 1. Create the file if it does not exist and a size is specified
-                if not os.path.exists(luks_file):
-                    if size is None:
-                        return f"ERR: File {luks_file!r} does not exist and size is not specified to create it."
-                    # Create a sparse file with the specified size (in MB)
-                    err = run_cmd(['truncate', '-s', f'{size}', luks_file])
-                    needs_filesystem = True
-
-                    # Set up the LUKS container on the file
-                    if not err:
-                        err = run_cmd(['cryptsetup', 'luksFormat', '-q', luks_file])
-
-                # 2. Unlock the LUKS file if needed
-                if not err and not container.opened:
-                    luks_device = os.path.basename(luks_file) + '-luks'
-                    err = run_cmd(['cryptsetup', 'luksOpen', luks_file, luks_device],
-                                input_str=password)
-
-                # 3. Mount the unlocked LUKS file
-                if not err and needs_filesystem:
-                    err = run_cmd(['mkfs.ext4', f'/dev/mapper/{luks_device}'])
-
-                # 4. Mount the unlocked LUKS file
-                if not err:
-                    err = run_cmd(['mount', f'/dev/mapper/{luks_device}', upon])
-
-                # 5. Run bindfs to make mount point available
-                if not err:
-                    err = run_cmd(['bindfs', '-u', str(tray.uid), '-g', str(tray.gid), upon, upon])
-
-                # Return error (or None if all OK)
-                return err
-
-            except Exception as e:
-                return f"An error occurred: {str(e)}"
 
         tray, container = LuksTray.singleton, None
         errs, values = [], {}
@@ -1130,15 +1245,17 @@ class MountFileDialog(CommonDialog):
                 if not text:
                     errs.append('ERR: cannot leave password empty')
             elif key == 'upon':
-                isabs = os.path.isabs(text)
-                isdir = os.path.isdir(text)
-                length = 0
-                if isabs and isdir:
-                    length = len(os.listdir(text))
-                if not isabs or not isdir or length > 0:
-                    errs.append(f'ERR: mount point ({text}) is not absolute path to empty folder')
-                elif text in mount_points:
-                    errs.append(f'ERR: mount point ({text}) occupied')
+                # empty is OK ... auto-mount
+                if len(text):
+                    isabs = os.path.isabs(text)
+                    isdir = os.path.isdir(text)
+                    length = 0
+                    if isabs and isdir:
+                        length = len(os.listdir(text))
+                    if not isabs or not isdir or length > 0:
+                        errs.append(f'ERR: mount point ({text}) is not absolute path to empty folder')
+                    if text in mount_points:
+                        errs.append(f'ERR: mount point ({text}) occupied')
 
             elif key in ('delay', 'repeat', 'size_str'):
                 try:
@@ -1165,8 +1282,10 @@ class MountFileDialog(CommonDialog):
                 back_file = container.back_file
             else:
                 back_file = values['back_file']
-            err = mount_luks_file(container, values['password'], values['upon'],
-                                  back_file, values.get('size_str', None))
+            self.show_progress('Mount file...')
+            err = self.mount_luks_container(tray, container, values['password'],
+                    values['upon'], luks_file=back_file, size=values.get('size_str', None))
+            self.hide_progress()
             if err:
                 errs.append(err)
         if len(errs) > 1:
