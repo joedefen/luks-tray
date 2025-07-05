@@ -392,8 +392,19 @@ class LuksTray():
                 # title = ('✅🠋 ' if mountpoint.startswith('/') else
                 #           '🟡⛛ ' if container.opened else '⭕🠉 ')
                 title = ('✅ ' if mountpoint.startswith('/') else
-                            '🟡 ' if container.opened else '⭕ ')
-                title += f' {name} {mountpoint}'
+                            '‼️ ' if container.opened else '🔳 ')
+
+                if mountpoint.startswith('/') and icon_key != 'alert':
+                    icon_key = 'ok'
+                elif container.opened:
+                    icon_key = 'alert'
+
+
+                if title.startswith('‼️'):
+                    title += f' {name} CLICK-to-LOCK'
+                else:
+                    title += f' {name} {mountpoint}'
+                # title += f' {name} {mountpoint}'
 
                 if mountpoint.startswith('/') and icon_key != 'alert':
                     icon_key = 'ok'
@@ -773,6 +784,29 @@ class CommonDialog(QDialog):
             err = run_cmd(['bindfs', '-u', str(tray.uid), '-g', str(tray.gid),
                           upon, upon])
         return err
+
+#   def _mount_manual(self, tray, mapper_path, upon):
+#       """Manual mounting with bindfs - test user unmount"""
+#       err = run_cmd(['mount', mapper_path, upon])
+#       if not err:
+#           err = run_cmd(['bindfs', '-u', str(tray.uid), '-g', str(tray.gid),
+#                          '-o', 'user', upon, upon])
+#       return err
+
+#   def _mount_manual(self, tray, mapper_path, upon):
+#       """Mount using udisks2 as the original user"""
+#       # Run udisks2 as the original user, not root
+#       cmd = ['sudo', '-u', f'#{tray.uid}', 'udisksctl', 'mount', 
+#              '-b', mapper_path, '--mountpoint', upon]
+#       err = run_cmd(cmd)
+#       return err
+
+#   def _mount_manual(self, tray, mapper_path, upon):
+#       """Regular mount with ownership options"""
+#       # Try mount options that work with the filesystem type
+#       err = run_cmd(['mount', '-o', f'uid={tray.uid},gid={tray.gid}', 
+#                      mapper_path, upon])
+#       return err
 
     def _setup_loop_device(self, container):
         """Set up loop device for file-based containers"""

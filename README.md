@@ -7,7 +7,7 @@ A system tray applet for Linux that simplifies mounting and unmounting LUKS-encr
 ## Features
 
 - **System tray integration** - Simple click-to-mount/unmount interface
-- **Visual status indicators** - Clear icons showing mounted (✅), unmounted (🔴), and open-but-unmounted (🟡) states
+- **Visual status indicators** - Clear icons showing mounted (✅), unmounted (🔳), and open-but-unmounted (‼️) states
 - **Password management** - Optional master password to encrypt stored credentials
 - **Auto-unmount** - Configurable automatic unmounting with customizable delays and retries
 - **File container support** - Mount encrypted files as loop devices
@@ -19,7 +19,7 @@ A system tray applet for Linux that simplifies mounting and unmounting LUKS-encr
 1. Install and run `luks-tray`
 2. Insert a device with LUKS containers or register an encrypted file
 3. Click the tray icon to see available containers
-4. Click a container to mount (🔴) or unmount (✅/🟡)
+4. Click a container to mount (🔳) or unmount (✅ or ‼️)
 5. Enter password and choose mount point in the dialog
 
 ## Visual Interface
@@ -31,8 +31,8 @@ The tray icon shaped like a shield changes based on container states:
 
 Menu entries show:
 - **✅ device /mount/point** - Mounted container (click to unmount and lock)
-- **🟡 device** - Unlocked but not mounted (click to lock)
-- **🔴 device [/mount/point]** - Unmounted container (click to unlock and mount)
+- **‼️ device CLICK-to-LOCK** - Unlocked but not mounted (considered an anomaly)
+- **🔳 device [/mount/point]** - Unmounted container with last manual mount point (click to unlock and mount)
 
 ## Limitations
 
