@@ -61,7 +61,7 @@ def rerun_if_busy(args, errs, repeat=3, delay=0.5, input_str=None):
         err = f'FAIL: {' '.join(args)}: {sub.stdout} {sub.stderr} [rc={sub.returncode}]'
         if 'busy' not in sub.stderr:
             break
-    if err and errs:
+    if err:
         errs.append(err)
     return err
 
@@ -1118,6 +1118,7 @@ class MountDeviceDialog(CommonDialog):
         errs, container = [], None
         tray = LuksTray.singleton
         container = tray.containers.get(uuid, None)
+        errs.append(f'{container.name}')
 
         # Show progress - disable buttons and add progress indicator
         self.show_progress("Unmount/Close device...")
@@ -1141,7 +1142,7 @@ class MountDeviceDialog(CommonDialog):
         # Hide progress indicator
         self.hide_progress()
 
-        if errs:
+        if len(errs) > 1:
             self.alert_errors(errs)
             return # don't close dialog box
 
