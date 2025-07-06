@@ -965,6 +965,61 @@ class CommonDialog(QDialog):
         except Exception as e:
             return f"An error occurred: {str(e)}"
 
+    def kill_bindfs_on_mount(mount_point, timeout=1.0):
+        """
+        Kill any `bindfs` process that is holding onto the given mount point.
+        
+        Args:
+            mount_point (str): The mount point to check.
+            timeout (float): Time (in seconds) to wait after SIGTERM before SIGKILL.
+        
+        Returns:
+            str or None: Error string if failure occurs, otherwise None.
+        """
+        try:
+            # Run fuser -vm on the mount point
+            result = subprocess.run(
+                ['fuser', '-vm', mount_point],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                check=True
+            )
+            if result.returncode not in (0, 1):  # 0 = PIDs found, 1 = none, others = error
+                return f"fuser failed: {result.stderr.strip()}"
+
+            lines = result.stdout.strip().splitlines()
+            if len(lines) < 2:
+                return None  # No processes using the mount
+
+            headers = lines[0].split()
+            cmd_idx = headers.index('COMMAND')
+            pid_idx = headers.index('PID')
+
+            for line in lines[1:]:
+                cols = line.split()
+                if len(cols) <= cmd_idx:
+                    continue
+                cmd = cols[cmd_idx]
+                pid = int(cols[pid_idx])
+                if cmd == 'bindfs':
+                    # Kill it gracefully first
+                    subprocess.run(['kill', '-TERM', str(pid)], check=True)
+                    time.sleep(timeout)
+                    # Check if it's still running
+                    try:
+                        os.kill(pid, 0)
+                        # Still alive — kill hard
+                        subprocess.run(['kill', '-KILL', str(pid)], check=True)
+                    except ProcessLookupError:
+                        pass  # Already dead
+                    return None  # Successfully killed
+            return None  # No bindfs found
+
+        except Exception as e:
+            return f"Error killing bindfs: {e}"
+
+
 class MasterPasswordDialog(CommonDialog):
     """ TBD """
     def __init__(self):
@@ -1129,6 +1184,7 @@ class MountDeviceDialog(CommonDialog):
             for filesystem in container.filesystems:
                 prev_err_cnt = len(errs)
                 for mount in filesystem.mounts:
+                    self.kill_bindfs_on_mount(mount)
                     if tray.is_mounted(mount):
                         rerun_if_busy(["umount", mount], errs)
                         if prev_err_cnt < len(errs):
@@ -1241,7 +1297,8 @@ class MountFileDialog(CommonDialog):
                 run_cmd(["cryptsetup", "luksClose", container.name], errs=errs)
                     # If this is a file container with a loop device, detach it
             if not errs and container.back_file:
-                run_cmd(["losetup", "-d", f"/dev/{container.name}"], errs=errs)
+                ignores = []
+                run_cmd(["losetup", "-d", f"/dev/{container.name}"], errs=ignores)
 
         self.hide_progress()
 
