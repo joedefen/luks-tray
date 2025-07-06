@@ -1343,15 +1343,13 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('-D', '--debug', action='store_true',
-            help='override debug_mode from .ini initially')
+            help='enable debug_mode')
     parser.add_argument('-o', '--stdout', action='store_true',
             help='log to stdout (if a tty)')
     parser.add_argument('-f', '--follow-log', action='store_true',
             help='exec tail -n50 -F on log file')
     parser.add_argument('-e', '--edit-config', action='store_true',
             help='exec ${EDITOR:-vim} on config.ini file')
-    parser.add_argument('-q', '--quick', action='store_true',
-            help='quick mode (1m lock + 1m sleep')
     opts = parser.parse_args()
 
     if opts.edit_config:
