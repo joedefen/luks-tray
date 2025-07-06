@@ -35,8 +35,9 @@ The tray icon shaped like a shield changes based on container states:
 - <img src="src/luks_tray/resources/green-shield-v04.svg" alt="Green Shield Icon" width="24" height="24"> - Some containers are mounted w/o any anomalies (i.e., some of the encrypted data is available)
 
 Here is an sample menu:
-<img src="images/sample-menu.png" alt="Sample Menu">
+<center><img src="images/sample-menu.png" alt="Sample Menu"></center>
 Notes:
+
 - the first section shows LUKS devices, and the second shows LUKS files.
 - click a ✅ entry to dismount and lock a mounted,
 -  unlocked LUKS container
