@@ -1,5 +1,3 @@
-> **THIS IS A WORK IN PROGRESS.  BE PATIENT.**
-
 # LUKS Tray
 
 **luks-tray* is a GTK-based tray utility for managing ad hoc LUKS-encrypted files: mount and unmount with ease from your desktop environment.
@@ -10,7 +8,7 @@
 - **System tray integration** - Simple click-to-mount/unmount interface for LUKS devices and files
 - **Visual status indicators** - Clear icons showing mounted (✅), unmounted (🔳), and open-but-unmounted (‼️) states
 - **File container support** - Add, create, and manage LUKS file containers from the tray.
-- **Mount point history** - Remembers previous mount locations for convenience
+- **Mount point history** - Remembers previous mount locations for convenience and clarity
 - **Background monitoring** - Automatically detects newly inserted devices with LUKS containers
 - **Password management** - Optional master password to encrypt stored credentials
 

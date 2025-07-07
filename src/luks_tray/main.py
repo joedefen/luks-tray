@@ -177,6 +177,18 @@ class DeviceInfo:
         rv = f'{get_str(device_name, "model")}'
         return rv.strip()
 
+    @staticmethod
+    def is_banned(mounts):
+        """ Is a mount point (or any in a list of mountpoints) banned?
+            Returns True if so.
+        """
+        if not isinstance(mounts, list):
+            mounts = [mounts]
+        for mount in mounts:
+            if mount in DeviceInfo.bans:
+                return True
+        return False
+
     def parse_lsblk(self):
         """ Parse ls_blk for all the goodies we need """
         def get_backing_file(loop_device):
@@ -209,12 +221,6 @@ class DeviceInfo:
             if entry.type == 'loop':
                 entry.back_file = get_backing_file(entry.name)
             return entry
-
-        def is_banned(mounts):
-            for mount in mounts:
-                if mount in DeviceInfo.bans:
-                    return True
-            return False
 
                # Run the `lsblk` command and get its output in JSON format with additional columns
         result = subprocess.run(['lsblk', '-J', '-o',
@@ -249,7 +255,7 @@ class DeviceInfo:
                 grandchildren = child.get('children', None)
                 if entry.type == 'crypt':
                     if entry.mounts:
-                        if is_banned(entry.mounts):
+                        if self.is_banned(entry.mounts):
                             continue # skip whole disk entries
                         entry.upon = entry.mounts[0]
                 elif not isinstance(grandchildren, list):
@@ -264,7 +270,7 @@ class DeviceInfo:
                     # entries[subentry.name] = subentry
                     if len(grandchildren) == 1 and len(subentry.mounts) == 1:
                         entry.upon = subentry.mounts[0]
-                    if is_banned(entry.mounts):
+                    if self.is_banned(entry.mounts):
                         continue # skip whole disk entries
 
         self.entries = dev_cons | file_cons
@@ -660,6 +666,7 @@ class CommonDialog(QDialog):
 
             if add_on == 'password':
                 val = tray.ini_tool.get_current_val('show_passwords_by_default')
+                val = False if placeholder_text else val # don't show existig passwords
                 if val:
                     input_field.setEchoMode(QLineEdit.EchoMode.Normal)
                 else:
@@ -791,7 +798,8 @@ class CommonDialog(QDialog):
         if not self.progress_label:
             self.progress_label = QLabel()
             self.progress_bar = QProgressBar()
-            self.progress_bar.setRange(0, 0)  # Indeterminate
+            self.progress_bar.setRange(0, 100)  # Indeterminate
+            self.progress_bar.setValue(10)
             self.main_layout.addWidget(self.progress_label)
             self.main_layout.addWidget(self.progress_bar)
 
@@ -820,14 +828,19 @@ class CommonDialog(QDialog):
         return None
 
     @staticmethod
-    def check_upon(text, mount_points):
+    def check_upon(text, mount_points, is_device=False):
         """ Validate candidate mount point.
             Returns error (or None if no error)
         """
         # Empty mount point is valid (means auto-mount)
         if text:  # Only validate if not empty
+            if DeviceInfo.is_banned(text):
+                return f'ERR: cannot mount on "special" {text}'
             if text.startswith('/media/'):
-                return 'ERR: use empty field for automatic /media mounting'
+                if is_device:
+                    return 'ERR: cannot mount device in /media'
+                else:
+                    return 'ERR: use empty field for automatic /media mounting'
             if not os.path.isabs(text):
                 return f'ERR: mount point ({text}) must be absolute path'
             parent_dir = os.path.dirname(text)
@@ -841,6 +854,8 @@ class CommonDialog(QDialog):
                     return f'ERR: mount point ({text}) exists but is not empty'
             if text in mount_points:
                 return f'ERR: mount point ({text}) occupied'
+        elif is_device:
+                return 'ERR: empty field not allowed for devices'
         return None
 
     ####################################################
@@ -853,24 +868,24 @@ class CommonDialog(QDialog):
         return run_cmd(['cryptsetup', 'luksOpen', device_path, luks_device],
                       input_str=password)
 
-    def _mount_with_udisks_full(self, device_path, password):
-        """Mount using udisks2 for auto-mounting with password (handles unlock + mount)"""
-        udisks_cmd = self.find_udisks_command()
-        if not udisks_cmd:
-            return "Error: No udisks command found. Install udisks2."
+#   def _mount_with_udisks_full(self, device_path, password):
+#       """Mount using udisks2 for auto-mounting with password (handles unlock + mount)"""
+#       udisks_cmd = self.find_udisks_command()
+#       if not udisks_cmd:
+#           return "Error: No udisks command found. Install udisks2."
 
-        if udisks_cmd == 'udisksctl':
-            # Unlock first with --no-user-interaction to force stdin usage
-            err = run_cmd([udisks_cmd, 'unlock', '-b', device_path, '--no-user-interaction'],
-                         input_str=password)
-            if err:
-                return err
-            # Then mount (udisksctl will figure out the mapper path)
-            return run_cmd([udisks_cmd, 'mount', '-b', device_path])
-        else:
-            # For older udisks
-            return run_cmd([udisks_cmd, '--unlock', device_path],
-                          input_str=password)
+#       if udisks_cmd == 'udisksctl':
+#           # Unlock first with --no-user-interaction to force stdin usage
+#           err = run_cmd([udisks_cmd, 'unlock', '-b', device_path, '--no-user-interaction'],
+#                        input_str=password)
+#           if err:
+#               return err
+#           # Then mount (udisksctl will figure out the mapper path)
+#           return run_cmd([udisks_cmd, 'mount', '-b', device_path])
+#       else:
+#           # For older udisks
+#           return run_cmd([udisks_cmd, '--unlock', device_path],
+#                         input_str=password)
 
     def _mount_with_udisks_mapper(self, mapper_path):
         """Mount using udisks2 for auto-mounting (assumes already unlocked)"""
@@ -878,11 +893,16 @@ class CommonDialog(QDialog):
         if not udisks_cmd:
             return "Error: No udisks command found. Install udisks2."
 
-        # Just mount the already-unlocked mapper device
-        if udisks_cmd == 'udisksctl':
-            return run_cmd([udisks_cmd, 'mount', '-b', mapper_path])
-        else:
-            return run_cmd([udisks_cmd, '--mount', mapper_path])
+        # Determine the real desktop user if running as root
+        real_user = os.environ.get('SUDO_USER')
+        if not real_user:
+            return "Error: Cannot determine real user (SUDO_USER not set)."
+
+        # Choose appropriate mount arguments
+        mount_args = ['mount', '-b', mapper_path] if udisks_cmd == 'udisksctl' else ['--mount', mapper_path]
+
+        return run_cmd(['sudo', '-u', real_user, udisks_cmd] + mount_args)
+
 
     def _mount_manual(self, tray, mapper_path, upon, do_bindfs=False):
         """Manual mounting with bindfs"""
@@ -1062,7 +1082,7 @@ class MasterPasswordDialog(CommonDialog):
         super().__init__()
         self.setWindowTitle('Master Password Dialog')
         self.add_input_field('password', "Master Password", '', 24, add_on='password')
-        self.add_push_button('OK', self.set_m:aster_password)
+        self.add_push_button('OK', self.set_master_password)
         self.add_push_button('Cancel', self.cancel)
         self.main_layout.addLayout(self.button_layout)
         self.setLayout(self.main_layout)
@@ -1169,7 +1189,7 @@ class MountDeviceDialog(CommonDialog):
                 if not text:
                     errs.append('ERR: cannot leave password empty')
             elif key == 'upon':
-                err = self.check_upon(text, mount_points)
+                err = self.check_upon(text, mount_points, is_device=True)
                 if err:
                     errs.append(err)
             else:
@@ -1326,17 +1346,20 @@ class MountFileDialog(CommonDialog):
         self.show_progress('Unmount/Close crypt file...')
         busy_warns = set()
         if container:
-            for _ in range(2):
-                # it may take two dismounts, one for the regular mount, and
-                # one for the bindfs mount
-                tray.update_mounts()
-                for mount in container.mounts:
-                    if tray.is_mounted(mount):
-                        err = run_unmount(mount, busy_warns)
-                        if err:
-                            errs.append(err)
-                if busy_warns:
-                    break
+            if container.mounts:
+                is_auto_mount = container.mounts[0].startswith('/media/')
+                attempts = 1 if is_auto_mount else 2
+                for _ in range(attempts):
+                    # it may take two dismounts, one for the regular mount, and
+                    # one for the bindfs mount
+                    tray.update_mounts()
+                    for mount in container.mounts:
+                        if tray.is_mounted(mount):
+                            err = run_unmount(mount, busy_warns)
+                            if err:
+                                errs.append(err)
+                    if busy_warns:
+                        break
 
             if not errs:
                 run_cmd(["cryptsetup", "luksClose", container.name], errs=errs)
