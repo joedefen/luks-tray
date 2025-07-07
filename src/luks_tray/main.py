@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
 from PyQt6.QtWidgets import QFileDialog, QCheckBox
 from PyQt6.QtWidgets import QProgressBar
-from PyQt6.QtGui import QIcon, QCursor, QAction, QFont
+from PyQt6.QtGui import QIcon, QCursor, QAction, QFont, QFontDatabase
 from PyQt6.QtCore import QTimer, Qt
 
 from luks_tray.History import HistoryClass
@@ -326,6 +326,11 @@ class LuksTray():
         self.ini_tool = ini_tool
         self.app = QApplication([])
         self.app.setQuitOnLastWindowClosed(False)
+        if "Noto Color Emoji" in QFontDatabase.families():
+            self.app.setFont(QFont("Noto Color Emoji"))
+        else:
+            self.app.setFont(QFont("DejaVu Sans"))  # fallback
+
         self.history = HistoryClass(ini_tool.history_path)
         self.history.restore()
 

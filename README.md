@@ -22,6 +22,14 @@
 5. When mounting a container, enter its password and choose mount point in the dialog
     - if the mount point is empty, then the mount point is automatically chosen.
 
+For best results, the Noto Color Emoji fonts should be installed if not already:
+
+    sudo pacman -S noto-fonts-emoji          # EndeavourOS/Arch
+    sudo dnf install google-noto-emoji-fonts # Fedora
+    sudo zypper install noto-emoji-fonts     # openSUSE Tumbleweed
+    sudo apt install fonts-noto-color-emoji  # Ubuntu
+
+
 ## Visual Interface
 
 The tray icon is shaped like a shield changes based on container states:
