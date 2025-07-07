@@ -1,0 +1,29 @@
+#### HOW TO DEVELOP
+# 1. Set up a new virtual environment (optional but recommended)
+python3 -m venv lt-venv
+source lt-venv/bin/activate
+
+# 2. Install dev dependencies
+pip install flit
+pip install -e .  # editable install for dev testing
+
+# 3. Run your app manually (if installed via editable install)
+luks-tray
+
+
+#### HOW TO PUBLISH to PYPI
+
+# Bump version in pyproject.toml first
+flit build
+flit publish  # Will prompt for your PyPI token if not cached
+
+
+#### HOW TO PUBLISH to TEST PYPI
+
+# Bump version in pyproject.toml
+flit build
+flit publish --repository testpypi
+
+# Test install from TestPyPI
+pip install --index-url https://test.pypi.org/simple/ --no-deps luks-tray
+

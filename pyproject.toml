@@ -1,52 +1,16 @@
-# HOW TO DEVELOP
-#
-# Prep Work (ensure need modules are up-to-date):
-#   python3 -m venv lt-venv
-#   source lt-venv/bin/activate # set up activation in vscode too
-#   pip install build twine wheel
-#   pip install PyQt6 psutil
-#
-# Optionally, `python3 -m venv venv`, and then  # NOTE: done automatically with vscode
-#   - source env/bin/activate # to activate
-#   - deactivate # to deactivate
-# 
-# rm -rf build dist src/*.egg-info && python3 -m build && pip install -e . --break-system-packages
-# 
-# - after ./deploy, run with
-#   - luks-tray  # within venv
-#   - ~/Projects/luks-tray/lt-venv/bin/luks-tray
-#
-# HOW TO PUBLISH...
-# PUBLIC Build and deploy (from project directory):
-#   ## BUMP the version (below in [project])
-#   rm -rf dist build src/*.egg-info; python3 -m build; python3 -m twine upload dist/*
-#     ## Enter __token__ and the saved TOKEN (in bitwarden)
-#   pipx upgrade luks-tray || pipx install luks-tray # >= python3.11
-#   --OR-- sudo python3 -m pip install luks-tray # <= python3.10
-#   ## VISIT  https://pypi.org/project/luks-tray and delete old versions
-#
-# TEST Build and test (from project directory):
-#   ## BUMP the version (below in [project])
-#   rm -r build dist src/*.egg-info; python3 -m build
-#   python3 -m twine upload --repository testpypi dist/* #     keyring --disable # may be required
-#     ## Enter __token__ and the saved TOKEN (in bitwarden)
-#   sudo python3 -m pip install --upgrade --index-url https://test.pypi.org/simple/ --no-deps --break-system-packages my-sna
-#   ## VISIT  https://test.pypi.org/project/luks-tray and delete old versions
-
 [build-system]
-requires = ["setuptools==68.2.2", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
 
 [project]
-name = "luks_tray"
-version = "1.0.1"
+name = "luks-tray"
+version = "1.2"
 description = "A Qt-based tray app for managing LUKS encrypted volumes"
-
 authors = [
     { name = "Joe Defen", email = "joedef@gmail.com" }
 ]
 readme = "README.md"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 requires-python = ">=3.8"
 
 keywords = ["LUKS", "Qt6", "applet", "tray"]
@@ -57,34 +21,20 @@ classifiers = [
     "Operating System :: POSIX :: Linux"
 ]
 
-[project.optional-dependencies]
-dev = [
-    "build==1.2.1",
-    "twine",
-    "wheel"
-]
-
 dependencies = [
-    'psutil',
-    'PyQt6',
+    "psutil",
+    "PyQt6"
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/joedefen/luks-tray"
+Homepage = "https://github.com/joedefen/luks-tray"
 "Bug Tracker" = "https://github.com/joedefen/luks-tray/issues"
 
 [project.scripts]
 luks-tray = "luks_tray.main:main"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-"luks_tray.resources" = ["*.svg"]
-
-[tool.setuptools.exclude-package-data]
-"luks_tray" = ["__pycache__/*"]
-
+[tool.flit.module]
+# Your code lives in src/luks_tray
+# So this makes flit look in `src/` for packages
+name = "luks_tray"
+directory = "src"

@@ -1,6 +1,6 @@
 # LUKS Tray
 
-**luks-tray* is a GTK-based tray utility for managing ad hoc LUKS-encrypted files: mount and unmount with ease from your desktop environment.
+**luks-tray** is a GTK-based tray utility for managing ad hoc LUKS-encrypted files: mount and unmount with ease from your desktop environment.
 
 
 ## Features
@@ -14,7 +14,7 @@
 
 ## Quick Start
 
-1. Install and run `luks-tray`
+1. Install and run `luks-tray`.  Use `pipx` to install, update and remove; e.g. `pipx install luks-tray`. See [pipx docs](https://pypa.github.io/pipx/) for more details.
 2. Click the tray icon to see available containers. You may:
     - Insert a disk with LUKS devices to detect them automatically.
     - Add an existing or create a new encrypted file to manage it.
@@ -24,14 +24,14 @@
 
 ## Visual Interface
 
-The tray icon shaped like a shield changes based on container states:
-- <img src="src/luks_tray/resources/white-shield-v04.svg" alt="White Shield Icon" width="24" height="24"> - All containers are locked and unmounted (i.e., all data is secure).
-- <img src="src/luks_tray/resources/alert-shield-v04.svg" alt="Alert Shield Icon" width="24" height="24"> - Some containers are unlocked but unmounted (i.e., one or more anomalies).
-- <img src="src/luks_tray/resources/green-shield-v04.svg" alt="Green Shield Icon" width="24" height="24"> - Some containers are mounted w/o any anomalies (i.e., some of the encrypted data is available)
+The tray icon is shaped like a shield changes based on container states:
+- <img src="https://github.com/joedefen/luks-tray/raw/main/src/luks_tray/resources/white-shield-v04.svg" alt="White Shield Icon" width="24" height="24"> - All containers are locked and unmounted (i.e., all data is secure).
+- <img src="https://github.com/joedefen/luks-tray/raw/main/src/luks_tray/resources/alert-shield-v04.svg" alt="Alert Shield Icon" width="24" height="24"> - Some containers are unlocked but unmounted (i.e., one or more anomalies).
+- <img src="https://github.com/joedefen/luks-tray/raw/main/src/luks_tray/resources/green-shield-v04.svg" alt="Green Shield Icon" width="24" height="24"> - Some containers are mounted w/o any anomalies (i.e., some of the encrypted data is available)
 
-Here is an sample menu:
+Here is an sample menu as seen when you right-click the tray shield icon:
 
-<img src="images/sample-menu.png" alt="Sample Menu"></center>
+<img src="https://github.com/joedefen/luks-tray/raw/main/images/sample-menu.png" alt="Sample Menu"></center>
 
 Notes:
 
@@ -49,7 +49,7 @@ Notes:
 
 ## Configuration
 
-Settings are stored in `~/.config/luks-tray/`:
+Settings and data files are stored in `~/.config/luks-tray/`:
 - **History file** - Encrypted storage of passwords and mount preferences (when master password enabled)
 - **Configuration file** - allows configuration of:
 
