@@ -66,6 +66,65 @@ def rerun_if_busy(args, errs, repeat=3, delay=0.5, input_str=None):
     return err
 
 
+from PyQt6.QtWidgets import QMessageBox
+import subprocess
+
+def run_unmount(mount_point: str, busy_warns: set) -> str | None:
+    """Attempts to unmount the given mount point.
+    If it fails due to 'busy', show a popup with the list of processes using it.
+    Returns error string or None on success.
+    """
+    try:
+        sub = subprocess.run(["umount", mount_point],
+                             capture_output=True, text=True)
+    except Exception as e:
+        return f"FAIL: umount {mount_point}: Exception: {e}"
+
+    if sub.returncode == 0:
+        return None  # success
+
+    err = f"FAIL: umount {mount_point}: {sub.stdout.strip()} {sub.stderr.strip()} [rc={sub.returncode}]"
+
+    if 'busy' not in sub.stderr.lower() or mount_point in busy_warns:
+        return err  # Not a 'busy' error — no popup needed
+
+    # Try to get processes using the mount point
+    try:
+        fuser = subprocess.run(["fuser", "-vm", mount_point],
+                               capture_output=True, text=True, check=True)
+        fuser = subprocess.run(
+                ["fuser", "-vm", mount_point],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True
+            )
+        fuser_out = fuser.stderr.strip()  # This is the real data
+
+    except Exception as e:
+        fuser_out = f"(Could not get process info: {e})"
+
+    busy_warns.add(mount_point)
+
+    # Extract just PID and COMMAND, skip 'kernel' and header lines
+    process_lines = []
+    for line in fuser_out.splitlines():
+        if line.startswith("USER") or mount_point in line:
+            continue  # Skip header and mount line
+        process_lines.append(line.strip())
+
+    info = "\n - ".join(process_lines) if process_lines else "(No user-space processes found using the mount)"
+
+    # Show user-friendly popup
+    msg = QMessageBox()
+    msg.setIcon(QMessageBox.Icon.Warning)
+    msg.setWindowTitle("Unmount Failed — Device Busy")
+    msg.setText(f"'{mount_point}' busy by these processes:\n - {info}")
+    msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+    msg.exec()
+
+    return err
+
 class DeviceInfo:
     """ Class to dig out the info we want from the system."""
     bans = ('/', '/home', '/var', '/usr', '/tmp', '/opt', '/srv',
@@ -825,36 +884,13 @@ class CommonDialog(QDialog):
         else:
             return run_cmd([udisks_cmd, '--mount', mapper_path])
 
-    def _mount_manual(self, tray, mapper_path, upon):
+    def _mount_manual(self, tray, mapper_path, upon, do_bindfs=False):
         """Manual mounting with bindfs"""
         err = run_cmd(['mount', mapper_path, upon])
-        if not err:
+        if do_bindfs and not err:
             err = run_cmd(['bindfs', '-u', str(tray.uid), '-g', str(tray.gid),
                           upon, upon])
         return err
-
-#   def _mount_manual(self, tray, mapper_path, upon):
-#       """Manual mounting with bindfs - test user unmount"""
-#       err = run_cmd(['mount', mapper_path, upon])
-#       if not err:
-#           err = run_cmd(['bindfs', '-u', str(tray.uid), '-g', str(tray.gid),
-#                          '-o', 'user', upon, upon])
-#       return err
-
-#   def _mount_manual(self, tray, mapper_path, upon):
-#       """Mount using udisks2 as the original user"""
-#       # Run udisks2 as the original user, not root
-#       cmd = ['sudo', '-u', f'#{tray.uid}', 'udisksctl', 'mount',
-#              '-b', mapper_path, '--mountpoint', upon]
-#       err = run_cmd(cmd)
-#       return err
-
-#   def _mount_manual(self, tray, mapper_path, upon):
-#       """Regular mount with ownership options"""
-#       # Try mount options that work with the filesystem type
-#       err = run_cmd(['mount', '-o', f'uid={tray.uid},gid={tray.gid}',
-#                      mapper_path, upon])
-#       return err
 
     def _setup_loop_device(self, container):
         """Set up loop device for file-based containers"""
@@ -944,7 +980,7 @@ class CommonDialog(QDialog):
                     if err:
                         return err
 
-                return self._mount_manual(tray, mapper_path, upon)
+                return self._mount_manual(tray, mapper_path, upon, do_bindfs=bool(luks_file))
             else:
                 # Auto-mounting: use hybrid approach (cryptsetup unlock + udisks2 mount)
                 err = self._unlock_luks(device_path, password, luks_device)
@@ -1026,7 +1062,7 @@ class MasterPasswordDialog(CommonDialog):
         super().__init__()
         self.setWindowTitle('Master Password Dialog')
         self.add_input_field('password', "Master Password", '', 24, add_on='password')
-        self.add_push_button('OK', self.set_master_password)
+        self.add_push_button('OK', self.set_m:aster_password)
         self.add_push_button('Cancel', self.cancel)
         self.main_layout.addLayout(self.button_layout)
         self.setLayout(self.main_layout)
@@ -1179,27 +1215,31 @@ class MountDeviceDialog(CommonDialog):
         self.show_progress("Unmount/Close device...")
 
         tray.update_mounts()
+        busy_warns = set()
 
         if container:
             for filesystem in container.filesystems:
-                prev_err_cnt = len(errs)
                 for mount in filesystem.mounts:
-                    self.kill_bindfs_on_mount(mount)
+                    ### self.kill_bindfs_on_mount(mount)
                     if tray.is_mounted(mount):
-                        rerun_if_busy(["umount", mount], errs)
-                        if prev_err_cnt < len(errs):
-                            continue
-                mapped_device = f'/dev/mapper/{filesystem.name}'
-                if os.path.exists(mapped_device) and stat.S_ISBLK(os.stat(mapped_device).st_mode):
-                    if tray.is_mounted(mapped_device):
-                        rerun_if_busy(["umount", mapped_device], errs)
-                    run_cmd(["cryptsetup", "luksClose", filesystem.name], errs)
+                        err = run_unmount(mount, busy_warns)
+                        if err:
+                            errs.append(err)
+#               mapped_device = f'/dev/mapper/{filesystem.name}'
+#               ignores = []
+#               if os.path.exists(mapped_device) and stat.S_ISBLK(os.stat(mapped_device).st_mode):
+#                   if tray.is_mounted(mapped_device):
+#                       run_cmd(["umount", mapped_device], ignores)
+
+            if len(errs) <= 1:
+                run_cmd(["cryptsetup", "luksClose", filesystem.name], errs)
 
         # Hide progress indicator
         self.hide_progress()
 
         if len(errs) > 1:
-            self.alert_errors(errs)
+            if not busy_warns:
+                self.alert_errors(errs)
             return # don't close dialog box
 
         tray.update_menu()
@@ -1284,6 +1324,7 @@ class MountFileDialog(CommonDialog):
         tray = LuksTray.singleton
         container = tray.containers.get(uuid, None)
         self.show_progress('Unmount/Close crypt file...')
+        busy_warns = set()
         if container:
             for _ in range(2):
                 # it may take two dismounts, one for the regular mount, and
@@ -1291,7 +1332,11 @@ class MountFileDialog(CommonDialog):
                 tray.update_mounts()
                 for mount in container.mounts:
                     if tray.is_mounted(mount):
-                        rerun_if_busy(["umount", mount], errs=errs)
+                        err = run_unmount(mount, busy_warns)
+                        if err:
+                            errs.append(err)
+                if busy_warns:
+                    break
 
             if not errs:
                 run_cmd(["cryptsetup", "luksClose", container.name], errs=errs)
@@ -1304,7 +1349,8 @@ class MountFileDialog(CommonDialog):
 
         tray.update_menu()
         if errs:
-            self.alert_errors(errs)
+            if not busy_warns:
+                self.alert_errors(errs)
         else:
             self.accept()
 

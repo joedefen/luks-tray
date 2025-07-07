@@ -38,9 +38,10 @@ Here is an sample menu:
 Notes:
 
 - the first section shows LUKS devices, and the second shows LUKS files.
-- click a ✅ entry to dismount and lock a mounted,
--  unlocked LUKS container
-- click a 🔳 entry to mount a locked LUKS container
+- click a ✅ entry to dismount and lock a mounted, unlocked LUKS container
+
+  - if busy, you are shown the PIDs and names of processes preventing dismount
+- click a 🔳 entry to unlock and mount a locked LUKS container
 - click a ‼️ entry to lock an unmounted, unlocked container (considered an anomaly)
 - or click of the action lines to perform the described action
 - LUKS files are only automatically detected in its history; when you add or create new LUKS files, they are added to the history.
@@ -65,10 +66,7 @@ Settings are stored in `~/.config/luks-tray/`:
 
 ## Requirements
 
-- Linux with LUKS/cryptsetup support
-- PyQt6
-- Standard utilities: `lsblk`, `cryptsetup`, `mount`, `umount`
-
+- Required standard utilities: `lsblk`, `cryptsetup`, `mount`, `umount`, `kill`, `fuser`, `losetup`, `truncate`, and one of `udisksctl`, `udisks`, or `udisks2`.
 ## Limitations
 
 - **Not for whole disk encryption** - Excludes system mount points like `/`, `/home`, `/var` to avoid interfering with boot-time encrypted volumes
