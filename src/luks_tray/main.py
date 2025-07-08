@@ -24,7 +24,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
-from PyQt6.QtWidgets import QFileDialog, QCheckBox
+from PyQt6.QtWidgets import QFileDialog, QCheckBox, QSizePolicy
 from PyQt6.QtWidgets import QProgressBar, QWidgetAction, QWidget
 from PyQt6.QtGui import QIcon, QCursor, QAction, QFont, QFontDatabase, QFontInfo
 from PyQt6.QtCore import QTimer, Qt
@@ -155,6 +155,7 @@ class DeviceInfo:
             parent=None,    # a partition
             filesystems=[],        # child file systems
             back_file='', # backing file
+            vital=None, # history if any
             )
 
 
@@ -330,6 +331,7 @@ class LuksTray():
         self.app.setQuitOnLastWindowClosed(False)
         self.mono_font = QFont("Consolas", 10)
         self.mono_font.setStyleHint(QFont.StyleHint.Monospace)
+        self.emoji_font = self.get_emoji_font()
         # self.mono_font = QFont("DejaVu Sans Mono", 10)
         self.app.setFont(self.mono_font)
 
@@ -385,6 +387,28 @@ class LuksTray():
         self.timer.timeout.connect(self.update_menu)
         self.timer.start(3000)  # 3000 milliseconds = 3 seconds
         
+    
+    @staticmethod
+    def get_emoji_font(size=10):
+        """Try to load Noto Color Emoji, fallback to system emoji-capable fonts."""
+        preferred_fonts = [
+            "Noto Color Emoji",         # Linux standard
+            "Segoe UI Emoji",           # Windows
+            "Apple Color Emoji",        # macOS
+            "Symbola",                  # B&W fallback
+            "EmojiOne Color",           # Older option
+        ]
+
+        for font_name in preferred_fonts:
+            font = QFont(font_name, size)
+            resolved_family = QFontInfo(font).family()
+            if resolved_family == font_name:
+                return font
+
+
+        prt("Warning: No known emoji font found — emojis likely degraded.")
+        return QFont()  # system default
+    
     def update_mounts(self):
         """ TBD """
         with open('/proc/mounts', 'r', encoding='utf-8') as f:
@@ -404,16 +428,22 @@ class LuksTray():
         if self.history.status in ('unlocked', 'clear_text'):
             self.containers = self.lsblk.parse_lsblk()
             self.merge_containers_history()
+            # add in the containers that are not mounted but in
+            # the history
             for vital in self.history.vitals.values():
-                if not vital.back_file or vital.uuid in self.containers:
-                    continue
-                ns = DeviceInfo.make_partition_namespace('', '')
-                ns.type = 'crypt'
-                ns.back_file = vital.back_file
-                ns.upon = vital.upon
-                ns.opened = False
-                ns.uuid = vital.uuid
-                self.containers[vital.uuid] = ns
+                container = self.containers.get(vital.uuid, None)
+                if container:
+                    container.vital = vital
+                if not container and vital.back_file:
+                    # insert known file container (present device containers
+                    # should be in the containers list already)
+                    ns = DeviceInfo.make_partition_namespace('', '')
+                    ns.type = 'crypt'
+                    ns.back_file = vital.back_file
+                    ns.opened = False
+                    ns.uuid = vital.uuid
+                    ns.vital = vital
+                    self.containers[vital.uuid] = ns
 
         self.update_menu_items()
 
@@ -432,119 +462,11 @@ class LuksTray():
         details += 'UUID={container.UUID}\n'
         QMessageBox.information(None, "Partition Details", details)
 
-    def old_update_menu_items(self):
-        """Update context menu with LUKS partitions."""
-        menu = QMenu()
-        icon_key = 'none'
-        do_alerts = self.ini_tool.get_current_val('show_anomaly_alerts')
-
-        if self.history.status == 'locked':
-            action = QAction('Click to enter master password', self.app)
-            action.triggered.connect(self.prompt_master_password)
-            menu.addAction(action)
-        else:
-            separated = False
-            idx = -1 # so idx can be used after loop
-            for idx, container in enumerate(self.containers.values()):
-                mountpoint = container.upon
-                if not container.opened:
-                    mountpoint = f'[{container.upon}]'
-
-
-                if idx > 0 and not separated and container.type == 'crypt':
-                    menu.addSeparator()
-                    separated = True
-
-                name = container.name
-                if container.back_file:
-                    name = container.back_file
-                    if name.startswith('/home/'):
-                        name = '~' + name[6:]
-
-                # Set the title based on the state
-                title = ('✅ ' if mountpoint.startswith('/') else
-                            '‼️ ' if container.opened else '🔳 ')
-
-                if title.startswith('‼️'):
-                    title += f' {name} CLICK-to-LOCK'
-                else:
-                    title += f' {name} {mountpoint}'
-                # title += f' {name} {mountpoint}'
-
-                if mountpoint.startswith('/') and icon_key != 'alert':
-                    icon_key = 'ok'
-                elif container.opened and do_alerts:
-                    icon_key = 'alert'
-
-                # Create the action for the partition
-                action = QAction(title, self.app)
-                action.setFont(self.mono_font)
-
-                # Connect the left-click action
-                if container.back_file:
-                    action.triggered.connect(lambda checked,
-                                 x=container.uuid: self.handle_file_click(x))
-                else:
-                    action.triggered.connect(lambda checked,
-                                 x=container.uuid: self.handle_device_click(x))
-
-                # Use a custom event filter to detect right-click for showing details
-                # action.customContextMenuRequested.connect(
-                #               lambda: self.show_partition_details(container.name))
-
-                # Add action to the menu
-                menu.addAction(action)
-
-            if idx > 0 and not separated:
-                menu.addSeparator()
-                separated = True
-            action = QAction('Create New Crypt File', self.app)
-            action.setFont(self.mono_font)
-            action.triggered.connect(self.handle_create_file_click)
-            menu.addAction(action)
-
-            action = QAction('Add Existing Crypt File', self.app)
-            action.setFont(self.mono_font)
-            action.triggered.connect(self.handle_add_file_click)
-            menu.addAction(action)
-
-            menu.addSeparator()
-            if self.history.status in ('clear_text', 'unlocked'):
-                verb = 'Set' if self.history.status == 'clear_text' else 'Update/Clear'
-                action = QAction(f'{verb} Master Password', self.app)
-                action.setFont(self.mono_font)
-                action.triggered.connect(self.prompt_master_password)
-                menu.addAction(action)
-
-        # Add options to exit
-        action = QAction("Exit", self.app)
-        action.setFont(self.mono_font)
-        action.triggered.connect(self.exit_app)
-        menu.addAction(action)
-
-        return self.replace_menu_if_different(menu, icon_key)
-
-    def add_emoji_item(self, menu, emoji, text, callback):
-        """Add a menu item with color emoji and monospaced aligned text."""
-        label = QLabel()
-        label.setText(
-            f'<span style="font-family: Noto Color Emoji">{emoji}</span> '
-            f'<span style="font-family: {self.mono_font.family()}; white-space: pre">{text}</span>'
-        )
-        label.setStyleSheet("padding: 4px;")
-        label.setTextFormat(Qt.TextFormat.RichText)
-
-        action = QWidgetAction(self.app)
-        action.setDefaultWidget(label)
-
-        # Connect to the underlying menu item trigger (use mousePressEvent or similar if needed)
-        label.mousePressEvent = lambda event: callback()
-
-        menu.addAction(action)
-    
     def update_menu_items(self):
         """Update context menu with LUKS partitions."""
         menu = QMenu()
+        # menu.setFont(self.emoji_font)
+
         icon_key = 'none'
         do_alerts = self.ini_tool.get_current_val('show_anomaly_alerts')
 
@@ -558,8 +480,8 @@ class LuksTray():
             idx = -1
             for idx, container in enumerate(self.containers.values()):
                 mountpoint = container.upon
-                if not container.opened:
-                    mountpoint = f'[{container.upon}]'
+                if not mountpoint:
+                    mountpoint = f'[{container.vital.upon}]'
 
                 if idx > 0 and not separated and container.type == 'crypt':
                     menu.addSeparator()
@@ -594,7 +516,13 @@ class LuksTray():
                     callback = lambda x=container.uuid: self.handle_device_click(x)
 
                 # Add the emoji-enhanced item
-                self.add_emoji_item(menu, emoji, text, callback)
+                # self.add_emoji_item(menu, emoji, text, callback)
+                # prt(f'{emoji} {text}')
+                action = QAction(f'{emoji} {text}', self.app)
+                action.setFont(self.mono_font)  # applies to non-HTML paths
+                action.triggered.connect(callback)
+                menu.addAction(action)
+
 
             # Other fixed menu entries
             if idx > 0 and not separated:
@@ -642,11 +570,20 @@ class LuksTray():
                 # Show menu at cursor position
                 cursor_pos = QCursor.pos()
                 self.menu.popup(cursor_pos)
+                prt('called menu.popup()')
 
             return True
 
+        def get_action_text(action):
+            if isinstance(action, QWidgetAction):
+                widget = action.defaultWidget()
+                if isinstance(widget, QLabel):
+                    return widget.text()
+                return '<widget>'
+            return action.text()
 
         if not self.menu: # or menu.actions() != self.menu.actions():
+            prt('replace: new menu')
             return replace_menu()
         if self.prev_icon_key != icon_key:
             self.prev_icon_key = icon_key
@@ -654,9 +591,11 @@ class LuksTray():
 
         if len(menu.actions()) != len(self.menu.actions()):
             return replace_menu()
+
         for new_action, old_action in zip(menu.actions(), self.menu.actions()):
-            if new_action.text() != old_action.text():
+            if get_action_text(new_action) != get_action_text(old_action):
                 return replace_menu()
+
         return False
 
 

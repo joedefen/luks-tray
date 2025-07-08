@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "luks-tray"
-version = "1.3.4"
+version = "1.3.5"
 description = "A Qt-based tray app for managing LUKS encrypted volumes"
 authors = [
     { name = "Joe Defen", email = "joedef@gmail.com" }

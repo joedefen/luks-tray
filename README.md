@@ -1,6 +1,6 @@
 # LUKS Tray
 
-**luks-tray** is a GTK-based tray utility for managing ad hoc LUKS-encrypted files: mount and unmount with ease from your desktop environment.
+**luks-tray** is a GTK-based tray utility for managing ad hoc LUKS-encrypted files: mount and unmount with ease from your Linux desktop environment.
 
 
 ## Features
