@@ -3,8 +3,8 @@ requires = ["flit_core >=3.2,<4"]
 build-backend = "flit_core.buildapi"
 
 [project]
+version = "1.4.1"
 name = "luks-tray"
-version = "1.4"
 description = "A Qt-based tray app for managing LUKS encrypted volumes"
 authors = [
     { name = "Joe Defen", email = "joedef@gmail.com" }
@@ -33,9 +33,3 @@ Homepage = "https://github.com/joedefen/luks-tray"
 
 [project.scripts]
 luks-tray = "luks_tray.main:main"
-
-[tool.flit.module]
-# Your code lives in src/luks_tray
-# So this makes flit look in `src/` for packages
-name = "luks_tray"
-directory = "src"

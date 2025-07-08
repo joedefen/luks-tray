@@ -509,18 +509,19 @@ class LuksTray():
                 else:
                     text = f'{name} {mountpoint}'
 
-                # Create callback closure
-                if container.back_file:
-                    callback = lambda x=container.uuid: self.handle_file_click(x)
-                else:
-                    callback = lambda x=container.uuid: self.handle_device_click(x)
 
                 # Add the emoji-enhanced item
                 # self.add_emoji_item(menu, emoji, text, callback)
                 # prt(f'{emoji} {text}')
                 action = QAction(f'{emoji} {text}', self.app)
                 action.setFont(self.mono_font)  # applies to non-HTML paths
-                action.triggered.connect(callback)
+                                # Connect the left-click action
+                if container.back_file:
+                    action.triggered.connect(lambda checked,
+                                 x=container.uuid: self.handle_file_click(x))
+                else:
+                    action.triggered.connect(lambda checked,
+                                 x=container.uuid: self.handle_device_click(x))
                 menu.addAction(action)
 
 
@@ -1573,7 +1574,7 @@ def mainBasic():
     # Create a tray icon
     tray_icon = QSystemTrayIcon()
     tray_icon.setIcon(QIcon(
-        "/home/joe/Projects/luks-tray/src/luks_tray/resources/orange-shield-v03.svg"))
+        "/home/joe/Projects/luks-tray/luks_tray/resources/orange-shield-v03.svg"))
 
     # Create a right-click menu for the tray icon
     tray_menu = QMenu()
