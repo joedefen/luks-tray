@@ -570,7 +570,6 @@ class LuksTray():
                 # Show menu at cursor position
                 cursor_pos = QCursor.pos()
                 self.menu.popup(cursor_pos)
-                prt('called menu.popup()')
 
             return True
 
@@ -583,7 +582,6 @@ class LuksTray():
             return action.text()
 
         if not self.menu: # or menu.actions() != self.menu.actions():
-            prt('replace: new menu')
             return replace_menu()
         if self.prev_icon_key != icon_key:
             self.prev_icon_key = icon_key
@@ -616,7 +614,7 @@ class LuksTray():
     def handle_add_file_click(self):
         """ TBD """
         dialog = MountFileDialog(None)
-        prt('about to exec AddFileClick...')
+        # prt('about to exec AddFileClick...')
         dialog.exec()
 
     def handle_create_file_click(self):
