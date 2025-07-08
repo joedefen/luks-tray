@@ -25,9 +25,11 @@ from types import SimpleNamespace
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
 from PyQt6.QtWidgets import QFileDialog, QCheckBox
-from PyQt6.QtWidgets import QProgressBar
-from PyQt6.QtGui import QIcon, QCursor, QAction, QFont, QFontDatabase
+from PyQt6.QtWidgets import QProgressBar, QWidgetAction, QWidget
+from PyQt6.QtGui import QIcon, QCursor, QAction, QFont, QFontDatabase, QFontInfo
 from PyQt6.QtCore import QTimer, Qt
+    # from PyQt6.QtWidgets import QLabel, QWidgetAction
+    # from PyQt6.QtCore import Qt
 
 from luks_tray.History import HistoryClass
 from luks_tray.Utils import prt
@@ -326,10 +328,14 @@ class LuksTray():
         self.ini_tool = ini_tool
         self.app = QApplication([])
         self.app.setQuitOnLastWindowClosed(False)
-        if "Noto Color Emoji" in QFontDatabase.families():
-            self.app.setFont(QFont("Noto Color Emoji"))
-        else:
-            self.app.setFont(QFont("DejaVu Sans"))  # fallback
+        self.mono_font = QFont("Consolas", 10)
+        self.mono_font.setStyleHint(QFont.StyleHint.Monospace)
+        # self.mono_font = QFont("DejaVu Sans Mono", 10)
+        self.app.setFont(self.mono_font)
+
+        # self.has_emoji_font = bool("Noto Color Emoji" in QFontDatabase.families())
+        # self.emoji_font = (QFont("Noto Color Emoji") if self.has_emoji_font
+                           # else QFont("DejaVu Sans"))
 
         self.history = HistoryClass(ini_tool.history_path)
         self.history.restore()
@@ -378,7 +384,7 @@ class LuksTray():
         self.timer = QTimer(self.tray_icon)
         self.timer.timeout.connect(self.update_menu)
         self.timer.start(3000)  # 3000 milliseconds = 3 seconds
-
+        
     def update_mounts(self):
         """ TBD """
         with open('/proc/mounts', 'r', encoding='utf-8') as f:
@@ -426,10 +432,9 @@ class LuksTray():
         details += 'UUID={container.UUID}\n'
         QMessageBox.information(None, "Partition Details", details)
 
-    def update_menu_items(self):
+    def old_update_menu_items(self):
         """Update context menu with LUKS partitions."""
         menu = QMenu()
-        mono_font = QFont("Consolas", 10)
         icon_key = 'none'
         do_alerts = self.ini_tool.get_current_val('show_anomaly_alerts')
 
@@ -457,8 +462,6 @@ class LuksTray():
                         name = '~' + name[6:]
 
                 # Set the title based on the state
-                # title = ('✅🠋 ' if mountpoint.startswith('/') else
-                #           '🟡⛛ ' if container.opened else '⭕🠉 ')
                 title = ('✅ ' if mountpoint.startswith('/') else
                             '‼️ ' if container.opened else '🔳 ')
 
@@ -475,7 +478,7 @@ class LuksTray():
 
                 # Create the action for the partition
                 action = QAction(title, self.app)
-                action.setFont(mono_font)
+                action.setFont(self.mono_font)
 
                 # Connect the left-click action
                 if container.back_file:
@@ -496,12 +499,12 @@ class LuksTray():
                 menu.addSeparator()
                 separated = True
             action = QAction('Create New Crypt File', self.app)
-            action.setFont(mono_font)
+            action.setFont(self.mono_font)
             action.triggered.connect(self.handle_create_file_click)
             menu.addAction(action)
 
             action = QAction('Add Existing Crypt File', self.app)
-            action.setFont(mono_font)
+            action.setFont(self.mono_font)
             action.triggered.connect(self.handle_add_file_click)
             menu.addAction(action)
 
@@ -509,17 +512,120 @@ class LuksTray():
             if self.history.status in ('clear_text', 'unlocked'):
                 verb = 'Set' if self.history.status == 'clear_text' else 'Update/Clear'
                 action = QAction(f'{verb} Master Password', self.app)
-                action.setFont(mono_font)
+                action.setFont(self.mono_font)
                 action.triggered.connect(self.prompt_master_password)
                 menu.addAction(action)
 
         # Add options to exit
         action = QAction("Exit", self.app)
-        action.setFont(mono_font)
+        action.setFont(self.mono_font)
         action.triggered.connect(self.exit_app)
         menu.addAction(action)
 
         return self.replace_menu_if_different(menu, icon_key)
+
+    def add_emoji_item(self, menu, emoji, text, callback):
+        """Add a menu item with color emoji and monospaced aligned text."""
+        label = QLabel()
+        label.setText(
+            f'<span style="font-family: Noto Color Emoji">{emoji}</span> '
+            f'<span style="font-family: {self.mono_font.family()}; white-space: pre">{text}</span>'
+        )
+        label.setStyleSheet("padding: 4px;")
+        label.setTextFormat(Qt.TextFormat.RichText)
+
+        action = QWidgetAction(self.app)
+        action.setDefaultWidget(label)
+
+        # Connect to the underlying menu item trigger (use mousePressEvent or similar if needed)
+        label.mousePressEvent = lambda event: callback()
+
+        menu.addAction(action)
+    
+    def update_menu_items(self):
+        """Update context menu with LUKS partitions."""
+        menu = QMenu()
+        icon_key = 'none'
+        do_alerts = self.ini_tool.get_current_val('show_anomaly_alerts')
+
+        if self.history.status == 'locked':
+            action = QAction('Click to enter master password', self.app)
+            action.setFont(self.mono_font)
+            action.triggered.connect(self.prompt_master_password)
+            menu.addAction(action)
+        else:
+            separated = False
+            idx = -1
+            for idx, container in enumerate(self.containers.values()):
+                mountpoint = container.upon
+                if not container.opened:
+                    mountpoint = f'[{container.upon}]'
+
+                if idx > 0 and not separated and container.type == 'crypt':
+                    menu.addSeparator()
+                    separated = True
+
+                name = container.name
+                if container.back_file:
+                    name = container.back_file
+                    if name.startswith('/home/'):
+                        name = '~' + name[6:]
+
+                # Determine which emoji to show
+                if mountpoint.startswith('/'):
+                    emoji = '✅'
+                    icon_key = 'ok' if icon_key != 'alert' else icon_key
+                elif container.opened:
+                    emoji = '‼️'
+                    icon_key = 'alert' if do_alerts else icon_key
+                else:
+                    emoji = '🔳'
+
+                # Construct menu line text
+                if emoji == '‼️':
+                    text = f'{name} CLICK-to-LOCK'
+                else:
+                    text = f'{name} {mountpoint}'
+
+                # Create callback closure
+                if container.back_file:
+                    callback = lambda x=container.uuid: self.handle_file_click(x)
+                else:
+                    callback = lambda x=container.uuid: self.handle_device_click(x)
+
+                # Add the emoji-enhanced item
+                self.add_emoji_item(menu, emoji, text, callback)
+
+            # Other fixed menu entries
+            if idx > 0 and not separated:
+                menu.addSeparator()
+
+            action = QAction('Create New Crypt File', self.app)
+            action.setFont(self.mono_font)
+            action.triggered.connect(self.handle_create_file_click)
+            menu.addAction(action)
+
+            action = QAction('Add Existing Crypt File', self.app)
+            action.setFont(self.mono_font)
+            action.triggered.connect(self.handle_add_file_click)
+            menu.addAction(action)
+
+            menu.addSeparator()
+
+            if self.history.status in ('clear_text', 'unlocked'):
+                verb = 'Set' if self.history.status == 'clear_text' else 'Update/Clear'
+                action = QAction(f'{verb} Master Password', self.app)
+                action.setFont(self.mono_font)
+                action.triggered.connect(self.prompt_master_password)
+                menu.addAction(action)
+
+        action = QAction("Exit", self.app)
+        action.setFont(self.mono_font)
+        action.triggered.connect(self.exit_app)
+        menu.addAction(action)
+
+        return self.replace_menu_if_different(menu, icon_key)
+
 
     def replace_menu_if_different(self, menu, icon_key):
         """ TBD """
@@ -571,6 +677,7 @@ class LuksTray():
     def handle_add_file_click(self):
         """ TBD """
         dialog = MountFileDialog(None)
+        prt('about to exec AddFileClick...')
         dialog.exec()
 
     def handle_create_file_click(self):
@@ -614,7 +721,6 @@ class CommonDialog(QDialog):
         self.inputs = {}
         self.progress_label = None
         self.progress_bar = None
-
 
     def add_line(self, text):
         """ TBD """
