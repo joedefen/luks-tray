@@ -36,6 +36,8 @@ from luks_tray.Utils import prt
 from luks_tray import Utils
 from luks_tray.IniTool import IniTool
 
+
+
 def generate_uuid_for_file_path(file_path):
     """ Use SHA-256 to hash the file path """
     file_hash = hashlib.sha256(file_path.encode('utf-8')).hexdigest()
@@ -338,6 +340,10 @@ class LuksTray():
         # self.has_emoji_font = bool("Noto Color Emoji" in QFontDatabase.families())
         # self.emoji_font = (QFont("Noto Color Emoji") if self.has_emoji_font
                            # else QFont("DejaVu Sans"))
+                           
+        _, missing, self.udisks_cmd = self.check_dependencies()
+
+        assert not missing, f"missing system commands: {missing}"
 
         self.history = HistoryClass(ini_tool.history_path)
         self.history.restore()
@@ -387,6 +393,37 @@ class LuksTray():
         self.timer.timeout.connect(self.update_menu)
         self.timer.start(3000)  # 3000 milliseconds = 3 seconds
         
+    @staticmethod
+    def check_dependencies(verbose=False):
+        """ ensure the system utilities we need are available
+            and discover which udisks command we are using
+        """
+        utilities = [
+            'lsblk', 'cryptsetup',
+            'mount', 'umount', 'bindfs',
+            'kill', 'fuser', 'losetup', 'truncate',
+            ['udisksctl', 'udisks', 'udisks2'],
+        ]
+        found, missing, udisks_cmd = [], [], None
+        for entry in utilities:
+            utils = entry if isinstance(entry, list) else [entry]
+            got_one = False
+            for util in utils:
+                if shutil.which(util):
+                    found.append(util)
+                    got_one = True
+                    if util.startswith('udisks'):
+                        udisks_cmd = util
+                    break
+            if not got_one:
+                missing.append(entry)
+        if verbose or missing:
+            for util in found:
+                prt(f'✓  {util}')
+            for util in missing:
+                prt(f'✗  {util} - please install',
+                    ' one of' if isinstance(util, list) else '')
+        return found, missing, udisks_cmd
     
     @staticmethod
     def get_emoji_font(size=10):
@@ -868,15 +905,6 @@ class CommonDialog(QDialog):
             button.setEnabled(True)
 
     @staticmethod
-    def find_udisks_command():
-        """Find the available udisks command on the system"""
-        commands = ['udisksctl', 'udisks', 'udisks2']
-        for cmd in commands:
-            if shutil.which(cmd):
-                return cmd
-        return None
-
-    @staticmethod
     def check_upon(text, mount_points, is_device=False):
         """ Validate candidate mount point.
             Returns error (or None if no error)
@@ -938,7 +966,7 @@ class CommonDialog(QDialog):
 
     def _mount_with_udisks_mapper(self, mapper_path):
         """Mount using udisks2 for auto-mounting (assumes already unlocked)"""
-        udisks_cmd = self.find_udisks_command()
+        udisks_cmd = LuksTray.singleton.udisks_cmd
         if not udisks_cmd:
             return "Error: No udisks command found. Install udisks2."
 
@@ -1007,8 +1035,8 @@ class CommonDialog(QDialog):
                 if size is not None:
                     err = run_cmd(['truncate', '-s', f'{size}M', luks_file])
                     if not err:
-                        err = run_cmd(['cryptsetup', 'luksFormat', '-q', '--batch-mode', luks_file],
-                                     input_str=password)
+                        err = run_cmd(['cryptsetup', 'luksFormat', '--force-password',
+                               '-q', '--batch-mode', luks_file], input_str=password)
                     if err:
                         return err
                     needs_filesystem = True
@@ -1533,6 +1561,8 @@ def main():
             help='exec tail -n50 -F on log file')
     parser.add_argument('-e', '--edit-config', action='store_true',
             help='exec ${EDITOR:-vim} on config.ini file')
+    parser.add_argument('--check-deps', action='store_true',
+            help='check that necessary system programs are installed')
     opts = parser.parse_args()
 
     if opts.edit_config:
@@ -1542,6 +1572,10 @@ def main():
         print(f'RUNNING: {args}')
         os.execvp(editor, args)
         sys.exit(1) # just in case ;-)
+        
+    if opts.check_deps:
+        _, missing, _ = LuksTray.check_dependencies(verbose=True)
+        sys.exit(1 if missing else 0) # just in case ;-)
 
     if opts.follow_log:
         ini_tool = IniTool(paths_only=True)

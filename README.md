@@ -69,24 +69,40 @@ Settings and data files are stored in `~/.config/luks-tray/`:
 - Passwords are only stored when master password feature is enabled
 - History file is encrypted using the master password
 - System mount points are excluded by default to prevent interference with disk encryption
+- When creating LUKS file containers, password strength is not enforced; use due care.
 
-## Requirements
-
-- Required standard utilities: `lsblk`, `cryptsetup`, `mount`, `umount`, `kill`, `fuser`, `losetup`, `truncate`, and one of `udisksctl`, `udisks`, or `udisks2`.
+---
 ## Limitations
 
 - **Not for whole disk encryption** - Excludes system mount points like `/`, `/home`, `/var` to avoid interfering with boot-time encrypted volumes
 - **No udisks2 integration** - May not always play nicely with desktop auto-mounting tools; so mount and unmount containers with the same tool for the best results.
 - **Loop device requirement** - File containers require `lsblk` to show them as loop devices (standard on most distros)
 - **Single filesystem focus** - Containers with multiple filesystems are out of scope of this tool and get very limited support (i.e., mostly handling only the first filesystem).
-- **This app requires a working system tray.** It works best with DEs/WMs that offer **first-class tray support**, such as:
+---
+## Requirements
+#### Additional System Utilities may be Needed
+This program requires `cryptsetup`, `fuser`, and other system utilities. After install, run `luks-tray --check-deps` to get a report on what dependencies are found and missing. If any are missing, install those using your distro package manager.
+
+    
+#### Passwordless `sudo` Setup (Required)
+
+To allow the tray app to manage LUKS containers without prompting for your password each time, configure passwordless `sudo` for specific commands. For example, in a terminal, run `sudo visudo`, and then add this line at the end of the file (replacing {yourusername} with your actual username):
+
+    {yourusername} ALL=(ALL) NOPASSWD: ALL
+
+💡 This grants your user passwordless access to all commands. You may be able to limit it to just the `luks-tray` app or subset of commands. See `man sudoers` for details.
+
+#### A Working System Tray
+It works best with DEs/WMs that offer **first-class tray support**, such as:
 
   - **KDE Plasma**
   - **Sway** with **waybar**
   - **i3wm** with **polybar**
-  - However,
-    - > ⚠️ **GNOME**: Requires a third-party extension (such as AppIndicator support) to show tray icons. Results may vary across GNOME versions.
-    - > ⚠️ **Xfce** and similar lightweight DEs: Tray menus may open off-screen or be partially cut off, depending on panel layout and screen resolution.
+
+> ⚠️ **GNOME**: Requires a third-party extension (such as AppIndicator support) to show tray icons. Results may vary across GNOME versions.
+> ⚠️ **Xfce** and similar lightweight DEs: Tray menus may open off-screen or be partially cut off, depending on panel layout and screen resolution.
+
+
 
 ---
 
