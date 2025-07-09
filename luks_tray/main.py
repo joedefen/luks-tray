@@ -63,7 +63,7 @@ def rerun_if_busy(args, errs, repeat=3, delay=0.5, input_str=None):
         err = f'FAIL: {' '.join(args)}: {sub.stdout} {sub.stderr} [rc={sub.returncode}]'
         if 'busy' not in sub.stderr:
             break
-    if err:
+    if err and errs:
         errs.append(err)
     return err
 
@@ -240,13 +240,13 @@ class DeviceInfo:
                 entry = eat_one(child)
                 # entry.parent = parent.name
                 entry.parent = parent
+                if not parent.fstype:
+                    parent.fstype = 'DISK'
                 if parent.type == 'loop':
                     # IN the case of the loop device (or file container)
                     # use the UUID of the container
                     entry.uuid = parent.uuid
                     entry.back_file = parent.back_file
-                if not parent.fstype:
-                    parent.fstype = 'DISK'
                 elif 'luks' not in entry.fstype.lower():
                     continue
                 # if parent.name not in entries:
@@ -480,7 +480,7 @@ class LuksTray():
             idx = -1
             for idx, container in enumerate(self.containers.values()):
                 mountpoint = container.upon
-                if not mountpoint:
+                if not mountpoint and container.vital:
                     mountpoint = f'[{container.vital.upon}]'
 
                 if idx > 0 and not separated and container.type == 'crypt':
@@ -1005,7 +1005,7 @@ class CommonDialog(QDialog):
 
                 # Create file if needed
                 if size is not None:
-                    err = run_cmd(['truncate', '-s', f'{size}', luks_file])
+                    err = run_cmd(['truncate', '-s', f'{size}M', luks_file])
                     if not err:
                         err = run_cmd(['cryptsetup', 'luksFormat', '-q', '--batch-mode', luks_file],
                                      input_str=password)
@@ -1357,8 +1357,6 @@ class MountFileDialog(CommonDialog):
 
         elif not create: # no container ... use existing file (not creating)
             self.setWindowTitle('Add Existing Crypt File')
-            # vital = tray.history.get_vital(container.uuid)
-            # self.add_line(f'{container.back_file}')
             self.add_input_field('password', "Enter Password", '',
                                 24, add_on='password')
             self.add_input_field('back_file', "Crypt File", '', 48, add_on='file')
@@ -1460,6 +1458,15 @@ class MountFileDialog(CommonDialog):
                 err = self.check_upon(text, mount_points)
                 if err:
                     errs.append(err)
+                    
+            elif key == 'size_str':
+                try:
+                    size_str = values.get('size_str', None)
+                    megs = int(size_str)
+                    if megs < 32:
+                        errs.append(f'at least 32 expected ... invalid size ({megs})')
+                except Exception:
+                    errs.append(f'"int" expected ... invalid size ({size_str})')
 
             elif key == 'back_file':
                 path = os.path.abspath(text)

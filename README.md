@@ -79,6 +79,14 @@ Settings and data files are stored in `~/.config/luks-tray/`:
 - **No udisks2 integration** - May not always play nicely with desktop auto-mounting tools; so mount and unmount containers with the same tool for the best results.
 - **Loop device requirement** - File containers require `lsblk` to show them as loop devices (standard on most distros)
 - **Single filesystem focus** - Containers with multiple filesystems are out of scope of this tool and get very limited support (i.e., mostly handling only the first filesystem).
+- **This app requires a working system tray.** It works best with DEs/WMs that offer **first-class tray support**, such as:
+
+  - **KDE Plasma**
+  - **Sway** with **waybar**
+  - **i3wm** with **polybar**
+  - However,
+    - > ⚠️ **GNOME**: Requires a third-party extension (such as AppIndicator support) to show tray icons. Results may vary across GNOME versions.
+    - > ⚠️ **Xfce** and similar lightweight DEs: Tray menus may open off-screen or be partially cut off, depending on panel layout and screen resolution.
 
 ---
 
