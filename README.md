@@ -69,7 +69,7 @@ Settings and data files are stored in `~/.config/luks-tray/`:
       auto_mount_folder = ~/Vaults
 
   You can thus change
-    - whether passwords are shown by default.
+    - whether passwords are shown by default when being first entered.
     - whether ‼️ entries (i.e., anomalies) cause the tray icon to change to the alert shield.
     - where the automatically generated mount points live
 

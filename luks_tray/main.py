@@ -799,6 +799,21 @@ class CommonDialog(QDialog):
         self.inputs = {}
         self.progress_label = None
         self.progress_bar = None
+    
+    def hide_password(self):
+        """Hide the password programmatically."""
+        if self.password_toggle and self.password_input:
+            self.password_toggle.setChecked(False)
+            self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+            self.password_toggle.setText("👁️")
+
+    def show_password(self):
+        """Show the password programmatically."""
+        if self.password_toggle and self.password_input:
+            self.password_toggle.setChecked(True)
+            self.password_input.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.password_toggle.setText("●")
+
 
     def add_line(self, text):
         """ TBD """
@@ -854,17 +869,16 @@ class CommonDialog(QDialog):
                 assert False, f'invalid field_type{field_type}'
 
             if add_on == 'password':
-                val = tray.ini_tool.get_current_val('show_passwords_by_default')
-                val = False if placeholder_text else val # don't show existig passwords
-                if val:
-                    input_field.setEchoMode(QLineEdit.EchoMode.Normal)
-                else:
-                    input_field.setEchoMode(QLineEdit.EchoMode.Password)
+                exposed = tray.ini_tool.get_current_val('show_passwords_by_default')
+                exposed = False if placeholder_text else exposed # don't show existing passwords
                 self.password_input = input_field
-                # self.password_toggle = QPushButton("👁️")
                 self.password_toggle = QPushButton("●")
                 self.password_toggle.setFixedWidth(30)
                 self.password_toggle.setCheckable(True)
+                if exposed:
+                    self.show_password()
+                else:
+                    self.hide_password()
                 self.password_toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 self.password_toggle.clicked.connect(self.toggle_password_visibility)
                 field_layout.addWidget(self.password_toggle)
@@ -936,14 +950,10 @@ class CommonDialog(QDialog):
 
     def toggle_password_visibility(self):
         """Toggle password visibility."""
-        if not self.password_input or not self.password_toggle:
-            return
-        if self.password_toggle.isChecked():
-            self.password_input.setEchoMode(QLineEdit.EchoMode.Password)  # Hide the password
-            self.password_toggle.setText("👁️")
-        else:
-            self.password_input.setEchoMode(QLineEdit.EchoMode.Normal)  # Show the password
-            self.password_toggle.setText("●")
+        if self.password_toggle.isChecked(): # password to be exposed
+            self.show_password()
+        else: # password is to be hidden
+            self.hide_password()
 
     @staticmethod
     def get_mount_points():
@@ -1236,7 +1246,6 @@ class MountDeviceDialog(CommonDialog):
 
         self.setLayout(self.main_layout)
 
-
     def mount_device(self, uuid):
         """Attempt to mount the partition."""
 
@@ -1273,12 +1282,14 @@ class MountDeviceDialog(CommonDialog):
         if len(container.filesystems) == 1:
             luks_device = container.filesystems[0].name
 
+
         # Proceed with mounting if no errors
         if len(errs) <= 1:
             mount_point = values['upon']
             if mount_point and not os.path.exists(mount_point):
                 os.makedirs(mount_point, exist_ok=True)
 
+            self.hide_password()
             self.show_progress('Mount device...')
             err = self.mount_luks_container(tray, container, values['password'],
                             upon=mount_point, luks_device=luks_device)
