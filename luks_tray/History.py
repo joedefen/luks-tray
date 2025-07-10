@@ -25,6 +25,7 @@ class HistoryClass:
         self.vitals = {}
         self.last_mtime = None
         self.file_existed = False
+        self.upons = set() # all known mounts
 
 
     @staticmethod
@@ -73,7 +74,9 @@ class HistoryClass:
         """Ensure a discovered container is in the history"""
         # do not save auto-mounts by file managers or gnome-disks
         upon = container.upon
-        upon = '' if upon.startswith(('/run/', '/media/')) else upon
+        # upon = '' if upon.startswith(('/run/', '/media/')) else upon
+        if upon:
+            self.upons.add(upon)
         uuid = container.uuid
         if uuid not in self.vitals:
             ns = self.make_ns(uuid)
@@ -137,22 +140,6 @@ class HistoryClass:
         except (json.JSONDecodeError, UnicodeDecodeError):
             return True  # If we can't load JSON, it's likely encrypted
 
-    def old_restore(self): # TODO: remove
-        """ TBD """
-        try:
-            with open(self.path, 'r', encoding='utf-8') as handle:
-                entries = json.load(handle)
-            self.vitals = {}
-            for uuid, entry in entries.items():
-                self.vitals[uuid] = SimpleNamespace(**entry)
-
-            self.dirty = False
-            return True
-
-        except Exception as e:
-            prt(f'restored picks FAILED: {e}')
-            return True
-
     def _json_data_to_namespaces(self, entries):
         def get_luks_uuid(path):
             try:
@@ -178,6 +165,8 @@ class HistoryClass:
             if ns.back_file and get_luks_uuid(ns.back_file) != uuid:
                 purges.append(uuid)
             self.vitals[uuid] = ns
+            if ns.upon:
+                self.upons.add(ns.upon)
         for uuid in purges:
             del self.vitals[uuid]
             self.dirty = True

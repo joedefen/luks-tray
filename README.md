@@ -20,7 +20,8 @@
     - Add an existing or create a new encrypted file to manage it.
 4. Click a container to mount (🔳) or unmount (✅ or ‼️)
 5. When mounting a container, enter its password and choose mount point in the dialog
-    - if the mount point is empty, then the mount point is automatically chosen.
+    - if the app has a mount point in its history, it will fill in that mount point
+    - otherwise, the app will generate a mount point in `~/Vaults`
 
 For best results, the Noto Color Emoji fonts should be installed if not already:
 
@@ -47,6 +48,7 @@ Notes:
 - click a ✅ entry to dismount and lock a mounted, unlocked LUKS container
 
   - if busy, you are shown the PIDs and names of processes preventing dismount
+
 - click a 🔳 entry to unlock and mount a locked LUKS container
 - click a ‼️ entry to lock an unmounted, unlocked container (considered an anomaly)
 - or click of the action lines to perform the described action
@@ -58,11 +60,18 @@ Notes:
 ## Configuration
 
 Settings and data files are stored in `~/.config/luks-tray/`:
-- **History file** - Encrypted storage of passwords and mount preferences (when master password enabled)
-- **Configuration file** - allows configuration of:
+- **History file** - Stored of passwords and mount preferences; it is encrypted when the master password enabled.
+- **INI file** - the default .ini file looks like:
 
+      [ui]
+      show_passwords_by_default = True
+      show_anomaly_alerts = True
+      auto_mount_folder = ~/Vaults
+
+  You can thus change
     - whether passwords are shown by default.
     - whether ‼️ entries (i.e., anomalies) cause the tray icon to change to the alert shield.
+    - where the automatically generated mount points live
 
 ## Security Notes
 
@@ -101,7 +110,6 @@ It works best with DEs/WMs that offer **first-class tray support**, such as:
 
 > ⚠️ **GNOME**: Requires a third-party extension (such as AppIndicator support) to show tray icons. Results may vary across GNOME versions.
 > ⚠️ **Xfce** and similar lightweight DEs: Tray menus may open off-screen or be partially cut off, depending on panel layout and screen resolution.
-
 
 
 ---

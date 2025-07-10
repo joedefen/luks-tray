@@ -36,6 +36,7 @@ class IniTool:
             'ui': {
                 'show_passwords_by_default': True,
                 'show_anomaly_alerts': True,
+                'auto_mount_folder': '~/Vaults',
             }
         }
         self.folder = os.path.join(get_user_home(), ".config/luks-tray")

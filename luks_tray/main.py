@@ -17,6 +17,8 @@ import traceback
 import hashlib
 import time
 import importlib.resources
+import petname
+import random
 from pathlib import Path
 from functools import partial
 from io import StringIO
@@ -94,8 +96,6 @@ def run_unmount(mount_point: str, busy_warns: set) -> str | None:
 
     # Try to get processes using the mount point
     try:
-        fuser = subprocess.run(["fuser", "-vm", mount_point],
-                               capture_output=True, text=True, check=True)
         fuser = subprocess.run(
                 ["fuser", "-vm", mount_point],
                 stdout=subprocess.PIPE,
@@ -388,6 +388,7 @@ class LuksTray():
 
         self.containers, self.menu = [], None
         self.update_menu()
+        self.remove_unused_automounts()
 
         self.timer = QTimer(self.tray_icon)
         self.timer.timeout.connect(self.update_menu)
@@ -401,8 +402,8 @@ class LuksTray():
         utilities = [
             'lsblk', 'cryptsetup',
             'mount', 'umount', 'bindfs',
-            'kill', 'fuser', 'losetup', 'truncate',
-            ['udisksctl', 'udisks', 'udisks2'],
+            'fuser', 'truncate',
+            # 'kill', 'losetup', ['udisksctl', 'udisks', 'udisks2'],
         ]
         found, missing, udisks_cmd = [], [], None
         for entry in utilities:
@@ -682,6 +683,108 @@ class LuksTray():
             self.history.put_vital(vital)
             if mount_point:
                 vital.upon = mount_point
+    @staticmethod
+    def get_auto_mount_root():
+        tray = LuksTray.singleton
+        auto_root = tray.ini_tool.get_current_val('auto_mount_folder')
+        auto_root = LuksTray.expand_real_user(auto_root)
+        auto_root = os.path.abspath(auto_root)
+        return auto_root
+    
+    @staticmethod
+    def generate_auto_mount_folder():
+        """ Generate auto mount folder"""
+
+        def available(basename):
+            nonlocal auto_root, tray
+            fullpath = os.path.join(auto_root, basename)
+            if fullpath in tray.upons or fullpath in tray.history.upons:
+                return None
+            return fullpath
+
+        tray = LuksTray.singleton
+        auto_root = LuksTray.get_auto_mount_root()
+        if os.path.exists(auto_root):
+            if not os.path.isdir(auto_root):
+                assert False, f"auto_mount_folder ({auto_root!r}) exists but is not a directory"
+        else:
+            os.makedirs(auto_root)
+
+        for loop in range(30):
+            full = petname.Generate(2, separator='_')   # e.g., 'stoic_turing'
+            short = full.split('_')[1]              # 'turing'
+            if (fullpath := available(short)):
+                return fullpath
+            if loop >= 20 and (fullpath := available(full)):
+                return fullpath
+        # fallback to simple numeric suffix
+        for _ in range(10000):
+            fallback = f'vault{random.randint(1000, 9999)}'
+            if (fullpath := available(fallback)):
+                return fullpath
+        assert False, "cannot generate automount directory (too many in use)"
+ 
+    @staticmethod
+    def remove_if_auto(mount):
+        """Remove target_dir if it is empty and within parent_dir"""
+        parent_dir = LuksTray.get_auto_mount_root()
+        target_dir = os.path.abspath(mount)
+
+        if not os.path.isdir(target_dir):
+            return False  # Not a directory, nothing to do
+        if not os.path.commonpath([target_dir, parent_dir]) == parent_dir:
+            return False  # Not safely within the parent
+        try:
+            os.rmdir(target_dir)  # Only removes empty dirs
+            return True
+        except OSError:
+            return False  # Not empty or permission denied
+        
+    def remove_unused_automounts(self):
+        """ A startup function (could be periodic) that cleans up the
+            auto mount folder
+        """
+        parent_dir = LuksTray.get_auto_mount_root()
+
+        try:
+            for name in os.listdir(parent_dir):
+                try:
+                    full_path = os.path.join(parent_dir, name)
+                    if not os.path.isdir(full_path):
+                        continue  # Skip files or symlinks
+                    if os.path.ismount(full_path):
+                        continue  # Skip mount points
+                    try:
+                        os.rmdir(full_path)  # Only removes empty dirs
+                    except OSError:
+                        pass  # Not empty or permission denied, silently skip
+                except Exception:
+                    pass  # Silently ignore unexpected errors like unreadable dirs
+        except Exception:
+            pass  # Silently ignore unexpected errors like unreadable dirs
+    
+    @staticmethod
+    def expand_real_user(path):
+        """
+        Expands ~ and ~user in paths relative to the *real* user when run under sudo.
+        """
+        real_user = os.environ.get('SUDO_USER')
+        if not real_user:
+            return os.path.expanduser(path)
+
+        if path.startswith('~'):
+            if path == '~' or path.startswith('~/'):
+                real_home = os.path.join('/home', real_user)
+                return os.path.join(real_home, path[2:]) if len(path) > 2 else real_home
+            elif path.startswith('~' + real_user):
+                # e.g., ~joe/foo
+                return os.path.expanduser(path)
+            else:
+                # ~otheruser — let os.path.expanduser handle it
+                return os.path.expanduser(path)
+        return path
+
+
 
 class CommonDialog(QDialog):
     """ TBD """
@@ -905,34 +1008,41 @@ class CommonDialog(QDialog):
             button.setEnabled(True)
 
     @staticmethod
-    def check_upon(text, mount_points, is_device=False):
+    def check_upon(text, mount_points):
         """ Validate candidate mount point.
             Returns error (or None if no error)
         """
-        # Empty mount point is valid (means auto-mount)
-        if text:  # Only validate if not empty
-            if DeviceInfo.is_banned(text):
-                return f'ERR: cannot mount on "special" {text}'
-            if text.startswith('/media/'):
-                if is_device:
-                    return 'ERR: cannot mount device in /media'
-                else:
-                    return 'ERR: use empty field for automatic /media mounting'
-            if not os.path.isabs(text):
-                return f'ERR: mount point ({text}) must be absolute path'
-            parent_dir = os.path.dirname(text)
-            parent_exists = os.path.isdir(parent_dir)
-            if not parent_exists:
-                return f'ERR: parent directory ({parent_dir}) does not exist'
-            if os.path.exists(text):
-                if not os.path.isdir(text):
-                    return f'ERR: mount point ({text}) exists but is not a directory'
-                if len(os.listdir(text)) > 0:
-                    return f'ERR: mount point ({text}) exists but is not empty'
-            if text in mount_points:
-                return f'ERR: mount point ({text}) occupied'
-        elif is_device:
-                return 'ERR: empty field not allowed for devices'
+        if not text:
+            return 'ERR: empty field not allowed for devices or files'
+        if not os.path.isabs(text):
+            return f'ERR: mount point ({text}) must be absolute path'
+        try:
+            text = os.path.abspath(text) # normalize
+        except Exception:
+            pass
+
+        if DeviceInfo.is_banned(text):
+            return f'ERR: cannot mount on "special" {text}'
+        auto_root = LuksTray.get_auto_mount_root()
+
+        if text == auto_root:
+            return 'ERR: cannot mount on auto_mount_folder itself'
+        if text.startswith('/media/'):
+            if is_device:
+                return 'ERR: cannot mount device in /media'
+            else:
+                return 'ERR: use empty field for automatic /media mounting'
+        parent_dir = os.path.dirname(text)
+        parent_exists = os.path.isdir(parent_dir)
+        if not parent_exists:
+            return f'ERR: parent directory ({parent_dir}) does not exist'
+        if os.path.exists(text):
+            if not os.path.isdir(text):
+                return f'ERR: mount point ({text}) exists but is not a directory'
+            if len(os.listdir(text)) > 0:
+                return f'ERR: mount point ({text}) exists but is not empty'
+        if text in mount_points:
+            return f'ERR: mount point ({text}) occupied'
         return None
 
     ####################################################
@@ -944,41 +1054,6 @@ class CommonDialog(QDialog):
             return None  # Already unlocked
         return run_cmd(['cryptsetup', 'luksOpen', device_path, luks_device],
                       input_str=password)
-
-#   def _mount_with_udisks_full(self, device_path, password):
-#       """Mount using udisks2 for auto-mounting with password (handles unlock + mount)"""
-#       udisks_cmd = self.find_udisks_command()
-#       if not udisks_cmd:
-#           return "Error: No udisks command found. Install udisks2."
-
-#       if udisks_cmd == 'udisksctl':
-#           # Unlock first with --no-user-interaction to force stdin usage
-#           err = run_cmd([udisks_cmd, 'unlock', '-b', device_path, '--no-user-interaction'],
-#                        input_str=password)
-#           if err:
-#               return err
-#           # Then mount (udisksctl will figure out the mapper path)
-#           return run_cmd([udisks_cmd, 'mount', '-b', device_path])
-#       else:
-#           # For older udisks
-#           return run_cmd([udisks_cmd, '--unlock', device_path],
-#                         input_str=password)
-
-    def _mount_with_udisks_mapper(self, mapper_path):
-        """Mount using udisks2 for auto-mounting (assumes already unlocked)"""
-        udisks_cmd = LuksTray.singleton.udisks_cmd
-        if not udisks_cmd:
-            return "Error: No udisks command found. Install udisks2."
-
-        # Determine the real desktop user if running as root
-        real_user = os.environ.get('SUDO_USER')
-        if not real_user:
-            return "Error: Cannot determine real user (SUDO_USER not set)."
-
-        # Choose appropriate mount arguments
-        mount_args = ['mount', '-b', mapper_path] if udisks_cmd == 'udisksctl' else ['--mount', mapper_path]
-
-        return run_cmd(['sudo', '-u', real_user, udisks_cmd] + mount_args)
 
 
     def _mount_manual(self, tray, mapper_path, upon, do_bindfs=False):
@@ -1021,6 +1096,7 @@ class CommonDialog(QDialog):
             luks_file: Path to LUKS file (for files)
             size: Size for new file creation
         """
+        assert upon, "cannot specify empty mount point"
         try:
             # Determine if this is a file or device container
             is_file_container = luks_file is not None
@@ -1040,16 +1116,6 @@ class CommonDialog(QDialog):
                     if err:
                         return err
                     needs_filesystem = True
-
-                # For file containers, we need to set up a loop device for udisks2
-                if not upon:  # Auto-mounting case
-                    # Use losetup with --show to get the loop device name directly
-                    sub = subprocess.run(['losetup', '-f', '--show', luks_file],
-                                       capture_output=True, text=True, check=False)
-                    if sub.returncode != 0:
-                        return f'FAIL: losetup -f --show {luks_file}: {sub.stderr.strip()}'
-
-                    device_path = sub.stdout.strip()  # This will be something like /dev/loop0
             else:
                 # Handle device container setup
                 luks_device = luks_device or f'{container.name}-luks'
@@ -1062,95 +1128,24 @@ class CommonDialog(QDialog):
                     if err:
                         return err
 
-            # Choose mounting strategy
-            if upon:
-                # Manual mounting: unlock with cryptsetup, then mount manually
-                err = self._unlock_luks(device_path, password, luks_device)
+            # Manual mounting always: unlock with cryptsetup, then mount manually
+            err = self._unlock_luks(device_path, password, luks_device)
+            if err:
+                return err
+
+            mapper_path = f'/dev/mapper/{luks_device}'
+
+            # Create filesystem if needed (for new files)
+            if needs_filesystem:
+                err = run_cmd(['mkfs.ext4', mapper_path])
                 if err:
                     return err
 
-                mapper_path = f'/dev/mapper/{luks_device}'
-
-                # Create filesystem if needed (for new files)
-                if needs_filesystem:
-                    err = run_cmd(['mkfs.ext4', mapper_path])
-                    if err:
-                        return err
-
-                return self._mount_manual(tray, mapper_path, upon, do_bindfs=bool(luks_file))
-            else:
-                # Auto-mounting: use hybrid approach (cryptsetup unlock + udisks2 mount)
-                err = self._unlock_luks(device_path, password, luks_device)
-                if err:
-                    return err
-
-                mapper_path = f'/dev/mapper/{luks_device}'
-
-                # Create filesystem if needed (for new files)
-                if needs_filesystem:
-                    err = run_cmd(['mkfs.ext4', mapper_path])
-                    if err:
-                        return err
-
-                # Use udisks2 just for mounting (no unlock needed)
-                return self._mount_with_udisks_mapper(mapper_path)
+            return self._mount_manual(tray, mapper_path, upon, do_bindfs=bool(luks_file))
 
         except Exception as e:
             return f"An error occurred: {str(e)}"
 
-    def kill_bindfs_on_mount(mount_point, timeout=1.0):
-        """
-        Kill any `bindfs` process that is holding onto the given mount point.
-        
-        Args:
-            mount_point (str): The mount point to check.
-            timeout (float): Time (in seconds) to wait after SIGTERM before SIGKILL.
-        
-        Returns:
-            str or None: Error string if failure occurs, otherwise None.
-        """
-        try:
-            # Run fuser -vm on the mount point
-            result = subprocess.run(
-                ['fuser', '-vm', mount_point],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                check=True
-            )
-            if result.returncode not in (0, 1):  # 0 = PIDs found, 1 = none, others = error
-                return f"fuser failed: {result.stderr.strip()}"
-
-            lines = result.stdout.strip().splitlines()
-            if len(lines) < 2:
-                return None  # No processes using the mount
-
-            headers = lines[0].split()
-            cmd_idx = headers.index('COMMAND')
-            pid_idx = headers.index('PID')
-
-            for line in lines[1:]:
-                cols = line.split()
-                if len(cols) <= cmd_idx:
-                    continue
-                cmd = cols[cmd_idx]
-                pid = int(cols[pid_idx])
-                if cmd == 'bindfs':
-                    # Kill it gracefully first
-                    subprocess.run(['kill', '-TERM', str(pid)], check=True)
-                    time.sleep(timeout)
-                    # Check if it's still running
-                    try:
-                        os.kill(pid, 0)
-                        # Still alive — kill hard
-                        subprocess.run(['kill', '-KILL', str(pid)], check=True)
-                    except ProcessLookupError:
-                        pass  # Already dead
-                    return None  # Successfully killed
-            return None  # No bindfs found
-
-        except Exception as e:
-            return f"Error killing bindfs: {e}"
 
 
 class MasterPasswordDialog(CommonDialog):
@@ -1226,7 +1221,8 @@ class MountDeviceDialog(CommonDialog):
             self.add_line(f'{container.name}')
             self.add_input_field('password', "Enter Password", f'{vital.password}',
                                 24, add_on='password')
-            self.add_input_field('upon', "Mount At", f'{vital.upon}', 36, add_on='folder')
+            where = vital.upon if vital.upon else  LuksTray.generate_auto_mount_folder()
+            self.add_input_field('upon', "Mount At", where, 36, add_on='folder')
             if container.label:
                 self.add_line(f'Label: {container.label}')
             if container.size_str:
@@ -1266,7 +1262,7 @@ class MountDeviceDialog(CommonDialog):
                 if not text:
                     errs.append('ERR: cannot leave password empty')
             elif key == 'upon':
-                err = self.check_upon(text, mount_points, is_device=True)
+                err = self.check_upon(text, mount_points)
                 if err:
                     errs.append(err)
             else:
@@ -1315,6 +1311,7 @@ class MountDeviceDialog(CommonDialog):
         busy_warns = set()
 
         if container:
+            unmounteds = []
             for filesystem in container.filesystems:
                 for mount in filesystem.mounts:
                     ### self.kill_bindfs_on_mount(mount)
@@ -1322,14 +1319,14 @@ class MountDeviceDialog(CommonDialog):
                         err = run_unmount(mount, busy_warns)
                         if err:
                             errs.append(err)
-#               mapped_device = f'/dev/mapper/{filesystem.name}'
-#               ignores = []
-#               if os.path.exists(mapped_device) and stat.S_ISBLK(os.stat(mapped_device).st_mode):
-#                   if tray.is_mounted(mapped_device):
-#                       run_cmd(["umount", mapped_device], ignores)
+                        else:
+                            unmounteds.append(mount)
 
             if len(errs) <= 1:
                 run_cmd(["cryptsetup", "luksClose", filesystem.name], errs)
+            if len(errs) <= 1:
+                for mount in unmounteds:
+                    LuksTray.remove_if_auto(mount)
 
         # Hide progress indicator
         self.hide_progress()
@@ -1372,7 +1369,8 @@ class MountFileDialog(CommonDialog):
             self.add_line(f'{container.back_file}')
             self.add_input_field('password', "Enter Password", f'{vital.password}',
                                 24, add_on='password')
-            self.add_input_field('upon', "Mount At", f'{vital.upon}', 36, add_on='folder')
+            where = vital.upon if vital.upon else  LuksTray.generate_auto_mount_folder()
+            self.add_input_field('upon', "Mount At", where, 36, add_on='folder')
             if container.size_str:
                 self.add_line(f'Size: {container.size_str}')
             if container.uuid:
@@ -1388,7 +1386,8 @@ class MountFileDialog(CommonDialog):
             self.add_input_field('password', "Enter Password", '',
                                 24, add_on='password')
             self.add_input_field('back_file', "Crypt File", '', 48, add_on='file')
-            self.add_input_field('upon', "Mount At", '', 36, add_on='folder')
+            where = LuksTray.generate_auto_mount_folder()
+            self.add_input_field('upon', "Mount At", where, 36, add_on='folder')
 
             self.add_push_button('OK', self.mount_file, None)
             self.add_push_button('Cancel', self.cancel)
@@ -1403,7 +1402,8 @@ class MountFileDialog(CommonDialog):
             self.add_input_field('back_file', "Crypt File", '', 48, add_on='new_file')
             self.add_input_field('overwrite_ok', "Enable Overwrite of Existing File",
                                  '', 48, field_type='checkbox')
-            self.add_input_field('upon', "Mount At", '', 36, add_on='folder')
+            where = LuksTray.generate_auto_mount_folder()
+            self.add_input_field('upon', "Mount At", where, 36, add_on='folder')
 
             self.add_push_button('OK', self.mount_file, None)
             self.add_push_button('Cancel', self.cancel)
@@ -1422,9 +1422,7 @@ class MountFileDialog(CommonDialog):
         busy_warns = set()
         if container:
             if container.mounts:
-                is_auto_mount = container.mounts[0].startswith('/media/')
-                attempts = 1 if is_auto_mount else 2
-                for _ in range(attempts):
+                for _ in range(2):
                     # it may take two dismounts, one for the regular mount, and
                     # one for the bindfs mount
                     tray.update_mounts()
@@ -1433,6 +1431,9 @@ class MountFileDialog(CommonDialog):
                             err = run_unmount(mount, busy_warns)
                             if err:
                                 errs.append(err)
+                            else:
+                                LuksTray.remove_if_auto(mount)
+
                     if busy_warns:
                         break
 
