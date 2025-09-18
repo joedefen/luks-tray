@@ -6,7 +6,7 @@
 ## Features
 
 - **System tray integration** - Simple click-to-mount/unmount interface for LUKS devices and files
-- **Visual status indicators** - Clear icons showing mounted (✅), unmounted (🔳), and open-but-unmounted (‼️) states
+- **Visual status indicators** - Symbols mounted (▣), unmounted (▽), and open-but-unmounted (‼) states
 - **File container support** - Add, create, and manage LUKS file containers from the tray.
 - **Mount point history** - Remembers previous mount locations for convenience and clarity
 - **Background monitoring** - Automatically detects newly inserted devices with LUKS containers
@@ -18,18 +18,10 @@
 2. Click the tray icon to see available containers. You may:
     - Insert a disk with LUKS devices to detect them automatically.
     - Add an existing or create a new encrypted file to manage it.
-4. Click a container to mount (🔳) or unmount (✅ or ‼️)
+4. Click a ▽ container to mount it; or a ▣/‼ container to unmount it.
 5. When mounting a container, enter its password and choose mount point in the dialog
     - if the app has a mount point in its history, it will fill in that mount point
     - otherwise, the app will generate a mount point in `~/Vaults`
-
-For best results, the Noto Color Emoji fonts should be installed if not already:
-
-    sudo pacman -S noto-fonts-emoji          # EndeavourOS/Arch
-    sudo dnf install google-noto-emoji-fonts # Fedora
-    sudo zypper install noto-emoji-fonts     # openSUSE Tumbleweed
-    sudo apt install fonts-noto-color-emoji  # Ubuntu
-
 
 ## Visual Interface
 
@@ -45,15 +37,17 @@ Here is an sample menu as seen when you right-click the tray shield icon:
 Notes:
 
 - the first section shows LUKS devices, and the second shows LUKS files.
-- click a ✅ entry to dismount and lock a mounted, unlocked LUKS container
+- click a ▣ entry to dismount and lock a mounted, unlocked LUKS container
 
   - if busy, you are shown the PIDs and names of processes preventing dismount
 
-- click a 🔳 entry to unlock and mount a locked LUKS container
-- click a ‼️ entry to lock an unmounted, unlocked container (considered an anomaly)
+- click a ▽ entry to unlock and mount a locked LUKS container
+- click a ‼ entry to lock an unmounted, unlocked container (considered an anomaly)
 - or click of the action lines to perform the described action
-- LUKS files are only automatically detected in its history; when you add or create new LUKS files, they are added to the history.
 - LUKS devices must be created with other tools such as Gnome Disks.
+- LUKS files are only automatically detected in its history; when you add or create new LUKS files, they are added to the history.
+- When creating LUKS files, the default folder is `~/.Crypts`.
+- When mounting LUKS files for the first time, the default folder is `~/Crypts/{basename}` where `{basename}` is the basename of the encrypted LUKS file (less any `.luks`, `.luks2`, or `.crypt` suffix).
 
 
 

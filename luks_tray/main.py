@@ -8,22 +8,23 @@
 # pylint: disable=line-too-long,too-many-lines
 import os
 import sys
-import stat
 import json
 import signal
 import subprocess
 import shutil
+import shlex
 import traceback
 import hashlib
 import time
 import importlib.resources
-import petname
 import random
+import tempfile
 from pathlib import Path
 from functools import partial
 from io import StringIO
 from datetime import datetime
 from types import SimpleNamespace
+import petname
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
 from PyQt6.QtWidgets import QFileDialog, QCheckBox, QSizePolicy
@@ -50,30 +51,28 @@ def generate_uuid_for_file_path(file_path):
 
     return generated_uuid
 
+def sudo_cmd(args, errs=None, input_str=None):
+    # run sudo -n {args}; the -n will avoid prompting for a sudo password and fail if not allowed
+    args = ['sudo', '-n'] + args
+    return run_cmd(args, errs, input_str)
 
 def run_cmd(args, errs=None, input_str=None):
     """ TBD """
-    return rerun_if_busy(args, errs, repeat=0, delay=0.0, input_str=input_str)
 
-def rerun_if_busy(args, errs, repeat=3, delay=0.5, input_str=None):
-    """ Handles umounts if busy mostly"""
-    err = None
-    for loop in range(repeat+1):
-        if loop > 0:
-            time.sleep(delay)
-        sub = subprocess.run( args, capture_output=True, text=True, check=False, input=input_str)
-        if sub.returncode == 0:
-            return None
-        err = f'FAIL: {' '.join(args)}: {sub.stdout} {sub.stderr} [rc={sub.returncode}]'
-        if 'busy' not in sub.stderr:
-            break
+    proc = subprocess.Popen(args, stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    # Communicate() writes to stdin and waits for the process to finish
+    stdout, stderr = proc.communicate(input=input_str)
+    # print(f'+++ {stdout=}\n+++ {stderr=}')
+    if proc.returncode == 0:
+        return None
+    err = f'FAIL: {' '.join(args)}: {stdout} {stderr} [rc={proc.returncode}]'
     if err and errs:
-        errs.append(err)
+            errs.append(err)
     return err
 
 
-from PyQt6.QtWidgets import QMessageBox
-import subprocess
 
 def run_unmount(mount_point: str, busy_warns: set) -> str | None:
     """Attempts to unmount the given mount point.
@@ -81,7 +80,7 @@ def run_unmount(mount_point: str, busy_warns: set) -> str | None:
     Returns error string or None on success.
     """
     try:
-        sub = subprocess.run(["umount", mount_point],
+        sub = subprocess.run(['sudo', "umount", mount_point],
                              capture_output=True, text=True)
     except Exception as e:
         return f"FAIL: umount {mount_point}: Exception: {e}"
@@ -97,7 +96,7 @@ def run_unmount(mount_point: str, busy_warns: set) -> str | None:
     # Try to get processes using the mount point
     try:
         fuser = subprocess.run(
-                ["fuser", "-vm", mount_point],
+                ['sudo', "fuser", "-vm", mount_point],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -386,7 +385,7 @@ class LuksTray():
         self.tray_icon.setToolTip('luks-tray')
         self.tray_icon.setVisible(True)
 
-        self.containers, self.menu = [], None
+        self.containers, self.menu = {}, None
         self.update_menu()
         self.remove_unused_automounts()
 
@@ -487,6 +486,7 @@ class LuksTray():
 
     def merge_containers_history(self):
         """ TBD """
+        self.history.restore()
         for container in self.containers.values():
             self.history.ensure_container(container)
         self.history.save()
@@ -531,18 +531,19 @@ class LuksTray():
                     if name.startswith('/home/'):
                         name = '~' + name[6:]
 
-                # Determine which emoji to show
+#               # Determine which emoji/symbol to show
                 if mountpoint.startswith('/'):
-                    emoji = '✅'
+                    emoji = '▣'   # replaces ✅
                     icon_key = 'ok' if icon_key != 'alert' else icon_key
                 elif container.opened:
-                    emoji = '‼️'
+                    emoji = '‼'   # replaces ‼️
                     icon_key = 'alert' if do_alerts else icon_key
                 else:
-                    emoji = '🔳'
+                    emoji = '▽'   # replaces 🔳
+
 
                 # Construct menu line text
-                if emoji == '‼️':
+                if emoji == '‼':
                     text = f'{name} CLICK-to-LOCK'
                 else:
                     text = f'{name} {mountpoint}'
@@ -708,7 +709,8 @@ class LuksTray():
             if not os.path.isdir(auto_root):
                 assert False, f"auto_mount_folder ({auto_root!r}) exists but is not a directory"
         else:
-            os.makedirs(auto_root)
+            # os.makedirs(auto_root)
+            run_cmd(['mkdir', auto_root])
 
         for loop in range(30):
             full = petname.Generate(2, separator='_')   # e.g., 'stoic_turing'
@@ -735,7 +737,8 @@ class LuksTray():
         if not os.path.commonpath([target_dir, parent_dir]) == parent_dir:
             return False  # Not safely within the parent
         try:
-            os.rmdir(target_dir)  # Only removes empty dirs
+            # os.rmdir(target_dir)  # Only removes empty dirs
+            sudo_cmd(['rmdir', target_dir])
             return True
         except OSError:
             return False  # Not empty or permission denied
@@ -755,7 +758,8 @@ class LuksTray():
                     if os.path.ismount(full_path):
                         continue  # Skip mount points
                     try:
-                        os.rmdir(full_path)  # Only removes empty dirs
+                        # os.rmdir(full_path)  # Only removes empty dirs
+                        sudo_cmd(['rmdir', full_path])
                     except OSError:
                         pass  # Not empty or permission denied, silently skip
                 except Exception:
@@ -788,6 +792,10 @@ class LuksTray():
 
 class CommonDialog(QDialog):
     """ TBD """
+    home_dir = None
+    dot_vault_dir = None # ~/.Vaults (default crypts)
+    vault_dir = None # ~/Vaults (default mount area)
+
     def __init__(self):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -799,6 +807,7 @@ class CommonDialog(QDialog):
         self.inputs = {}
         self.progress_label = None
         self.progress_bar = None
+        self.get_real_user_home_directory() # populate home/vault dir
     
     def hide_password(self):
         """Hide the password programmatically."""
@@ -905,19 +914,23 @@ class CommonDialog(QDialog):
             self.inputs[key] = input_field
         self.main_layout.addLayout(field_layout) # Add horizontal layout to main vertical layout
 
-    @staticmethod
-    def get_real_user_home_directory():
+    def get_real_user_home_directory(self):
         """Returns the home directory of the real user when running under sudo."""
-        real_user = os.environ.get('SUDO_USER')
-        if real_user:
-            return os.path.join("/home", real_user)  # Assumes standard home directory structure
-        return os.path.expanduser("~")  # Fallback to current user's home directory
+        if not self.home_dir:
+            real_user = os.environ.get('SUDO_USER')
+            if real_user:
+                self.home_dir = os.path.join("/home", real_user)  # Assumes standard home directory structure
+            else:
+                self.home_dir = os.path.expanduser("~")  # Fallback to current user's home directory
+            self.vault_dir = os.path.join(self.home_dir, 'Vaults')
+            self.dot_vault_dir = os.path.join(self.home_dir, '.Vaults')
+        return self.home_dir
 
     def browse_folder(self, input_field):
         """ Open a dialog to select a folder and update the input field with the selected path. """
         # Determine the initial directory to open
         initial_dir = input_field.text()
-        initial_dir = initial_dir if initial_dir else self.get_real_user_home_directory()
+        initial_dir = initial_dir if initial_dir else self.home_dir()
 
         # Open the folder dialog starting at the determined directory
         folder_path = QFileDialog.getExistingDirectory(self, "Select Folder", initial_dir)
@@ -928,7 +941,7 @@ class CommonDialog(QDialog):
         """ Open a dialog to select a folder and update the input field with the selected path. """
         # Determine the initial directory to open
         initial_dir = input_field.text()
-        initial_dir = initial_dir if initial_dir else self.get_real_user_home_directory()
+        initial_dir = initial_dir if initial_dir else self.home_dir
 
         # Open the folder dialog starting at the determined directory
         file_path = QFileDialog.getOpenFileName(self, "Select Existing File", initial_dir)
@@ -940,7 +953,7 @@ class CommonDialog(QDialog):
         """ Open a dialog to select a folder and update the input field with the selected path. """
         # Determine the initial directory to open
         initial_dir = input_field.text()
-        initial_dir = initial_dir if initial_dir else self.get_real_user_home_directory()
+        initial_dir = initial_dir if initial_dir else self.home_dir
 
         # Open the folder dialog starting at the determined directory
         file_path = QFileDialog.getSaveFileName(self, "Select New File", initial_dir)
@@ -1043,8 +1056,9 @@ class CommonDialog(QDialog):
             else:
                 return 'ERR: use empty field for automatic /media mounting'
         parent_dir = os.path.dirname(text)
+        auto_root = LuksTray.get_auto_mount_root()
         parent_exists = os.path.isdir(parent_dir)
-        if not parent_exists:
+        if not parent_exists and os.path.abspath(parent_dir) != auto_root:
             return f'ERR: parent directory ({parent_dir}) does not exist'
         if os.path.exists(text):
             if not os.path.isdir(text):
@@ -1062,15 +1076,22 @@ class CommonDialog(QDialog):
         """Common LUKS unlock logic"""
         if hasattr(self, 'opened') and self.opened:
             return None  # Already unlocked
-        return run_cmd(['cryptsetup', 'luksOpen', device_path, luks_device],
-                      input_str=password)
+        return sudo_cmd(['cryptsetup', 'luksOpen', '--key-file', '-',
+                         device_path, luks_device], input_str=password)
+###     script = ( f'set -x; echo -n {shlex.quote(password)} | cryptsetup luksOpen '
+###         f'--key-file=- {shlex.quote(device_path)} {shlex.quote(luks_device)}')
+###     print(f'+ {script=}')
+###     rv =  sudo_cmd(['bash'], input_str=script)
+###     print(f'+ {rv=}')
+###     return rv
+
 
 
     def _mount_manual(self, tray, mapper_path, upon, do_bindfs=False):
         """Manual mounting with bindfs"""
-        err = run_cmd(['mount', mapper_path, upon])
+        err = sudo_cmd(['mount', mapper_path, upon])
         if do_bindfs and not err:
-            err = run_cmd(['bindfs', '-u', str(tray.uid), '-g', str(tray.gid),
+            err = sudo_cmd(['bindfs', '-u', str(tray.uid), '-g', str(tray.gid),
                           upon, upon])
         return err
 
@@ -1080,7 +1101,7 @@ class CommonDialog(QDialog):
             return None, f'/dev/{container.name}'
 
         # Use --show to get the loop device name
-        result = run_cmd(['losetup', '-f', '--show', container.back_file])
+        result = sudo_cmd(['losetup', '-f', '--show', container.back_file])
         if result.startswith('FAIL:'):
             return result, None
 
@@ -1119,12 +1140,26 @@ class CommonDialog(QDialog):
 
                 # Create file if needed
                 if size is not None:
-                    err = run_cmd(['truncate', '-s', f'{size}M', luks_file])
+                    # this ensures the luks file is creatable by the user,
+                    # and if so, exists
+                    luks_file = os.path.abspath(luks_file)
+                    luks_dirname = os.path.dirname(luks_file)
+                    err = None
+                    if luks_dirname == self.dot_vault_dir:
+                        if not os.path.exists(luks_dirname):
+                            err = run_cmd(['mkdir', '-p', luks_dirname])
                     if not err:
-                        err = run_cmd(['cryptsetup', 'luksFormat', '--force-password',
-                               '-q', '--batch-mode', luks_file], input_str=password)
-                    if err:
-                        return err
+                        err = run_cmd(['touch', luks_file])
+                    if not err:
+                        err = sudo_cmd(['truncate', '-s', f'{size}M', luks_file])
+                    if not err:
+                        # Execute the cryptsetup command directly
+                        args = ['cryptsetup', 'luksFormat', '--type', 'luks2',
+                                     '--batch-mode', '--key-file', '-', luks_file]
+                        sub = subprocess.run( args, input=f'{password}',
+                             check=True, capture_output=True, text=True)
+                        if sub.returncode != 0:
+                            err = f'FAIL: {' '.join(args)}: {sub.stdout} {sub.stderr} [rc={sub.returncode}]'
                     needs_filesystem = True
             else:
                 # Handle device container setup
@@ -1147,7 +1182,7 @@ class CommonDialog(QDialog):
 
             # Create filesystem if needed (for new files)
             if needs_filesystem:
-                err = run_cmd(['mkfs.ext4', mapper_path])
+                err = sudo_cmd(['mkfs.ext4', mapper_path])
                 if err:
                     return err
 
@@ -1231,7 +1266,9 @@ class MountDeviceDialog(CommonDialog):
             self.add_line(f'{container.name}')
             self.add_input_field('password', "Enter Password", f'{vital.password}',
                                 24, add_on='password')
-            where = vital.upon if vital.upon else  LuksTray.generate_auto_mount_folder()
+            where = vital.upon
+            if not vital.upon:
+                where = os.path.join(self.vault_dir, container.name)
             self.add_input_field('upon', "Mount At", where, 36, add_on='folder')
             if container.label:
                 self.add_line(f'Label: {container.label}')
@@ -1287,7 +1324,8 @@ class MountDeviceDialog(CommonDialog):
         if len(errs) <= 1:
             mount_point = values['upon']
             if mount_point and not os.path.exists(mount_point):
-                os.makedirs(mount_point, exist_ok=True)
+                # os.makedirs(mount_point, exist_ok=True)
+                sudo_cmd(['mkdir', '-p', mount_point])
 
             self.hide_password()
             self.show_progress('Mount device...')
@@ -1334,7 +1372,7 @@ class MountDeviceDialog(CommonDialog):
                             unmounteds.append(mount)
 
             if len(errs) <= 1:
-                run_cmd(["cryptsetup", "luksClose", filesystem.name], errs)
+                sudo_cmd(["cryptsetup", "luksClose", filesystem.name], errs)
             if len(errs) <= 1:
                 for mount in unmounteds:
                     LuksTray.remove_if_auto(mount)
@@ -1380,8 +1418,9 @@ class MountFileDialog(CommonDialog):
             self.add_line(f'{container.back_file}')
             self.add_input_field('password', "Enter Password", f'{vital.password}',
                                 24, add_on='password')
-            where = vital.upon if vital.upon else  LuksTray.generate_auto_mount_folder()
-            self.add_input_field('upon', "Mount At", where, 36, add_on='folder')
+            # where = vital.upon if vital.upon else  LuksTray.generate_auto_mount_folder()
+            # self.add_input_field('upon', "Mount At", where, 36, add_on='folder')
+            self.add_input_field('upon', "Mount At", self.vault_dir, 36, add_on='folder')
             if container.size_str:
                 self.add_line(f'Size: {container.size_str}')
             if container.uuid:
@@ -1397,8 +1436,9 @@ class MountFileDialog(CommonDialog):
             self.add_input_field('password', "Enter Password", '',
                                 24, add_on='password')
             self.add_input_field('back_file', "Crypt File", '', 48, add_on='file')
-            where = LuksTray.generate_auto_mount_folder()
-            self.add_input_field('upon', "Mount At", where, 36, add_on='folder')
+            # where = LuksTray.generate_auto_mount_folder()
+            # self.add_input_field('upon', "Mount At", where, 36, add_on='folder')
+            self.add_input_field('upon', "Mount At", self.vault_dir, 36, add_on='folder')
 
             self.add_push_button('OK', self.mount_file, None)
             self.add_push_button('Cancel', self.cancel)
@@ -1410,11 +1450,11 @@ class MountFileDialog(CommonDialog):
             self.add_input_field('password', "Enter Password", '',
                                 24, add_on='password')
             self.add_input_field('size_str', "Size (MiB)", '32', 8)
-            self.add_input_field('back_file', "Crypt File", '', 48, add_on='new_file')
+            self.add_input_field('back_file', "Crypt File", self.dot_vault_dir, 48, add_on='new_file')
             self.add_input_field('overwrite_ok', "Enable Overwrite of Existing File",
                                  '', 48, field_type='checkbox')
-            where = LuksTray.generate_auto_mount_folder()
-            self.add_input_field('upon', "Mount At", where, 36, add_on='folder')
+            # where = LuksTray.generate_auto_mount_folder()
+            self.add_input_field('upon', "Mount At", self.vault_dir, 36, add_on='folder')
 
             self.add_push_button('OK', self.mount_file, None)
             self.add_push_button('Cancel', self.cancel)
@@ -1449,11 +1489,11 @@ class MountFileDialog(CommonDialog):
                         break
 
             if not errs:
-                run_cmd(["cryptsetup", "luksClose", container.name], errs=errs)
+                sudo_cmd(["cryptsetup", "luksClose", container.name], errs=errs)
                     # If this is a file container with a loop device, detach it
             if not errs and container.back_file:
                 ignores = []
-                run_cmd(["losetup", "-d", f"/dev/{container.name}"], errs=ignores)
+                sudo_cmd(["losetup", "-d", f"/dev/{container.name}"], errs=ignores)
 
         self.hide_progress()
 
@@ -1482,6 +1522,7 @@ class MountFileDialog(CommonDialog):
         errs.append(f'{container.name}')
 
         mount_points = self.get_mount_points()
+        mount_point = None
 
         for key, field in self.inputs.items():
             if isinstance(field, QCheckBox):
@@ -1495,7 +1536,18 @@ class MountFileDialog(CommonDialog):
                 if not text:
                     errs.append('ERR: cannot leave password empty')
             elif key == 'upon':
-                err = self.check_upon(text, mount_points)
+                path = os.path.abspath(text)
+                if 'back_file' in values:
+                    if path == self.vault_dir:
+                        basename = os.path.basename(values['back_file'])
+                        for suffix in ('.luks', '.luks2', '.crypt'):
+                            if basename.endswith(suffix):
+                                if len(basename) > len(suffix):
+                                    basename = basename[:-len(suffix)]
+                        path = os.path.join(self.vault_dir, basename)
+
+                mount_point = path
+                err = self.check_upon(path, mount_points)
                 if err:
                     errs.append(err)
                     
@@ -1511,7 +1563,13 @@ class MountFileDialog(CommonDialog):
             elif key == 'back_file':
                 path = os.path.abspath(text)
                 values[key] = path
-                if not os.path.isdir(os.path.dirname(path)):
+                dirname = os.path.dirname(path)
+                if not os.path.isdir(dirname):
+                    if os.path.basename(dirname) == self.dot_vault_dir:
+                        err = run_cmd(['mkdir', '-p', dirname])
+                        if err:
+                            errs.append(err)
+                if not os.path.isdir(os.path.dirname(dirname)):
                     errs.append(f'ERR: Crypt File {path} must be in an existing directory')
 
             else:
@@ -1526,21 +1584,22 @@ class MountFileDialog(CommonDialog):
             if 'overwrite_ok' in values:
                 overwrite_ok = values['overwrite_ok']
                 if os.path.exists(back_file) and not overwrite_ok:
-                    errs.append('cannot overwrite {back_file!r} w/o checking allowed')
+                    errs.append(f'cannot overwrite {back_file!r} w/o checking allowed')
 
         if len(errs) <= 1:
             self.show_progress('Mount file...')
-            mount_point = values['upon']
             if mount_point and not os.path.exists(mount_point):
-                os.makedirs(mount_point, exist_ok=True)
-            err = self.mount_luks_container(tray, container, values['password'],
-                    mount_point, luks_file=back_file, size=values.get('size_str', None))
-            self.hide_progress()
+                # os.makedirs(mount_point, exist_ok=True)
+                err = run_cmd(['mkdir', '-p', mount_point])
+            if not err:
+                err = self.mount_luks_container(tray, container, values['password'],
+                        mount_point, luks_file=back_file, size=values.get('size_str', None))
+                self.hide_progress()
 
             if err:
                 errs.append(err)
         if len(errs) > 1:
-            self.alert_errors(errs)  # FIXME: need to actually do the mount if no errors
+            self.alert_errors(errs)
             # self.accept()
             return
 
@@ -1597,9 +1656,12 @@ def main():
         sys.exit(1) # just in case ;-)
 
     try:
-        if os.geteuid() != 0:
-            # Re-run the script with sudo needed and opted
-            rerun_module_as_root('luks_tray.main')
+#       if os.geteuid() != 0:
+#           # Re-run the script with sudo needed and opted
+#           rerun_module_as_root('luks_tray.main')
+        devnull_fd = os.open('/dev/null', os.O_RDWR)
+        os.dup2(devnull_fd, sys.stdin.fileno())
+        os.close(devnull_fd)
 
         ini_tool = IniTool(paths_only=False)
         Utils.prt_path = ini_tool.log_path

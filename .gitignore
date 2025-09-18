@@ -2,5 +2,6 @@ lt-venv/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 build/
+dist/
 *.egg-info/
 .vscode/
