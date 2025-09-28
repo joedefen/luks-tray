@@ -343,6 +343,12 @@ class LuksTray():
         _, missing, self.udisks_cmd = self.check_dependencies()
 
         assert not missing, f"missing system commands: {missing}"
+        
+        # Create an invisible base widget to serve as the dialog parent
+        self.dialog_parent = QWidget(None) # Parented by None, so it's top-level
+        self.dialog_parent.setWindowFlags(Qt.WindowType.Tool) # Hint to WM it's a utility window
+        self.dialog_parent.hide() # Keep it invisible
+
 
         self.history = HistoryClass(ini_tool.history_path)
         self.history.restore()
@@ -797,7 +803,8 @@ class CommonDialog(QDialog):
     vault_dir = None # ~/Vaults (default mount area)
 
     def __init__(self):
-        super().__init__()
+        super().__init__(parent=LuksTray.singleton.dialog_parent)
+
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.main_layout = QVBoxLayout()
         self.button_layout = QHBoxLayout()
@@ -809,6 +816,48 @@ class CommonDialog(QDialog):
         self.progress_bar = None
         self.get_real_user_home_directory() # populate home/vault dir
     
+    def showEvent(self, event):
+        """
+        Called automatically by Qt immediately before the dialog is shown.
+        This is the most reliable place to adjust position based on final size.
+        """
+        # 1. Finalize size and get screen info
+        # This forces the layout to calculate the final width/height of the dialog
+        self.adjustSize() 
+
+        cursor_pos = QCursor.pos()
+        dialog_width = self.width()
+        dialog_height = self.height()
+        
+        # Get the screen where the cursor currently is, which is the most reliable
+        screen = self.screen() or QApplication.primaryScreen()
+        screen_geometry = screen.geometry()
+
+        # 2. Calculate initial position (centered below cursor, with a small offset)
+        x = cursor_pos.x() - (dialog_width // 2)
+        y = cursor_pos.y() + 20 
+
+        # 3. Add Explicit Boundary Checks
+        
+        # Horizontal (X-Axis) Checks
+        if x < screen_geometry.left():
+            x = screen_geometry.left()
+        elif (x + dialog_width) > screen_geometry.right():
+            x = screen_geometry.right() - dialog_width
+        
+        # Vertical (Y-Axis) Checks
+        # If dialog is launching from the top tray, it's very likely to hit the top
+        if y < screen_geometry.top():
+            y = screen_geometry.top()
+        elif (y + dialog_height) > screen_geometry.bottom():
+            y = screen_geometry.bottom() - dialog_height
+
+        # 4. Move the dialog to the adjusted position
+        self.move(x, y)
+        
+        # IMPORTANT: Call the base class implementation
+        super().showEvent(event)
+
     def hide_password(self):
         """Hide the password programmatically."""
         if self.password_toggle and self.password_input:
@@ -941,7 +990,11 @@ class CommonDialog(QDialog):
         """ Open a dialog to select a folder and update the input field with the selected path. """
         # Determine the initial directory to open
         initial_dir = input_field.text()
-        initial_dir = initial_dir if initial_dir else self.home_dir
+        if not initial_dir:
+            if os.path.exists(self.dot_vault_dir):
+                initial_dir = self.dot_vault_dir
+            else:
+                initial_dir = self.home_dir
 
         # Open the folder dialog starting at the determined directory
         file_path = QFileDialog.getOpenFileName(self, "Select Existing File", initial_dir)
@@ -953,7 +1006,11 @@ class CommonDialog(QDialog):
         """ Open a dialog to select a folder and update the input field with the selected path. """
         # Determine the initial directory to open
         initial_dir = input_field.text()
-        initial_dir = initial_dir if initial_dir else self.home_dir
+        if not initial_dir:
+            if os.path.exists(self.dot_vault_dir):
+                initial_dir = self.dot_vault_dir
+            else:
+                initial_dir = self.home_dir
 
         # Open the folder dialog starting at the determined directory
         file_path = QFileDialog.getSaveFileName(self, "Select New File", initial_dir)
@@ -1192,7 +1249,6 @@ class CommonDialog(QDialog):
             return f"An error occurred: {str(e)}"
 
 
-
 class MasterPasswordDialog(CommonDialog):
     """ TBD """
     def __init__(self):
@@ -1201,30 +1257,42 @@ class MasterPasswordDialog(CommonDialog):
         self.add_input_field('password', "Master Password", '', 24, add_on='password')
         self.add_push_button('OK', self.set_master_password)
         self.add_push_button('Cancel', self.cancel)
+        self.add_push_button('Remove Password', self.clear_master_password)
         self.main_layout.addLayout(self.button_layout)
         self.setLayout(self.main_layout)
 
-    def set_master_password(self, _):
+
+    def clear_master_password(self, _):
+        """ TBD """
+        self.set_master_password(_, force_clear=True)
+
+    def set_master_password(self, _, force_clear=False):
         """ TBD """
         tray = LuksTray.singleton
         field = self.inputs.get('password', None)
         errs = []
-        password = field.text().strip()
+        password = '' if not field or force_clear else field.text().strip()
         if tray.history.status == 'locked':
             tray.history.master_password = password
-            tray.history.restore()
-            if tray.history.status != 'unlocked':
-                tray.history.master_password = ''
-                errs.append(f'failed to unlock {repr(tray.history.path)}')
+            if password:
+                tray.history.restore()
+                if tray.history.status != 'unlocked':
+                    tray.history.master_password = ''
+                    errs.append(f'failed to unlock {repr(tray.history.path)}')
+            else:
+                err = tray.history.save(force=True)
+                if err:
+                    errs.append(err)
+                else:
+                    tray.history.status = 'clear_text'
         elif tray.history.status in ('unlocked', 'clear_text'):
             tray.history.master_password = password
-            tray.history.dirty = True
-            err = tray.history.save()
+            err = tray.history.save(force=True)
             if err:
                 tray.history.master_password = ''
                 errs.append(err)
             elif password:
-                tray.history.status = 'unlocked'
+                tray.history.status = 'locked'
             else:
                 tray.history.status = 'clear_text'
         if errs:
@@ -1418,9 +1486,8 @@ class MountFileDialog(CommonDialog):
             self.add_line(f'{container.back_file}')
             self.add_input_field('password', "Enter Password", f'{vital.password}',
                                 24, add_on='password')
-            # where = vital.upon if vital.upon else  LuksTray.generate_auto_mount_folder()
-            # self.add_input_field('upon', "Mount At", where, 36, add_on='folder')
-            self.add_input_field('upon', "Mount At", self.vault_dir, 36, add_on='folder')
+            where = vital.upon if vital.upon else self.vault_dir
+            self.add_input_field('upon', "Mount At", where, 36, add_on='folder')
             if container.size_str:
                 self.add_line(f'Size: {container.size_str}')
             if container.uuid:
@@ -1519,7 +1586,10 @@ class MountFileDialog(CommonDialog):
             if not container:
                 errs.append(f'ERR: container w UUID={uuid} not found')
                 return
-        errs.append(f'{container.name}')
+        if not container.name and container.back_file:
+            errs.append(f'{container.back_file}')
+        else:
+            errs.append(f'{container.name}')
 
         mount_points = self.get_mount_points()
         mount_point = None
@@ -1535,11 +1605,25 @@ class MountFileDialog(CommonDialog):
             if key == 'password':
                 if not text:
                     errs.append('ERR: cannot leave password empty')
+
+            elif key == 'back_file':
+                path = os.path.abspath(text)
+                values[key] = path
+                dirname = os.path.dirname(path)
+                if not os.path.isdir(dirname):
+                    if os.path.basename(dirname) == self.dot_vault_dir:
+                        err = run_cmd(['mkdir', '-p', dirname])
+                        if err:
+                            errs.append(err)
+                if not os.path.isdir(os.path.dirname(dirname)):
+                    errs.append(f'ERR: Crypt File {path} must be in an existing directory')
+
             elif key == 'upon':
                 path = os.path.abspath(text)
-                if 'back_file' in values:
+                if 'back_file' in values or container.back_file:
+                    back_file = container.back_file if container.back_file else values['back_file']
                     if path == self.vault_dir:
-                        basename = os.path.basename(values['back_file'])
+                        basename = os.path.basename(back_file)
                         for suffix in ('.luks', '.luks2', '.crypt'):
                             if basename.endswith(suffix):
                                 if len(basename) > len(suffix):
@@ -1560,17 +1644,6 @@ class MountFileDialog(CommonDialog):
                 except Exception:
                     errs.append(f'"int" expected ... invalid size ({size_str})')
 
-            elif key == 'back_file':
-                path = os.path.abspath(text)
-                values[key] = path
-                dirname = os.path.dirname(path)
-                if not os.path.isdir(dirname):
-                    if os.path.basename(dirname) == self.dot_vault_dir:
-                        err = run_cmd(['mkdir', '-p', dirname])
-                        if err:
-                            errs.append(err)
-                if not os.path.isdir(os.path.dirname(dirname)):
-                    errs.append(f'ERR: Crypt File {path} must be in an existing directory')
 
             else:
                 errs.append(f'ERR: unknown key({key})')

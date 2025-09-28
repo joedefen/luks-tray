@@ -5,7 +5,6 @@
 # pylint: disable=line-too-long,too-many-instance-attributes
 # pylint: disable=too-many-return-statements
 
-
 import os
 import time
 import json
@@ -16,13 +15,14 @@ import base64
 from cryptography.fernet import Fernet
 from luks_tray.Utils import prt
 
-
 class HistoryClass:
     """
     Manages the history of LUKS-encrypted volumes, including passwords and mount points.
     The history can be stored in a clear-text JSON format or an encrypted file
     using a master password.
     """
+    ENCRYPTED_HEADER = b'{{{ENCRYPTED}}}'
+
     def __init__(self, path, master_password=''):
         self.status = None # 'clear_text', 'unlocked', 'locked'
         self.master_password = master_password
@@ -68,6 +68,8 @@ class HistoryClass:
         file_exists_now = os.path.exists(self.path)
         if not file_exists_now:
             return True  # Needs init
+        if self.master_password and self.status == 'locked':
+            return True # need to try password unlock
         if file_exists_now:
             current_mtime = os.path.getmtime(self.path)
             if self.last_mtime is None or self.last_mtime != current_mtime:
@@ -105,8 +107,7 @@ class HistoryClass:
         """
         self.vitals[vital.uuid] = vital
         vital.when = time.time()
-        self.dirty = True
-        return self.save()
+        return self.save(force=True)
 
     def ensure_container(self, container):
         """
@@ -153,26 +154,38 @@ class HistoryClass:
         fernet_key = base64.urlsafe_b64encode(key)
         return fernet_key
 
-    def save(self):
+    def save(self, force=False):
         """
         Saves the history file. Encrypts with the master password if set,
         otherwise saves as plain text.
         """
-        if not self.dirty:
+        if not self.dirty and not force:
             return None
         try:
             entries = self._namespaces_to_json_data()
             if self.master_password:
+                # Save Encrypted with Header
                 cipher = Fernet(self._password_to_fernet_key())
-                encrypted_data = cipher.encrypt(json.dumps(entries).encode())
+                json_data = json.dumps(entries).encode('utf-8')
+                encrypted_data = cipher.encrypt(json_data)
+
+                # Write header and encrypted data
                 with open(self.path, 'wb') as file:
+                    file.write(self.ENCRYPTED_HEADER)
                     file.write(encrypted_data)
             else:
+                # Save Clear-Text
                 with open(self.path, 'w', encoding='utf-8') as file:
                     json.dump(entries, file, indent=4)
         except Exception as e:
+            prt(f'Error saving history: {e}')
             return f'failed saving history: {e}'
+
+        # Update state and mtime upon successful save
         self.dirty = False
+        self.last_mtime = os.path.getmtime(self.path) if os.path.exists(self.path) else None
+        self.file_existed = os.path.exists(self.path)
+        self.status = 'unlocked' if self.master_password else 'clear_text'
         return None
 
     def _json_data_to_namespaces(self, entries):
@@ -211,63 +224,79 @@ class HistoryClass:
             self.dirty = True
         return True
 
+# ... (inside HistoryClass)
+
     def restore(self):
         """
-        Loads the history file from disk. It first checks if the file has changed
-        and only reloads if necessary. It handles encrypted files, plain text files,
-        and corrupted or missing files by recreating an empty history.
+        Loads the history file from disk. It handles:
+        1. Missing/Corrupt files (re-init to clear_text).
+        2. Clear-text JSON (status='clear_text').
+        3. Encrypted with correct password (status='unlocked').
+        4. Encrypted with wrong/missing password (status='locked').
         """
         if not self._has_file_changed():
-            return True # No changes, no need to reload
+            return True  # No changes, no need to reload
 
-        # Handle the non-existent file case first.
-        if not self.file_existed:
+        # --- Helper for Corrupt/Missing/Uninitialized ---
+        def re_init_history(reason="Missing or corrupt history file."):
+            """Re-initializes history to an empty clear_text state."""
+            prt(f"Warning: {reason} Recreating an empty history.")
             self._json_data_to_namespaces({})
-            self.dirty = True
-            self.save()
+            self.save(force=True)  # This will save as clear_text if master_password is not set
             self.status = 'clear_text'
-            return True
+            return False
 
-        if self.master_password:
-            # Case 1: Master password is set, try to decrypt.
-            try:
-                cipher = Fernet(self._password_to_fernet_key())
-                with open(self.path, 'rb') as file:
-                    encrypted_data = file.read()
-                    decrypted_str = cipher.decrypt(encrypted_data).decode()
-                    decrypted_data = json.loads(decrypted_str)
-                    self._json_data_to_namespaces(decrypted_data)
-                    self.status = 'unlocked'
-                    return True
-            except Exception:
-                # Fallback to clear text if decryption fails.
-                try:
-                    with open(self.path, 'r', encoding='utf-8') as file:
-                        decrypted_data = json.load(file)
-                        self._json_data_to_namespaces(decrypted_data)
-                        self.status = 'clear_text'
-                        return True
-                except Exception:
-                    # Both decryption and clear text read failed, file is corrupt.
-                    prt("Warning: History file corrupt or unreadable. Recreating an empty history.", color='red')
-                    self._json_data_to_namespaces({})
-                    self.dirty = True
-                    self.save()
-                    self.status = 'locked'
-                    return False
-        else:
-            # Case 2: No master password, try to load as plain text.
-            try:
-                with open(self.path, 'r', encoding='utf-8') as file:
-                    decrypted_data = json.load(file)
-                    self._json_data_to_namespaces(decrypted_data)
-                    self.status = 'clear_text'
-                    return True
-            except Exception:
-                # Failed to read clear text, file is likely corrupt.
-                prt("Warning: History file corrupt. Recreating an empty history.", color='red')
-                self._json_data_to_namespaces({})
-                self.dirty = True
-                self.save()
+        # --- State 1: File Missing/Uninitialized ---
+        if not self.file_existed:
+            self.status = None # The initial state you mentioned
+            return re_init_history("History file is missing.")
+
+        # --- Read the File Content ---
+        try:
+            with open(self.path, 'rb') as file:
+                data = file.read()
+        except IOError as e:
+            return re_init_history(f"Failed to read file: {e}")
+
+        # --- Check for Encrypted Header ---
+        if data.startswith(self.ENCRYPTED_HEADER):
+            encrypted_data = data[len(self.ENCRYPTED_HEADER):]
+
+            if not self.master_password:
+                # State 4: Encrypted but no master_password provided (locked)
+                prt("Warning: History file is encrypted, but no master password was provided.")
                 self.status = 'locked'
                 return False
+
+            # Try to decrypt
+            try:
+                cipher = Fernet(self._password_to_fernet_key())
+                decrypted_str = cipher.decrypt(encrypted_data).decode('utf-8')
+                decrypted_data = json.loads(decrypted_str)
+                self._json_data_to_namespaces(decrypted_data)
+
+                # State 3: Successfully Decrypted (unlocked)
+                self.status = 'unlocked'
+                return True
+            except Exception:
+                # Decryption failed (wrong password or corrupt encrypted data)
+                prt("Warning: History file appears encrypted, but decryption failed.")
+                self.status = 'locked'
+                return False
+
+        # --- Attempt Clear-Text JSON Load ---
+        else:
+            try:
+                decrypted_str = data.decode('utf-8')
+                decrypted_data = json.loads(decrypted_str)
+                self._json_data_to_namespaces(decrypted_data)
+
+                # State 2: Valid Clear-Text JSON
+                self.status = 'clear_text'
+                return True
+            except json.JSONDecodeError:
+                # Corrupt file that's not encrypted
+                return re_init_history("History file is present but not valid JSON (corrupt).")
+            except Exception as e:
+                # Other error (e.g., unexpected encoding)
+                return re_init_history(f"Error reading clear-text history file: {e}")
