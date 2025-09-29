@@ -344,11 +344,27 @@ class LuksTray():
 
         assert not missing, f"missing system commands: {missing}"
         
-        # Create an invisible base widget to serve as the dialog parent
-        self.dialog_parent = QWidget(None) # Parented by None, so it's top-level
-        self.dialog_parent.setWindowFlags(Qt.WindowType.Tool) # Hint to WM it's a utility window
-        self.dialog_parent.hide() # Keep it invisible
+        
+        self.dialog_parent = QWidget(None)
 
+        self.dialog_parent.setWindowFlags(
+            Qt.WindowType.Tool |                   # utility window, not a normal app window
+            Qt.WindowType.FramelessWindowHint |    # no borders/decorations
+            Qt.WindowType.WindowDoesNotAcceptFocus | 
+            Qt.WindowType.BypassWindowManagerHint  # hint: don't manage/show in taskbar/docks
+        )
+
+        # Force creation of a native Wayland surface
+        self.dialog_parent.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
+
+        # Make it invisible / inert
+        self.dialog_parent.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.dialog_parent.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.dialog_parent.setWindowOpacity(0.0)
+        self.dialog_parent.setFixedSize(1, 1)
+
+        _ = self.dialog_parent.winId()   # ensures native handle
+        self.dialog_parent.show()        # must be mapped so Wayland knows about it
 
         self.history = HistoryClass(ini_tool.history_path)
         self.history.restore()
