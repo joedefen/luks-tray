@@ -1,0 +1,140 @@
+import sys
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QSystemTrayIcon, QMenu,
+    QDialog, QLabel, QVBoxLayout, QPushButton, QStyle
+)
+from PyQt6.QtGui import QCursor
+from PyQt6.QtCore import Qt
+
+class QHiddenParentWidget(QWidget):
+    """
+    REQUIRED: A minimal, invisible parent widget for modal QDialogs.
+    This provides the necessary window context for the OS to respect the
+    Qt.WindowType.Tool flag on child dialogs when they use exec(),
+    which is critical for preventing them from showing up in the taskbar/dock
+    and ensuring they float correctly on Wayland compositors.
+    """
+    def __init__(self):
+        super().__init__()
+        
+        # Ensure the widget is recognized as a window but never visible
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.FramelessWindowHint
+        )
+        # Set size to minimal and hide it immediately
+        self.setGeometry(0, 0, 1, 1)
+        self.hide() 
+
+class ModalTrayPopup(QDialog):
+    """ 
+    The floating popup window, now using QDialog for modal execution.
+    It MUST be initialized with the QHiddenParentWidget instance.
+    The flags have been adjusted to ensure they are added to existing flags.
+    """
+    def __init__(self, parent: QWidget = None):
+        super().__init__(parent)
+
+        # --- THE CRITICAL FIX: Add flags, DO NOT replace them ---
+        # This preserves the transient hint set by super().__init__(parent).
+        new_flags = (
+            Qt.WindowType.Tool |                  # Marks as utility/toolbar window (no taskbar entry)
+            Qt.WindowType.WindowStaysOnTopHint    # Keeps it above other windows
+        )
+        
+        # NOTE: Qt.WindowType.Dialog is usually redundant here as QDialog provides it.
+        # We combine new_flags with the existing flags via self.windowFlags()
+        self.setWindowFlags(self.windowFlags() | new_flags)
+        
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setWindowTitle("Modal Utility Popup")
+        self.setFixedSize(300, 120)
+
+        # --- Minimal Layout ---
+        layout = QVBoxLayout(self)
+        
+        label = QLabel("This dialog is modal (blocking).\nClick 'OK' to continue.")
+        layout.addWidget(label)
+        
+        close_button = QPushButton("OK")
+        close_button.clicked.connect(self.accept) 
+        layout.addWidget(close_button)
+
+
+class TrayApp:
+    """Initializes the tray icon, the hidden parent, and handles the click logic."""
+    def __init__(self, app):
+        self.app = app
+        
+        # CRITICAL STEP 1: Initialize the single hidden parent
+        self.hidden_parent = QHiddenParentWidget()
+        
+        # Set up the System Tray Icon
+        self.tray_icon = QSystemTrayIcon(self.app)
+        
+        # Use a simple, standard system icon
+        icon = self.app.style().standardIcon(QStyle.StandardPixmap.SP_DriveDVDIcon)
+        self.tray_icon.setIcon(icon)
+
+        # Set up the right-click menu
+        menu = QMenu()
+        exit_action = menu.addAction("Exit")
+        exit_action.triggered.connect(self.app.quit)
+        self.tray_icon.setContextMenu(menu)
+
+        # Connect the click action
+        self.tray_icon.activated.connect(self.on_tray_icon_activated)
+        self.tray_icon.show()
+
+    def on_tray_icon_activated(self, reason):
+        """Handle tray icon clicks and show the MODAL dialog."""
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            
+            dialog = ModalTrayPopup(parent=self.hidden_parent) 
+            
+            # Position the dialog near the cursor before showing it
+            cursor_pos = QCursor.pos()
+            
+            # FIX: Get the screen based on the cursor position
+            # Use QApplication.screenAt() with the cursor position
+            screen = self.app.screenAt(cursor_pos) or QApplication.primaryScreen()
+            screen_geometry = screen.geometry()
+
+            dialog_width = dialog.width()
+            dialog_height = dialog.height()
+
+            # Calculate initial position (above the cursor)
+            x = cursor_pos.x() - dialog_width // 2
+            y = cursor_pos.y() - dialog_height - 10 
+            
+            # Horizontal (X-Axis) Checks
+            if x < screen_geometry.left():
+                x = screen_geometry.left()
+            elif (x + dialog_width) > screen_geometry.right():
+                x = screen_geometry.right() - dialog_width
+
+            # Vertical (Y-Axis) Checks (Prioritize above cursor if possible)
+            if y < screen_geometry.top():
+                # If no room above, launch below the cursor
+                y = cursor_pos.y() + 10 
+                # Re-check if this new position fits at the bottom
+                if (y + dialog_height) > screen_geometry.bottom():
+                    y = screen_geometry.bottom() - dialog_height
+            elif (y + dialog_height) > screen_geometry.bottom():
+                y = screen_geometry.bottom() - dialog_height
+            
+            dialog.move(x, y)
+            
+            dialog.exec()      
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False) # Prevents app from quitting when the popup closes
+
+    # Check if system tray is available (important for robustness)
+    if not QSystemTrayIcon.isSystemTrayAvailable():
+        print("No system tray detected. Exiting.")
+        sys.exit(1)
+
+    tray_app = TrayApp(app)
+    sys.exit(app.exec())
