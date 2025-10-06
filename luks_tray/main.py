@@ -407,7 +407,7 @@ class LuksTray():
         self.tray_icon.setToolTip('luks-tray')
         self.tray_icon.setVisible(True)
 
-        self.containers, self.menu = {}, None
+        self.containers, self.menu = {}, QMenu()
         self.update_menu()
         self.remove_unused_automounts()
 
@@ -504,7 +504,22 @@ class LuksTray():
                     ns.vital = vital
                     self.containers[vital.uuid] = ns
 
-        self.update_menu_items()
+        icon_key = self.update_menu_items()
+
+        # Show the menu
+        was_visible = self.menu and self.menu.isVisible()
+
+        self.tray_icon.setIcon(self.icons[icon_key])
+        self.tray_icon.setContextMenu(self.menu)
+        self.tray_icon.show()
+
+        # Reopen menu if it was previously open
+        if was_visible:
+            # Show menu at cursor position
+            cursor_pos = QCursor.pos()
+            self.menu.popup(cursor_pos)
+
+        return True
 
     def merge_containers_history(self):
         """ TBD """
@@ -524,7 +539,8 @@ class LuksTray():
 
     def update_menu_items(self):
         """Update context menu with LUKS partitions."""
-        menu = QMenu()
+        self.menu.clear()
+        menu = self.menu
         # menu.setFont(self.emoji_font)
 
         icon_key = 'none'
@@ -613,50 +629,7 @@ class LuksTray():
         action.setFont(self.mono_font)
         action.triggered.connect(self.exit_app)
         menu.addAction(action)
-
-        return self.replace_menu_if_different(menu, icon_key)
-
-
-    def replace_menu_if_different(self, menu, icon_key):
-        """ TBD """
-        def replace_menu():
-            was_visible = self.menu and self.menu.isVisible()
-
-            self.menu = menu
-            self.tray_icon.setIcon(self.icons[icon_key])
-            self.tray_icon.setContextMenu(self.menu)
-            self.tray_icon.show()
-
-            # Reopen menu if it was previously open
-            if was_visible:
-                # Show menu at cursor position
-                cursor_pos = QCursor.pos()
-                self.menu.popup(cursor_pos)
-
-            return True
-
-        def get_action_text(action):
-            if isinstance(action, QWidgetAction):
-                widget = action.defaultWidget()
-                if isinstance(widget, QLabel):
-                    return widget.text()
-                return '<widget>'
-            return action.text()
-
-        if not self.menu: # or menu.actions() != self.menu.actions():
-            return replace_menu()
-        if self.prev_icon_key != icon_key:
-            self.prev_icon_key = icon_key
-            return replace_menu()
-
-        if len(menu.actions()) != len(self.menu.actions()):
-            return replace_menu()
-
-        for new_action, old_action in zip(menu.actions(), self.menu.actions()):
-            if get_action_text(new_action) != get_action_text(old_action):
-                return replace_menu()
-
-        return False
+        return icon_key
 
 
     def handle_device_click(self, uuid):
