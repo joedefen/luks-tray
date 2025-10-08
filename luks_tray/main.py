@@ -306,6 +306,26 @@ class DeviceInfo:
         """ TBD """
         return self.entries.get(name, None)
 
+class QHiddenParentWidget(QWidget):
+    """
+    REQUIRED: A minimal, invisible parent widget for modal QDialogs.
+    This provides the necessary window context for the OS to respect the
+    Qt.WindowType.Tool flag on child dialogs when they use exec(),
+    which is critical for preventing them from showing up in the taskbar/dock
+    and ensuring they float correctly on Wayland compositors.
+    """
+    def __init__(self):
+        super().__init__()
+
+        # Ensure the widget is recognized as a window but never visible
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.FramelessWindowHint
+        )
+        # Set size to minimal and hide it immediately
+        self.setGeometry(0, 0, 1, 1)
+        self.hide()
+
 class LuksTray():
     """ TBD """
     singleton = None
@@ -322,14 +342,14 @@ class LuksTray():
                             'ok',
                         ] )
 
-    def __init__(self, ini_tool, opts):
+    def __init__(self, ini_tool, opts, app):
         LuksTray.singleton = self
         self.uid = os.environ.get('SUDO_UID', os.getuid())
         self.gid = os.environ.get('SUDO_GID', os.getgid())
 
         self.ini_tool = ini_tool
-        self.app = QApplication([])
-        self.app.setQuitOnLastWindowClosed(False)
+        self.app = app
+        self.hidden_parent = QHiddenParentWidget()
         self.mono_font = QFont("Consolas", 10)
         self.mono_font.setStyleHint(QFont.StyleHint.Monospace)
         self.emoji_font = self.get_emoji_font()
@@ -339,32 +359,10 @@ class LuksTray():
         # self.has_emoji_font = bool("Noto Color Emoji" in QFontDatabase.families())
         # self.emoji_font = (QFont("Noto Color Emoji") if self.has_emoji_font
                            # else QFont("DejaVu Sans"))
-                           
+
         _, missing, self.udisks_cmd = self.check_dependencies()
 
         assert not missing, f"missing system commands: {missing}"
-        
-        
-        self.dialog_parent = QWidget(None)
-
-        self.dialog_parent.setWindowFlags(
-            Qt.WindowType.Tool |                   # utility window, not a normal app window
-            Qt.WindowType.FramelessWindowHint |    # no borders/decorations
-            Qt.WindowType.WindowDoesNotAcceptFocus | 
-            Qt.WindowType.BypassWindowManagerHint  # hint: don't manage/show in taskbar/docks
-        )
-
-        # Force creation of a native Wayland surface
-        self.dialog_parent.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
-
-        # Make it invisible / inert
-        self.dialog_parent.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.dialog_parent.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.dialog_parent.setWindowOpacity(0.0)
-        self.dialog_parent.setFixedSize(1, 1)
-
-        _ = self.dialog_parent.winId()   # ensures native handle
-        self.dialog_parent.show()        # must be mapped so Wayland knows about it
 
         self.history = HistoryClass(ini_tool.history_path)
         self.history.restore()
@@ -414,7 +412,7 @@ class LuksTray():
         self.timer = QTimer(self.tray_icon)
         self.timer.timeout.connect(self.update_menu)
         self.timer.start(3000)  # 3000 milliseconds = 3 seconds
-        
+
     @staticmethod
     def check_dependencies(verbose=False):
         """ ensure the system utilities we need are available
@@ -446,7 +444,7 @@ class LuksTray():
                 prt(f'✗  {util} - please install',
                     ' one of' if isinstance(util, list) else '')
         return found, missing, udisks_cmd
-    
+
     @staticmethod
     def get_emoji_font(size=10):
         """Try to load Noto Color Emoji, fallback to system emoji-capable fonts."""
@@ -467,7 +465,7 @@ class LuksTray():
 
         prt("Warning: No known emoji font found — emojis likely degraded.")
         return QFont()  # system default
-    
+
     def update_mounts(self):
         """ TBD """
         with open('/proc/mounts', 'r', encoding='utf-8') as f:
@@ -636,25 +634,25 @@ class LuksTray():
         """Handle clicking a partition."""
         # Show a dialog to unmount or display info
         if uuid in self.containers:
-            dialog = MountDeviceDialog(self.containers[uuid])
+            dialog = MountDeviceDialog(self.containers[uuid], parent=self.hidden_parent)
             dialog.exec()
 
     def handle_file_click(self, uuid):
         """Handle clicking a partition."""
         # Show a dialog to unmount or display info
         if uuid in self.containers:
-            dialog = MountFileDialog(self.containers[uuid])
+            dialog = MountFileDialog(self.containers[uuid], parent=self.hidden_parent)
             dialog.exec()
 
     def handle_add_file_click(self):
         """ TBD """
-        dialog = MountFileDialog(None)
+        dialog = MountFileDialog(None, parent=self.hidden_parent)
         # prt('about to exec AddFileClick...')
         dialog.exec()
 
     def handle_create_file_click(self):
         """ TBD """
-        dialog = MountFileDialog(None, create=True)
+        dialog = MountFileDialog(None, create=True, parent=self.hidden_parent)
         dialog.exec()
 
     def exit_app(self):
@@ -664,9 +662,9 @@ class LuksTray():
 
     def prompt_master_password(self):
         """ Prompt for master passdword"""
-        dialog = MasterPasswordDialog()
+        dialog = MasterPasswordDialog(parent=self.hidden_parent)
         dialog.exec()
-        
+
     def update_history(self, uuid, values):
         """ TBD """
         vital = self.history.get_vital(uuid)
@@ -686,7 +684,7 @@ class LuksTray():
         auto_root = LuksTray.expand_real_user(auto_root)
         auto_root = os.path.abspath(auto_root)
         return auto_root
-    
+
     @staticmethod
     def generate_auto_mount_folder():
         """ Generate auto mount folder"""
@@ -720,7 +718,7 @@ class LuksTray():
             if (fullpath := available(fallback)):
                 return fullpath
         assert False, "cannot generate automount directory (too many in use)"
- 
+
     @staticmethod
     def remove_if_auto(mount):
         """Remove target_dir if it is empty and within parent_dir"""
@@ -737,7 +735,7 @@ class LuksTray():
             return True
         except OSError:
             return False  # Not empty or permission denied
-        
+
     def remove_unused_automounts(self):
         """ A startup function (could be periodic) that cleans up the
             auto mount folder
@@ -761,7 +759,7 @@ class LuksTray():
                     pass  # Silently ignore unexpected errors like unreadable dirs
         except Exception:
             pass  # Silently ignore unexpected errors like unreadable dirs
-    
+
     @staticmethod
     def expand_real_user(path):
         """
@@ -784,15 +782,20 @@ class LuksTray():
         return path
 
 
-
 class CommonDialog(QDialog):
     """ TBD """
     home_dir = None
     dot_vault_dir = None # ~/.Vaults (default crypts)
     vault_dir = None # ~/Vaults (default mount area)
 
-    def __init__(self):
-        super().__init__(parent=LuksTray.singleton.dialog_parent)
+    def __init__(self, parent: QWidget=None):
+        super().__init__(parent=parent)
+
+        self.setWindowFlags(
+            self.windowFlags() |
+            Qt.WindowType.Tool |                   # utility window, not a normal app window
+            Qt.WindowType.WindowStaysOnTopHint
+        )
 
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.main_layout = QVBoxLayout()
@@ -804,7 +807,7 @@ class CommonDialog(QDialog):
         self.progress_label = None
         self.progress_bar = None
         self.get_real_user_home_directory() # populate home/vault dir
-    
+
     def showEvent(self, event):
         """
         Called automatically by Qt immediately before the dialog is shown.
@@ -812,28 +815,28 @@ class CommonDialog(QDialog):
         """
         # 1. Finalize size and get screen info
         # This forces the layout to calculate the final width/height of the dialog
-        self.adjustSize() 
+        self.adjustSize()
 
         cursor_pos = QCursor.pos()
         dialog_width = self.width()
         dialog_height = self.height()
-        
+
         # Get the screen where the cursor currently is, which is the most reliable
         screen = self.screen() or QApplication.primaryScreen()
         screen_geometry = screen.geometry()
 
         # 2. Calculate initial position (centered below cursor, with a small offset)
         x = cursor_pos.x() - (dialog_width // 2)
-        y = cursor_pos.y() + 20 
+        y = cursor_pos.y() + 20
 
         # 3. Add Explicit Boundary Checks
-        
+
         # Horizontal (X-Axis) Checks
         if x < screen_geometry.left():
             x = screen_geometry.left()
         elif (x + dialog_width) > screen_geometry.right():
             x = screen_geometry.right() - dialog_width
-        
+
         # Vertical (Y-Axis) Checks
         # If dialog is launching from the top tray, it's very likely to hit the top
         if y < screen_geometry.top():
@@ -843,7 +846,7 @@ class CommonDialog(QDialog):
 
         # 4. Move the dialog to the adjusted position
         self.move(x, y)
-        
+
         # IMPORTANT: Call the base class implementation
         super().showEvent(event)
 
@@ -1240,8 +1243,8 @@ class CommonDialog(QDialog):
 
 class MasterPasswordDialog(CommonDialog):
     """ TBD """
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent: QWidget=None):
+        super().__init__(parent)
         self.setWindowTitle('Master Password Dialog')
         self.add_input_field('password', "Master Password", '', 24, add_on='password')
         self.add_push_button('OK', self.set_master_password)
@@ -1291,8 +1294,8 @@ class MasterPasswordDialog(CommonDialog):
 
 class MountDeviceDialog(CommonDialog):
     """ TBD """
-    def __init__(self, container):
-        super().__init__()
+    def __init__(self, container, parent: QWidget):
+        super().__init__(parent=parent)
         tray = LuksTray.singleton
 
         mounts = []
@@ -1452,8 +1455,8 @@ class MountDeviceDialog(CommonDialog):
 
 class MountFileDialog(CommonDialog):
     """ TBD """
-    def __init__(self, container, create=False):
-        super().__init__()
+    def __init__(self, container, create=False, parent=None):
+        super().__init__(parent=parent)
         tray = LuksTray.singleton
 
         # mounts if there are
@@ -1623,7 +1626,7 @@ class MountFileDialog(CommonDialog):
                 err = self.check_upon(path, mount_points)
                 if err:
                     errs.append(err)
-                    
+
             elif key == 'size_str':
                 try:
                     size_str = values.get('size_str', None)
@@ -1642,7 +1645,7 @@ class MountFileDialog(CommonDialog):
                 back_file = container.back_file
             else:
                 back_file = values['back_file']
-                
+
             if 'overwrite_ok' in values:
                 overwrite_ok = values['overwrite_ok']
                 if os.path.exists(back_file) and not overwrite_ok:
@@ -1705,7 +1708,7 @@ def main():
         print(f'RUNNING: {args}')
         os.execvp(editor, args)
         sys.exit(1) # just in case ;-)
-        
+
     if opts.check_deps:
         _, missing, _ = LuksTray.check_dependencies(verbose=True)
         sys.exit(1 if missing else 0) # just in case ;-)
@@ -1728,47 +1731,15 @@ def main():
         ini_tool = IniTool(paths_only=False)
         Utils.prt_path = ini_tool.log_path
 
-        tray = LuksTray(ini_tool, opts)
+        app = QApplication(sys.argv)
+        app.setQuitOnLastWindowClosed(False)
+        tray = LuksTray(ini_tool, opts, app)
         sys.exit(tray.app.exec())
 
     except Exception as exce:
         print("exception:", str(exce))
         print(traceback.format_exc())
         sys.exit(15)
-
-
-# Basic PyQt6 Tray Icon example
-def mainBasic():
-    """ TBD """
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
-    app = QApplication(sys.argv)
-
-    # Check if the system supports tray icons
-    if not QSystemTrayIcon.isSystemTrayAvailable():
-        print("System tray not available")
-        sys.exit(1)
-
-    # Create a tray icon
-    tray_icon = QSystemTrayIcon()
-    tray_icon.setIcon(QIcon(
-        "/home/joe/Projects/luks-tray/luks_tray/resources/orange-shield-v03.svg"))
-
-    # Create a right-click menu for the tray icon
-    tray_menu = QMenu()
-
-    # Add an action to the menu
-    quit_action = QAction("Quit")
-    quit_action.triggered.connect(app.quit)
-    tray_menu.addAction(quit_action)
-
-    # Set the context menu to the tray icon
-    tray_icon.setContextMenu(tray_menu)
-
-    # Show the tray icon
-    tray_icon.show()
-
-    # Run the application's event loop
-    sys.exit(app.exec_())
 
 if __name__ == "__main__":
     # mainBasic()

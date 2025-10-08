@@ -57,7 +57,7 @@ class ModalTrayPopup(QDialog):
         layout.addWidget(label)
         
         close_button = QPushButton("OK")
-        close_button.clicked.connect(self.accept) 
+        close_button.clicked.connect(self.accept)
         layout.addWidget(close_button)
 
 
