@@ -1133,15 +1133,8 @@ class CommonDialog(QDialog):
         """Common LUKS unlock logic"""
         if hasattr(self, 'opened') and self.opened:
             return None  # Already unlocked
-        return sudo_cmd(['cryptsetup', 'luksOpen', '--key-file', '-',
-                         device_path, luks_device], input_str=password)
-###     script = ( f'set -x; echo -n {shlex.quote(password)} | cryptsetup luksOpen '
-###         f'--key-file=- {shlex.quote(device_path)} {shlex.quote(luks_device)}')
-###     print(f'+ {script=}')
-###     rv =  sudo_cmd(['bash'], input_str=script)
-###     print(f'+ {rv=}')
-###     return rv
-
+        return sudo_cmd(['cryptsetup', 'open', '--type', 'luks',
+                         '--key-file', '-', device_path, luks_device], input_str=password)
 
 
     def _mount_manual(self, tray, mapper_path, upon, do_bindfs=False):
@@ -1440,7 +1433,7 @@ class MountDeviceDialog(CommonDialog):
                             unmounteds.append(mount)
 
             if len(errs) <= 1:
-                sudo_cmd(["cryptsetup", "luksClose", filesystem.name], errs)
+                sudo_cmd(["cryptsetup", "close", filesystem.name], errs)
             if len(errs) <= 1:
                 for mount in unmounteds:
                     LuksTray.remove_if_auto(mount)
@@ -1556,7 +1549,7 @@ class MountFileDialog(CommonDialog):
                         break
 
             if not errs:
-                sudo_cmd(["cryptsetup", "luksClose", container.name], errs=errs)
+                sudo_cmd(["cryptsetup", "close", container.name], errs=errs)
                     # If this is a file container with a loop device, detach it
             if not errs and container.back_file:
                 ignores = []
