@@ -18,7 +18,7 @@
 2. Click the tray icon to see available containers. You may:
     - Insert a disk with LUKS devices to detect them automatically.
     - Add an existing or create a new encrypted file to manage it.
-4. Click a ▽ container to mount it; or a ▣/‼ container to unmount it.
+4. Click a ▽ container to mount it; or a ▣ or ⧈ or ‼ container to unmount it.
 5. When mounting a container, enter its password and choose mount point in the dialog
     - if the app has a mount point in its history, it will fill in that mount point
     - otherwise, the app will generate a mount point in `~/Vaults`
@@ -37,8 +37,9 @@ Here is an sample menu as seen when you right-click the tray shield icon:
 Notes:
 
 - the first section shows LUKS devices, and the second shows LUKS files.
-- click a ▣ entry to dismount and lock a mounted, unlocked LUKS container
+- click a ▣ or ⧈ entry to dismount and lock a mounted, unlocked LUKS container
 
+  - note that ▣ indicates full access; ⧈ indicates readonly
   - if busy, you are shown the PIDs and names of processes preventing dismount
 
 - click a ▽ entry to unlock and mount a locked LUKS container
@@ -102,7 +103,7 @@ It works best with DEs/WMs that offer **first-class tray support**, such as:
   - **Sway** with **waybar**
   - **i3wm** with **polybar**
 
-> ⚠️ **GNOME**: Requires a third-party extension (such as AppIndicator support) to show tray icons. Results may vary across GNOME versions.
+> ⚠️ **GNOME**: Requires a third-party extension (such as AppIndicator support) to show tray icons. Results may vary across GNOME versions.<br>
 > ⚠️ **Xfce** and similar lightweight DEs: Tray menus may open off-screen or be partially cut off, depending on panel layout and screen resolution.
 
 

@@ -133,8 +133,9 @@ class DeviceInfo:
     bans = ('/', '/home', '/var', '/usr', '/tmp', '/opt', '/srv',
             '/boot', '/sys', '/proc', '/dev', '/run')
 
-    def __init__(self, opts):
+    def __init__(self, opts, tray):
         self.opts = opts
+        self.tray = tray
         self.DB = opts.debug
         self.wids = None
         self.partitions = None
@@ -157,6 +158,7 @@ class DeviceInfo:
             filesystems=[],        # child file systems
             back_file='', # backing file
             vital=None, # history if any
+            readonly=False, # whether readonly
             )
 
 
@@ -208,6 +210,7 @@ class DeviceInfo:
             entry = self.make_partition_namespace('', '')
             entry.name=device.get('name', '')
             entry.type = device.get('type', '')
+            entry.readonly = bool(device.get('ro', 0))
             entry.fstype = device.get('fstype', '')
             if entry.fstype is None:
                 entry.fstype = ''
@@ -228,7 +231,7 @@ class DeviceInfo:
 
                # Run the `lsblk` command and get its output in JSON format with additional columns
         result = subprocess.run(['lsblk', '-J', '-o',
-                    'NAME,MAJ:MIN,TYPE,FSTYPE,LABEL,PARTLABEL,FSUSE%,SIZE,UUID,MOUNTPOINTS', ],
+                    'NAME,MAJ:MIN,TYPE,RO,FSTYPE,LABEL,PARTLABEL,FSUSE%,SIZE,UUID,MOUNTPOINTS', ],
                     stdout=subprocess.PIPE, text=True, check=False)
         parsed_data = json.loads(result.stdout)
         dev_cons, file_cons = {}, {}
@@ -274,8 +277,15 @@ class DeviceInfo:
                     # entries[subentry.name] = subentry
                     if len(grandchildren) == 1 and len(subentry.mounts) == 1:
                         entry.upon = subentry.mounts[0]
-                    if self.is_banned(entry.mounts):
-                        continue # skip whole disk entries
+                        # The device name in /proc/mounts is the subentry's name (e.g., /dev/mapper/luks_vol)
+                        ns = self.tray.mount_infos.get(f'/dev/mapper/{subentry.name}',
+                                              self.tray.mount_infos.get(subentry.name, None))
+                        if ns:
+                            entry.readonly = ns.readonly
+                            # Optionally, you can also set entry.upon here if needed, 
+                            # but it's often better to rely on lsblk's MOUNTPOINTS data first.
+                            if self.is_banned(entry.mounts):
+                                continue # skip whole disk entries
 
         self.entries = dev_cons | file_cons
         if self.DB:
@@ -383,8 +393,8 @@ class LuksTray():
 
         # ??? Load JSON data
         # ??? self.load_data()
-        self.lsblk = DeviceInfo(opts=opts)
-        self.mounteds = set()
+        self.lsblk = DeviceInfo(opts=opts, tray=self)
+        self.mount_infos = {}
         self.upons = set()
 
         self.tray_icon = QSystemTrayIcon(self.icons['none'], self.app)
@@ -454,21 +464,30 @@ class LuksTray():
     
     def update_mounts(self):
         """ TBD """
+        self.mount_infos = {}
+        self.upons = set()
         with open('/proc/mounts', 'r', encoding='utf-8') as f:
             for line in f:
                 parts = line.split()
-                if len(parts) >= 2:
-                    self.mounteds.add(parts[0]) # what is mounted is first
-                    self.upons.add(parts[1])  # The mount point is the second field
+                if len(parts) >= 4:
+                    device = parts[0]
+                    mount_point = parts[1]
+                    options = parts[3]
+                    readonly = 'ro' in options.split(',')
+                    self.mount_infos[device] = SimpleNamespace(
+                                upon=mount_point, readonly=readonly)
+                    self.upons.add(mount_point)
+        return set(self.mount_infos.keys())
 
     def is_mounted(self, thing):
         """ TBD """
-        return thing in self.mounteds or thing in self.upons
+        return thing in self.mount_infos or thing in self.upons
 
     def update_menu(self):
         """ TBD """
         self.ini_tool.update_config()
         if self.history.status in ('unlocked', 'clear_text'):
+            self.update_mounts()
             self.containers = self.lsblk.parse_lsblk()
             self.merge_containers_history()
             # add in the containers that are not mounted but in
@@ -539,13 +558,13 @@ class LuksTray():
 
 #               # Determine which emoji/symbol to show
                 if mountpoint.startswith('/'):
-                    emoji = '▣'   # replaces ✅
+                    emoji = '⧈' if container.readonly else '▣'
                     icon_key = 'ok' if icon_key != 'alert' else icon_key
                 elif container.opened:
-                    emoji = '‼'   # replaces ‼️
+                    emoji = '‼'
                     icon_key = 'alert' if do_alerts else icon_key
                 else:
-                    emoji = '▽'   # replaces 🔳
+                    emoji = '▽'
 
 
                 # Construct menu line text
@@ -1025,19 +1044,6 @@ class CommonDialog(QDialog):
         else: # password is to be hidden
             self.hide_password()
 
-    @staticmethod
-    def get_mount_points():
-        """ TBD """
-        mount_points = set()
-        with open('/proc/mounts', 'r', encoding='utf-8') as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) >= 2:
-                    mount_points.add(parts[1])  # The mount point is the second field
-        return mount_points
-
-
-
     def cancel(self, _=None):
         """ null function"""
         self.reject()
@@ -1129,17 +1135,23 @@ class CommonDialog(QDialog):
     ####################################################
     # LUKS Primitives
     ####################################################
-    def _unlock_luks(self, device_path, password, luks_device):
+    def _unlock_luks(self, device_path, password, luks_device, readonly=False):
         """Common LUKS unlock logic"""
         if hasattr(self, 'opened') and self.opened:
             return None  # Already unlocked
-        return sudo_cmd(['cryptsetup', 'open', '--type', 'luks',
-                         '--key-file', '-', device_path, luks_device], input_str=password)
+        args = ['cryptsetup', 'open', '--type', 'luks']
+        if readonly:
+             args.append('--readonly')
+        args += ['--key-file', '-', device_path, luks_device]
+        return sudo_cmd(args, input_str=password)
 
 
-    def _mount_manual(self, tray, mapper_path, upon, do_bindfs=False):
+    def _mount_manual(self, tray, mapper_path, upon, do_bindfs=False, readonly=False):
         """Manual mounting with bindfs"""
-        err = sudo_cmd(['mount', mapper_path, upon])
+        if readonly:
+            err = sudo_cmd(['mount', '-o', 'ro', mapper_path, upon])
+        else:
+            err = sudo_cmd(['mount', mapper_path, upon])
         if do_bindfs and not err:
             err = sudo_cmd(['bindfs', '-u', str(tray.uid), '-g', str(tray.gid),
                           upon, upon])
@@ -1165,7 +1177,7 @@ class CommonDialog(QDialog):
     # LUKS Generic Mounter
     ####################################################
     def mount_luks_container(self, tray, container, password, upon=None, luks_device=None,
-                            luks_file=None, size=None):
+                            readonly=False, luks_file=None, size=None):
         """
         Unified function to mount any LUKS container (device or file).
 
@@ -1204,9 +1216,9 @@ class CommonDialog(QDialog):
                         err = sudo_cmd(['truncate', '-s', f'{size}M', luks_file])
                     if not err:
                         # Execute the cryptsetup command directly
-                        args = ['cryptsetup', 'luksFormat', '--type', 'luks2',
-                                     '--batch-mode', '--key-file', '-', luks_file]
-                        sub = subprocess.run( args, input=f'{password}',
+                        args = ['cryptsetup', 'luksFormat', '--type', 'luks2']
+                        args += ['--batch-mode', '--key-file', '-', luks_file]
+                        sub = subprocess.run(args, input=f'{password}',
                              check=True, capture_output=True, text=True)
                         if sub.returncode != 0:
                             err = f'FAIL: {' '.join(args)}: {sub.stdout} {sub.stderr} [rc={sub.returncode}]'
@@ -1224,7 +1236,7 @@ class CommonDialog(QDialog):
                         return err
 
             # Manual mounting always: unlock with cryptsetup, then mount manually
-            err = self._unlock_luks(device_path, password, luks_device)
+            err = self._unlock_luks(device_path, password, luks_device, readonly=readonly)
             if err:
                 return err
 
@@ -1236,7 +1248,8 @@ class CommonDialog(QDialog):
                 if err:
                     return err
 
-            return self._mount_manual(tray, mapper_path, upon, do_bindfs=bool(luks_file))
+            err = self._mount_manual(tray, mapper_path, upon,
+                    do_bindfs=bool(luks_file), readonly=readonly)
 
         except Exception as e:
             return f"An error occurred: {str(e)}"
@@ -1331,10 +1344,12 @@ class MountDeviceDialog(CommonDialog):
             if not vital.upon:
                 where = os.path.join(self.vault_dir, container.name)
             self.add_input_field('upon', "Mount At", where, 36, add_on='folder')
-            if container.label:
-                self.add_line(f'Label: {container.label}')
+            self.add_input_field('readonly', "Read-only",
+                                 '', 48, field_type='checkbox')
             if container.size_str:
                 self.add_line(f'Size: {container.size_str}')
+            if container.label:
+                self.add_line(f'Label: {container.label}')
             self.add_line(f'UUID: {container.uuid}')
 
             self.add_push_button('OK', self.mount_device, container.uuid)
@@ -1358,7 +1373,7 @@ class MountDeviceDialog(CommonDialog):
             return
 
         errs.append(f'{container.name}')
-        mount_points = self.get_mount_points()
+        mount_points = tray.update_mounts()
 
         # Parse and validate inputs
         for key, field in self.inputs.items():
@@ -1372,6 +1387,8 @@ class MountDeviceDialog(CommonDialog):
                 err = self.check_upon(text, mount_points)
                 if err:
                     errs.append(err)
+            elif key == 'readonly':
+                values[key] = field.isChecked()
             else:
                 errs.append(f'ERR: unknown key({key})')
 
@@ -1391,7 +1408,7 @@ class MountDeviceDialog(CommonDialog):
             self.hide_password()
             self.show_progress('Mount device...')
             err = self.mount_luks_container(tray, container, values['password'],
-                            upon=mount_point, luks_device=luks_device)
+                    upon=mount_point, readonly=values['readonly'], luks_device=luks_device)
             self.hide_progress()
 
             if err:
@@ -1481,6 +1498,8 @@ class MountFileDialog(CommonDialog):
                                 24, add_on='password')
             where = vital.upon if vital.upon else self.vault_dir
             self.add_input_field('upon', "Mount At", where, 36, add_on='folder')
+            self.add_input_field('readonly', "Read-only",
+                                 '', 48, field_type='checkbox')
             if container.size_str:
                 self.add_line(f'Size: {container.size_str}')
             if container.uuid:
@@ -1584,7 +1603,7 @@ class MountFileDialog(CommonDialog):
         else:
             errs.append(f'{container.name}')
 
-        mount_points = self.get_mount_points()
+        mount_points = tray.update_mounts()
         mount_point = None
 
         for key, field in self.inputs.items():
@@ -1628,6 +1647,8 @@ class MountFileDialog(CommonDialog):
                 if err:
                     errs.append(err)
                     
+            elif key == 'readonly':
+                pass
             elif key == 'size_str':
                 try:
                     size_str = values.get('size_str', None)
@@ -1659,7 +1680,8 @@ class MountFileDialog(CommonDialog):
                 err = run_cmd(['mkdir', '-p', mount_point])
             if not err:
                 err = self.mount_luks_container(tray, container, values['password'],
-                        mount_point, luks_file=back_file, size=values.get('size_str', None))
+                        mount_point, readonly=values['readonly'],
+                        luks_file=back_file, size=values.get('size_str', None))
                 self.hide_progress()
 
             if err:
