@@ -1566,6 +1566,8 @@ class MountFileDialog(CommonDialog):
             # where = LuksTray.generate_auto_mount_folder()
             # self.add_input_field('upon', "Mount At", where, 36, add_on='folder')
             self.add_input_field('upon', "Mount At", self.vault_dir, 36, add_on='folder')
+            self.add_input_field('readonly', "Read-only",
+                                 '', 48, field_type='checkbox')
 
             self.add_push_button('OK', self.mount_file, None)
             self.add_push_button('Cancel', self.cancel)
