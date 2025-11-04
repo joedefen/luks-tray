@@ -107,6 +107,24 @@ It works best with DEs/WMs that offer **first-class tray support**, such as:
 > ⚠️ **Xfce** and similar lightweight DEs: Tray menus may open off-screen or be partially cut off, depending on panel layout and screen resolution.
 
 
+####  Workarounds for SWAY
+Required Workarounds for ~/.config/sway/config:
+
+Users running Sway must add the following configuration rules to ensure dialogs float correctly and are hidden from the application switcher.
+
+    Force Dialogs to Float and Hide Taskbar Icon: This rule targets the unique title prefix to enforce floating behavior and hides the window from the Taskbar/Window Switcher.
+    Bash
+
+# Targets all Luks-Tray dialogs. Ensures they float and are hidden from the
+# task list (no_focus).
+for_window title "^Luks-Tray:" floating enable, center, border normal, no_focus
+
+Missing Title Bar Limitation: The application is unable to force a Server-Side Decoration (SSD) title bar. Users must rely on Sway's default floating window behavior:
+
+    To Move Window: Use the Sway default keybind (Mod+Click and Drag).
+
+    To Close Window: Use the Sway default keybind (Mod+Shift+c).
+
 ---
 
 Test Notes:

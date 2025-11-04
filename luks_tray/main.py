@@ -1,6 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-""" TBD """
+""" LUKS TRAY
+
+This is not working so well for sway (or wayland):
+
+Issue,Target,Summary of Failure
+
+- Floating/Decorations, PyQt6/Wayland CSD
+  - "PyQt's attempts to hint the window as a floating dialog and draw its own Client-Side Decorations (CSD)
+    were either stripped by the Xwayland layer or ignored by Sway.
+    The CSD feature, meant to give apps control, failed to render even the basic title bar."
+- Taskbar Icon, PyQt6/Wayland CSD
+   - "The internal flag to skip the taskbar (WindowType.Tool) failed because the window was treated as a generic,
+     primary application window (app_id: python3) by the Wayland compositor."
+
+"""
 # pylint: disable=unused-import,broad-exception-caught, invalid-name
 # pylint: disable=no-name-in-module,import-outside-toplevel,too-many-instance-attributes
 # pylint: disable=too-many-locals,too-many-branches,too-many-statements
@@ -40,6 +54,15 @@ from luks_tray import Utils
 from luks_tray.IniTool import IniTool
 
 
+def requires_manual_title():
+    """Checks if we are likely in a Wayland/Sway environment where SSD is missing."""
+    # If using Xwayland under a tiling WM, XDG_CURRENT_DESKTOP might be helpful
+    if os.environ.get('XDG_CURRENT_DESKTOP') in ['sway', ]:
+        return True
+    return False
+
+# Global flag to run the check only once
+IS_SWAY_LIKE_ENV = requires_manual_title()
 
 def generate_uuid_for_file_path(file_path):
     """ Use SHA-256 to hash the file path """
@@ -121,7 +144,7 @@ def run_unmount(mount_point: str, busy_warns: set) -> str | None:
     # Show user-friendly popup
     msg = QMessageBox()
     msg.setIcon(QMessageBox.Icon.Warning)
-    msg.setWindowTitle("Unmount Failed — Device Busy")
+    msg.set_title("Unmount Failed — Device Busy [luks-tray]")
     msg.setText(f"'{mount_point}' busy by these processes:\n - {info}")
     msg.setStandardButtons(QMessageBox.StandardButton.Ok)
     msg.exec()
@@ -823,7 +846,13 @@ class CommonDialog(QDialog):
 
     def __init__(self):
         super().__init__(parent=LuksTray.singleton.dialog_parent)
-
+        self.setWindowRole("dialog")
+        self.setWindowFlags(
+            Qt.WindowType.Dialog |
+            Qt.WindowType.WindowSystemMenuHint |
+            Qt.WindowType.WindowTitleHint |
+            Qt.WindowType.WindowCloseButtonHint
+        )
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.main_layout = QVBoxLayout()
         self.button_layout = QHBoxLayout()
@@ -834,6 +863,25 @@ class CommonDialog(QDialog):
         self.progress_label = None
         self.progress_bar = None
         self.get_real_user_home_directory() # populate home/vault dir
+
+    def set_title(self, title):
+        """ Sets the window title ... if sway, putting it in the dialog box """
+        self.setWindowTitle(title)
+        if IS_SWAY_LIKE_ENV:
+            title_label = QLabel(title)
+            title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            # Apply some styling to make it look like a title bar
+            title_label.setStyleSheet("""
+                QLabel {
+                    background-color: #333; 
+                    color: white; 
+                    padding: 5px; 
+                    font-weight: bold;
+                    border-bottom: 1px solid #555;
+                }
+            """)
+            # Insert the manual title at the very top of the layout
+            self.main_layout.addWidget(title_label)
     
     def showEvent(self, event):
         """
@@ -1055,7 +1103,7 @@ class CommonDialog(QDialog):
 
             error_dialog = QMessageBox(self)
             error_dialog.setIcon(QMessageBox.Icon.Critical)  # Set the icon to show it's an error
-            error_dialog.setWindowTitle("Errors Detected")
+            error_dialog.set_title("Errors Detected [luks-tray]")
             error_dialog.setText("The following errors were encountered:")
             error_dialog.setInformativeText(error_text)
             error_dialog.setStandardButtons(QMessageBox.StandardButton.Ok)  # Add a dismiss button
@@ -1094,7 +1142,7 @@ class CommonDialog(QDialog):
             button.setEnabled(True)
 
     @staticmethod
-    def check_upon(text, mount_points):
+    def check_upon(text, mount_points, is_device=False):
         """ Validate candidate mount point.
             Returns error (or None if no error)
         """
@@ -1259,7 +1307,7 @@ class MasterPasswordDialog(CommonDialog):
     """ TBD """
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Master Password Dialog')
+        self.set_title('Master Password Dialog [luks-tray]')
         self.add_input_field('password', "Master Password", '', 24, add_on='password')
         self.add_push_button('OK', self.set_master_password)
         self.add_push_button('Cancel', self.cancel)
@@ -1317,7 +1365,7 @@ class MountDeviceDialog(CommonDialog):
             mounts = container.filesystems[0].mounts
         # mounts if there are
         if mounts:  # unmount dialog
-            self.setWindowTitle('Unmount and Close Device')
+            self.set_title('Unmount and Close Device [luks-tray]')
             # self.setFixedSize(300, 200)
             self.add_line(f'{container.name}')
             self.add_line(f'Unmount {",".join(mounts)}?')
@@ -1326,7 +1374,7 @@ class MountDeviceDialog(CommonDialog):
             self.main_layout.addLayout(self.button_layout)
 
         elif container.opened:  # unmount dialog
-            self.setWindowTitle('Close Unmounted Device')
+            self.set_title('Close Unmounted Device [luks-tray]')
             # self.setFixedSize(300, 200)
             self.add_line(f'{container.name}')
             self.add_line(f'Close {",".join(mounts)}?')
@@ -1335,7 +1383,7 @@ class MountDeviceDialog(CommonDialog):
             self.main_layout.addLayout(self.button_layout)
 
         else:
-            self.setWindowTitle('Mount Device')
+            self.set_title('Mount Device [luks-tray]')
             vital = tray.history.get_vital(container.uuid)
             self.add_line(f'{container.name}')
             self.add_input_field('password', "Enter Password", f'{vital.password}',
@@ -1384,7 +1432,7 @@ class MountDeviceDialog(CommonDialog):
                 if not text:
                     errs.append('ERR: cannot leave password empty')
             elif key == 'upon':
-                err = self.check_upon(text, mount_points)
+                err = self.check_upon(text, mount_points, is_device=True)
                 if err:
                     errs.append(err)
             elif key == 'readonly':
@@ -1480,18 +1528,18 @@ class MountFileDialog(CommonDialog):
         # mounts if there are
         if container and container.opened:  # unmount dialog
             if container.mounts:
-                self.setWindowTitle('Unmount/Close Crypt File')
+                self.set_title('Unmount/Close Crypt File [luks-tray]')
                 self.add_line(f'{container.back_file}')
                 self.add_line(f'Unmount {container.upon}')
             else:
-                self.setWindowTitle('Close Crypt File')
+                self.set_title('Close Crypt File [luks-tray]')
                 self.add_line(f'{container.back_file}')
             self.add_push_button('OK', self.unmount_file, container.uuid)
             self.add_push_button('Cancel', self.cancel)
             self.main_layout.addLayout(self.button_layout)
 
         elif container:
-            self.setWindowTitle('Mount Crypt File')
+            self.set_title('Mount Crypt File [luks-tray]')
             vital = tray.history.get_vital(container.uuid)
             self.add_line(f'{container.back_file}')
             self.add_input_field('password', "Enter Password", f'{vital.password}',
@@ -1511,7 +1559,7 @@ class MountFileDialog(CommonDialog):
             self.main_layout.addLayout(self.button_layout)
 
         elif not create: # no container ... use existing file (not creating)
-            self.setWindowTitle('Add Existing Crypt File')
+            self.set_title('Add Existing Crypt File [luks-tray]')
             self.add_input_field('password', "Enter Password", '',
                                 24, add_on='password')
             self.add_input_field('back_file', "Crypt File", '', 48, add_on='file')
@@ -1525,7 +1573,7 @@ class MountFileDialog(CommonDialog):
             self.main_layout.addLayout(self.button_layout)
 
         else: # no container ... create crypt file
-            self.setWindowTitle('Create New Crypt File')
+            self.set_title('Create New Crypt File [luks-tray]')
             self.add_input_field('password', "Enter Password", '',
                                 24, add_on='password')
             self.add_input_field('size_str', "Size (MiB)", '32', 8)
@@ -1767,7 +1815,9 @@ def main():
 def mainBasic():
     """ TBD """
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    app = QApplication(sys.argv)
+    QApplication.setApplicationName('luks-tray')
+    argv = ['luks-tray'] + sys.argv[1:]
+    app = QApplication(argv)
 
     # Check if the system supports tray icons
     if not QSystemTrayIcon.isSystemTrayAvailable():
