@@ -860,8 +860,6 @@ class LuksTray():
                 return os.path.expanduser(path)
         return path
 
-
-
 class CommonDialog(QDialog):
     """ TBD """
     home_dir = None
@@ -1127,7 +1125,7 @@ class CommonDialog(QDialog):
 
             error_dialog = QMessageBox(self)
             error_dialog.setIcon(QMessageBox.Icon.Critical)  # Set the icon to show it's an error
-            error_dialog.setWindowTitle("Errors Detected [luks-tray]")
+            error_dialog.setWindowTitle("Errors Detected")
             error_dialog.setText("The following errors were encountered:")
             error_dialog.setInformativeText(error_text)
             error_dialog.setStandardButtons(QMessageBox.StandardButton.Ok)  # Add a dismiss button
