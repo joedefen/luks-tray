@@ -3,7 +3,7 @@ requires = ["flit_core >=3.2,<4"]
 build-backend = "flit_core.buildapi"
 
 [project]
-version = "2.0.3"
+version = "2.0.4"
 name = "luks-tray"
 description = "A Qt-based tray app for managing LUKS encrypted volumes"
 authors = [
