@@ -57,8 +57,10 @@ from luks_tray.IniTool import IniTool
 def requires_manual_title():
     """Checks if we are likely in a Wayland/Sway environment where SSD is missing."""
     # If using Xwayland under a tiling WM, XDG_CURRENT_DESKTOP might be helpful
-    if os.environ.get('XDG_CURRENT_DESKTOP') in ['sway', ]:
-        return True
+    params = ['XDG_CURRENT_DESKTOP', 'DESKTOP_SESSION']
+    for param in params:
+        if 'sway' in os.environ.get(param).lower():
+            return True
     return False
 
 # Global flag to run the check only once

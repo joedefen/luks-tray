@@ -13,15 +13,19 @@
 
 ## Quick Start
 
-1. Install and run `luks-tray`.  Use `pipx` to install, update and remove; e.g. `pipx install luks-tray`. See [pipx docs](https://pypa.github.io/pipx/) for more details.
+1. Install `luks-tray`  using `pipx`; e.g. `pipx install luks-tray`. See [pipx docs](https://pypa.github.io/pipx/).
 2. Setup passwordless `sudo` if not already (see notes below if needed).
-3. Click the tray icon to see available containers. You may:
+3. From a terminal:
+    - run `luks-tray --check-deps` and install any required commands.
+    - run `luk-tray` to ensure it finds your system tray and appears.
+4. Right-click the tray icon to see available containers. You may:
     - Insert a disk with LUKS devices to detect them automatically.
     - Add an existing or create a new encrypted file to manage it.
-4. Click a ▽ container to mount it; or a ▣ or ⧈ or ‼ container to unmount it.
-5. When mounting a container, enter its password and choose mount point in the dialog
+5. Left-click a ▽ container to mount it; or a ▣ or ⧈ or ‼ container to unmount it.
+6. When mounting a container, enter its password and choose mount point in the dialog
     - if the app has a mount point in its history, it will fill in that mount point
     - otherwise, the app will generate a mount point in `~/Vaults`
+7. Finally, for convenience when working, add `luks-tray` to your "auto-start" apps.
 
 ## Visual Interface
 
@@ -85,7 +89,6 @@ Settings and data files are stored in `~/.config/luks-tray/`:
 ## Requirements
 #### Additional System Utilities may be Needed
 This program requires `cryptsetup`, `fuser`, and other system utilities. After install, run `luks-tray --check-deps` to get a report on what dependencies are found and missing. If any are missing, install those using your distro package manager.
-
     
 #### Passwordless `sudo` Setup (Required)
 
@@ -93,14 +96,14 @@ To allow the tray app to manage LUKS containers without prompting for your passw
 
     {yourusername} ALL=(ALL) NOPASSWD: ALL
 
-💡 This grants your user passwordless access to all commands. You may be able to limit it to just the `luks-tray` app or subset of commands. See `man sudoers` for details.
+💡 This grants your user passwordless access to all commands. You may be able to limit it to just the `luks-tray` app or a subset of commands it uses (listed with `--check-deps`). See `man sudoers` for details.
 
 #### A Working System Tray
 It works best with DEs/WMs that offer **first-class tray support**, such as:
 
-  - **KDE Plasma**
-  - **Sway** with **waybar**
+  - **KDE Plasma** (X11 or Waylan)
   - **i3wm** with **polybar**
+  - **sway** with **waybar** (actually, quite 2nd class ... see "Workaounds for SWAY" below)
 
 > ⚠️ **GNOME**: Requires a third-party extension (such as AppIndicator support) to show tray icons. Results may vary across GNOME versions.<br>
 > ⚠️ **Xfce** and similar lightweight DEs: Tray menus may open off-screen or be partially cut off, depending on panel layout and screen resolution.
@@ -108,21 +111,13 @@ It works best with DEs/WMs that offer **first-class tray support**, such as:
 
 ####  Workarounds for SWAY
 Required Workarounds for ~/.config/sway/config:
-
-Users running Sway must add the following configuration rules to ensure dialogs float correctly and are hidden from the application switcher.
-
-    Force Dialogs to Float and Hide Taskbar Icon: This rule targets the unique title prefix to enforce floating behavior and hides the window from the Taskbar/Window Switcher.
-    Bash
-
-# Targets all Luks-Tray dialogs. Ensures they float and are hidden from the
-# task list (no_focus).
-for_window title "^Luks-Tray:" floating enable, center, border normal, no_focus
-
-Missing Title Bar Limitation: The application is unable to force a Server-Side Decoration (SSD) title bar. Users must rely on Sway's default floating window behavior:
-
-    To Move Window: Use the Sway default keybind (Mod+Click and Drag).
-
-    To Close Window: Use the Sway default keybind (Mod+Shift+c).
+* Environment variables: `sway` must be in `$XDG_CURRENT_DESKTOP` or `$DESKTOP_SESSION`
+ 
+* The user must deal with missing titlebars for moving/closing.
+* It is best to add configuration rules to ensure dialogs float:
+```
+  for_window title "luks-tray.%" floating enable, center, border normal, no_focus
+```
 
 ---
 
