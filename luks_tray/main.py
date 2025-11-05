@@ -425,6 +425,7 @@ class LuksTray():
         self.tray_icon.setVisible(True)
 
         self.containers, self.menu = {}, QMenu()
+        self.actions = []
         self.update_menu()
         self.remove_unused_automounts()
 
@@ -438,9 +439,9 @@ class LuksTray():
             and discover which udisks command we are using
         """
         utilities = [
-            'lsblk', 'cryptsetup',
-            'mount', 'umount', 'bindfs',
-            'fuser', 'truncate',
+            'lsblk', 'cryptsetup', 'rmdir',
+            'mount', 'umount', 'bindfs', 'losetup',
+            'fuser', 'truncate', 'mkfs.ext4', 'bindfs',
             # 'kill', 'losetup', ['udisksctl', 'udisks', 'udisks2'],
         ]
         found, missing, udisks_cmd = [], [], None
@@ -506,166 +507,23 @@ class LuksTray():
         """ TBD """
         return thing in self.mount_infos or thing in self.upons
 
+    def merge_containers_history(self):
+        """ TBD """
+        self.history.restore()
+        for container in self.containers.values():
+            self.history.ensure_container(container)
+        self.history.save()
+
+    def show_partition_details(self, name):
+        """ TBD """
+        container = self.containers.get(name, None)
+        if container is None:
+            return
+        details = f'DETAILS for {container.name}:\n'
+        details += 'UUID={container.UUID}\n'
+        QMessageBox.information(None, "Partition Details", details)
+
     def update_menu(self):
-        """ 
-        Updates the tray icon menu contents and icon state (Wayland-stable).
-        This method manages data preparation, menu rebuilding, and the pop-up feature.
-        """
-        
-        # 1. Menu and data preparation
-        self.ini_tool.update_config()
-        
-        # This section is necessary to re-scan devices and update the internal state
-        if self.history.status in ('unlocked', 'clear_text'):
-            self.containers = self.lsblk.parse_lsblk()
-            self.merge_containers_history()
-            
-            # Add known file containers (from history) that are not currently mounted
-            # This logic is necessary for handling read-only or closed file containers.
-            for vital in self.history.vitals.values():
-                container = self.containers.get(vital.uuid, None)
-                if container:
-                    container.vital = vital
-                if not container and vital.back_file:
-                    # insert known file container (present device containers 
-                    # should be in the containers list already)
-                    ns = DeviceInfo.make_partition_namespace('', '')
-                    ns.type = 'crypt'
-                    ns.back_file = vital.back_file
-                    ns.opened = False
-                    ns.uuid = vital.uuid
-                    ns.vital = vital
-                    self.containers[vital.uuid] = ns
-
-
-        # 2. Check menu state *before* update (for pop-up feature)
-        # This prevents the icon from disappearing if the user is interacting with it.
-        was_visible = self.menu and self.menu.isVisible()
-
-        # 3. Build and return the updated icon key (self.menu is cleared/rebuilt here)
-        icon_key = self.update_menu_items()
-
-        # 4. Apply the state changes to the tray icon
-        # The FIX: We rely on the existing self.menu object being updated in place.
-        self.tray_icon.setIcon(self.icons[icon_key])
-        
-        # We explicitly call setContextMenu, but it's referencing the same self.menu
-        self.tray_icon.setContextMenu(self.menu) 
-        
-        self.tray_icon.show() # Ensure the icon is visible
-
-        # 5. Reopen menu if it was previously open
-        # This re-popup is required for the user experience you want.
-        if was_visible:
-            # Show menu at cursor position 
-            cursor_pos = QCursor.pos()
-            self.menu.popup(cursor_pos)
-            
-        return True
-
-
-    def update_menu_items(self):
-        """Update context menu with LUKS partitions."""
-        
-        # The key to stability: clear and re-add to the existing menu object
-        self.menu.clear()
-        menu = self.menu
-        
-        icon_key = 'none'
-        do_alerts = self.ini_tool.get_current_val('show_anomaly_alerts')
-
-        if self.history.status == 'locked':
-            action = QAction('Click to enter master password', self.app)
-            action.setFont(self.mono_font)
-            action.triggered.connect(self.prompt_master_password)
-            menu.addAction(action)
-        else:
-            separated = False
-            idx = -1
-            for idx, container in enumerate(self.containers.values()):
-                mountpoint = container.upon
-                
-                # Check for read-only mounts or unmounted but known containers
-                if not mountpoint and container.vital:
-                    # This check is what ensures your 'read-only' containers show up
-                    mountpoint = f'[{container.vital.upon}]' 
-
-                if idx > 0 and not separated and container.type == 'crypt':
-                    menu.addSeparator()
-                    separated = True
-
-                name = container.name
-                if container.back_file:
-                    name = container.back_file
-                    if name.startswith('/home/'):
-                        name = '~' + name[6:]
-
-#               # Determine which emoji/symbol to show
-                if mountpoint.startswith('/'):
-                    # Mountpoint exists (mounted)
-                    emoji = '▣'   # replaces ✅
-                    icon_key = 'ok' if icon_key != 'alert' else icon_key
-                elif container.opened:
-                    # Opened but not mounted (anomaly or unmounted safe container)
-                    emoji = '‼'   # replaces ‼️
-                    icon_key = 'alert' if do_alerts else icon_key
-                else:
-                    # Closed/unopened container
-                    emoji = '▽'   # replaces 🔳
-
-
-                # Construct menu line text
-                if emoji == '‼':
-                    text = f'{name} CLICK-to-LOCK'
-                else:
-                    text = f'{name} {mountpoint}'
-
-
-                # Add the item
-                action = QAction(f'{emoji} {text}', self.app)
-                action.setFont(self.mono_font)
-                
-                # Connect the click action
-                if container.back_file:
-                    action.triggered.connect(lambda checked,
-                                 x=container.uuid: self.handle_file_click(x))
-                else:
-                    action.triggered.connect(lambda checked,
-                                 x=container.uuid: self.handle_device_click(x))
-                menu.addAction(action)
-
-
-            # Other fixed menu entries
-            if idx > 0 and not separated:
-                menu.addSeparator()
-
-            action = QAction('Create New Crypt File', self.app)
-            action.setFont(self.mono_font)
-            action.triggered.connect(self.handle_create_file_click)
-            menu.addAction(action)
-
-            action = QAction('Add Existing Crypt File', self.app)
-            action.setFont(self.mono_font)
-            action.triggered.connect(self.handle_add_file_click)
-            menu.addAction(action)
-
-            menu.addSeparator()
-
-            if self.history.status in ('clear_text', 'unlocked'):
-                verb = 'Set' if self.history.status == 'clear_text' else 'Update/Clear'
-                action = QAction(f'{verb} Master Password', self.app)
-                action.setFont(self.mono_font)
-                action.triggered.connect(self.prompt_master_password)
-                menu.addAction(action)
-
-        action = QAction("Exit", self.app)
-        action.setFont(self.mono_font)
-        action.triggered.connect(self.exit_app)
-        menu.addAction(action)
-        
-        return icon_key
-
-    def old_update_menu(self):
         """ TBD """
         self.ini_tool.update_config()
         if self.history.status in ('unlocked', 'clear_text'):
@@ -691,25 +549,10 @@ class LuksTray():
 
         self.update_menu_items()
 
-    def merge_containers_history(self):
-        """ TBD """
-        self.history.restore()
-        for container in self.containers.values():
-            self.history.ensure_container(container)
-        self.history.save()
-
-    def show_partition_details(self, name):
-        """ TBD """
-        container = self.containers.get(name, None)
-        if container is None:
-            return
-        details = f'DETAILS for {container.name}:\n'
-        details += 'UUID={container.UUID}\n'
-        QMessageBox.information(None, "Partition Details", details)
-
-    def old_update_menu_items(self):
+    def update_menu_items(self):
         """Update context menu with LUKS partitions."""
-        menu = QMenu()
+        # menu = QMenu()
+        actions = []
         # menu.setFont(self.emoji_font)
 
         icon_key = 'none'
@@ -719,7 +562,7 @@ class LuksTray():
             action = QAction('Click to enter master password', self.app)
             action.setFont(self.mono_font)
             action.triggered.connect(self.prompt_master_password)
-            menu.addAction(action)
+            actions.append(action)
         else:
             separated = False
             idx = -1
@@ -729,7 +572,8 @@ class LuksTray():
                     mountpoint = f'[{container.vital.upon}]'
 
                 if idx > 0 and not separated and container.type == 'crypt':
-                    menu.addSeparator()
+                    # menu.addSeparator()
+                    actions.append(None)
                     separated = True
 
                 name = container.name
@@ -768,46 +612,62 @@ class LuksTray():
                 else:
                     action.triggered.connect(lambda checked,
                                  x=container.uuid: self.handle_device_click(x))
-                menu.addAction(action)
+                # menu.addAction(action)
+                actions.append(action)
 
 
             # Other fixed menu entries
             if idx > 0 and not separated:
-                menu.addSeparator()
+                # menu.addSeparator()
+                actions.append(None)
 
             action = QAction('Create New Crypt File', self.app)
             action.setFont(self.mono_font)
             action.triggered.connect(self.handle_create_file_click)
-            menu.addAction(action)
+            # menu.addAction(action)
+            actions.append(action)
 
             action = QAction('Add Existing Crypt File', self.app)
             action.setFont(self.mono_font)
             action.triggered.connect(self.handle_add_file_click)
-            menu.addAction(action)
+            # menu.addAction(action)
+            actions.append(action)
 
-            menu.addSeparator()
+            # menu.addSeparator()
+            actions.append(None)
 
             if self.history.status in ('clear_text', 'unlocked'):
                 verb = 'Set' if self.history.status == 'clear_text' else 'Update/Clear'
                 action = QAction(f'{verb} Master Password', self.app)
                 action.setFont(self.mono_font)
                 action.triggered.connect(self.prompt_master_password)
-                menu.addAction(action)
+                # menu.addAction(action)
+                actions.append(action)
 
         action = QAction("Exit", self.app)
         action.setFont(self.mono_font)
         action.triggered.connect(self.exit_app)
-        menu.addAction(action)
+        # menu.addAction(action)
+        actions.append(action)
 
-        return self.replace_menu_if_different(menu, icon_key)
+        return self.replace_menu_if_different(actions, icon_key)
 
 
-    def replace_menu_if_different(self, menu, icon_key):
+    def replace_menu_if_different(self, actions, icon_key):
         """ TBD """
         def replace_menu():
+            nonlocal actions
             was_visible = self.menu and self.menu.isVisible()
 
-            self.menu = menu
+            # self.menu = menu
+            self.menu.clear()
+            for action in actions:
+                if action:
+                    self.menu.addAction(action)
+                else:
+                    self.menu.addSeparator()
+            self.actions = actions
+
             self.tray_icon.setIcon(self.icons[icon_key])
             self.tray_icon.setContextMenu(self.menu)
             self.tray_icon.show()
@@ -821,6 +681,8 @@ class LuksTray():
             return True
 
         def get_action_text(action):
+            if action is None:
+                return '<None>'
             if isinstance(action, QWidgetAction):
                 widget = action.defaultWidget()
                 if isinstance(widget, QLabel):
@@ -828,17 +690,18 @@ class LuksTray():
                 return '<widget>'
             return action.text()
 
-        if not self.menu: # or menu.actions() != self.menu.actions():
+        if not self.actions: # or menu.actions() != self.menu.actions():
             return replace_menu()
         if self.prev_icon_key != icon_key:
             self.prev_icon_key = icon_key
             return replace_menu()
 
-        if len(menu.actions()) != len(self.menu.actions()):
+        if len(actions) != len(self.actions):
             return replace_menu()
 
-        for new_action, old_action in zip(menu.actions(), self.menu.actions()):
-            if get_action_text(new_action) != get_action_text(old_action):
+        for idx, action in enumerate(actions):
+            old_action = self.actions[idx]
+            if get_action_text(action) != get_action_text(old_action):
                 return replace_menu()
 
         return False
@@ -1953,9 +1816,6 @@ def main():
         sys.exit(1) # just in case ;-)
 
     try:
-#       if os.geteuid() != 0:
-#           # Re-run the script with sudo needed and opted
-#           rerun_module_as_root('luks_tray.main')
         devnull_fd = os.open('/dev/null', os.O_RDWR)
         os.dup2(devnull_fd, sys.stdin.fileno())
         os.close(devnull_fd)
@@ -1970,42 +1830,6 @@ def main():
         print("exception:", str(exce))
         print(traceback.format_exc())
         sys.exit(15)
-
-
-# Basic PyQt6 Tray Icon example
-def mainBasic():
-    """ TBD """
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
-    QApplication.setApplicationName('luks-tray')
-    argv = ['luks-tray'] + sys.argv[1:]
-    app = QApplication(argv)
-
-    # Check if the system supports tray icons
-    if not QSystemTrayIcon.isSystemTrayAvailable():
-        print("System tray not available")
-        sys.exit(1)
-
-    # Create a tray icon
-    tray_icon = QSystemTrayIcon()
-    tray_icon.setIcon(QIcon(
-        "/home/joe/Projects/luks-tray/luks_tray/resources/orange-shield-v03.svg"))
-
-    # Create a right-click menu for the tray icon
-    tray_menu = QMenu()
-
-    # Add an action to the menu
-    quit_action = QAction("Quit")
-    quit_action.triggered.connect(app.quit)
-    tray_menu.addAction(quit_action)
-
-    # Set the context menu to the tray icon
-    tray_icon.setContextMenu(tray_menu)
-
-    # Show the tray icon
-    tray_icon.show()
-
-    # Run the application's event loop
-    sys.exit(app.exec_())
 
 if __name__ == "__main__":
     # mainBasic()

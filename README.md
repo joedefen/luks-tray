@@ -1,12 +1,11 @@
 # LUKS Tray
 
-**luks-tray** is a GTK-based tray utility for managing ad hoc LUKS-encrypted files: mount and unmount with ease from your Linux desktop environment.
-
+**luks-tray** is a QT-based tray utility for managing ad hoc LUKS-encrypted files: mount and unmount with ease from your Linux desktop environment.
 
 ## Features
 
 - **System tray integration** - Simple click-to-mount/unmount interface for LUKS devices and files
-- **Visual status indicators** - Symbols mounted (▣), unmounted (▽), and open-but-unmounted (‼) states
+- **Visual status indicators** - Symbols mounted (▣), mounted read-only (⧈), unmounted (▽), and open-but-unmounted (‼) states
 - **File container support** - Add, create, and manage LUKS file containers from the tray.
 - **Mount point history** - Remembers previous mount locations for convenience and clarity
 - **Background monitoring** - Automatically detects newly inserted devices with LUKS containers
@@ -15,7 +14,8 @@
 ## Quick Start
 
 1. Install and run `luks-tray`.  Use `pipx` to install, update and remove; e.g. `pipx install luks-tray`. See [pipx docs](https://pypa.github.io/pipx/) for more details.
-2. Click the tray icon to see available containers. You may:
+2. Setup passwordless `sudo` if not already (see notes below if needed).
+3. Click the tray icon to see available containers. You may:
     - Insert a disk with LUKS devices to detect them automatically.
     - Add an existing or create a new encrypted file to manage it.
 4. Click a ▽ container to mount it; or a ▣ or ⧈ or ‼ container to unmount it.
@@ -51,7 +51,6 @@ Notes:
 - When mounting LUKS files for the first time, the default folder is `~/Crypts/{basename}` where `{basename}` is the basename of the encrypted LUKS file (less any `.luks`, `.luks2`, or `.crypt` suffix).
 
 
-
 ## Configuration
 
 Settings and data files are stored in `~/.config/luks-tray/`:
@@ -78,8 +77,8 @@ Settings and data files are stored in `~/.config/luks-tray/`:
 ---
 ## Limitations
 
-- **Not for whole disk encryption** - Excludes system mount points like `/`, `/home`, `/var` to avoid interfering with boot-time encrypted volumes
-- **No udisks2 integration** - May not always play nicely with desktop auto-mounting tools; so mount and unmount containers with the same tool for the best results.
+- **Not for whole disk encryption** - Designed for fixed and removable partition and file containers. Thus, excludes system mount points like `/`, `/home`, `/var` to avoid interfering with boot-time encrypted volumes.
+- **No udisks2 integration** - Manages its own mount/unmount state. Mixing mounts/unmounts desktop auto-mounting tools may not produce the best results.
 - **Loop device requirement** - File containers require `lsblk` to show them as loop devices (standard on most distros)
 - **Single filesystem focus** - Containers with multiple filesystems are out of scope of this tool and get very limited support (i.e., mostly handling only the first filesystem).
 ---

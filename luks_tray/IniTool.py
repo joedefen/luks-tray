@@ -127,7 +127,7 @@ class IniTool:
         all_params = {}
 
         # Access the configuration values in order
-        prt('parsing config.ini...')
+        # prt('parsing config.ini...')
         for selector in self.get_selectors():
             all_params[selector] = params = copy.deepcopy(running)
             if selector not in self.config:
@@ -185,6 +185,6 @@ class IniTool:
 
         self.params_by_selector = all_params
 
-        prt(f'DONE parsing config.ini... {all_params=}')
+        # prt(f'DONE parsing config.ini... {all_params=}')
 
         return True # updated
