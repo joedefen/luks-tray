@@ -10,16 +10,12 @@ Utility functions
 import os
 import sys
 import stat
-import time
-import signal
 import shutil
-import subprocess
 import inspect
 from datetime import datetime
 from io import StringIO
 
 import importlib.resources as pkg_resources
-# from pathlib import Path
 
 prt_kb = 512
 prt_path = ''
@@ -102,61 +98,3 @@ def prt(*args, **kwargs):
     print(*args, **kwargs)
     string = f'{s.getvalue()} {where()}'
     print(string, flush=True)
-
-def x_restart_self():
-    """ TBD """
-    # Retrieve the current script name and arguments
-    script_name = sys.argv[0]
-    script_args = sys.argv[1:]
-
-    # Use subprocess to run the script with the same arguments
-    subprocess.run([sys.executable, script_name] + script_args, check=True)
-
-class PyKill:
-    """Class to kill python scripts and explain how; avoids suicide. """
-    def __init__(self):
-        self.last_sig = {} # keyed by target
-        self.alive = {} # ps line of found targets
-
-    def _kill_script(self, targets, sig):
-        """ one iteration through very instance of the remaining processes """
-        def kill_pid(pid, sig):
-            # terminate the process
-            alive = True
-            try:
-                os.kill(pid, sig)
-            except OSError:
-                alive = False
-            return alive
-        self.alive = {} # reset each time thru
-        for line in os.popen("ps -eo pid,args"):
-            words = line.split()
-            if len(words) < 3:
-                continue
-            pid, cmd = int(words[0]), os.path.basename(words[1])
-            if pid == os.getpid():
-                continue  # no suicides
-            script = os.path.basename(words[2])
-            for target in targets:
-                if cmd in ('python', 'python3') and script in (target, f'{target}.py'):
-                    self.last_sig[target] = sig
-                    if kill_pid(pid, sig): # returns True if alive
-                        self.alive[target] = line
-        return self.alive
-
-    def kill_loop(self, targets):
-        """Loops thru the remaining process until all or gone or we
-        become exhausted (e.g., unkillable processes)."""
-        targets = targets if isinstance(targets, (list, tuple)) else [targets]
-        for sig in [signal.SIGTERM, signal.SIGTERM, signal.SIGTERM,
-                    signal.SIGKILL, signal.SIGKILL,]:
-            if not self._kill_script(targets, sig):
-                break
-            time.sleep(1)
-        for target, line in self.alive.items():
-            prt(f'ALERT: running: {line} [sig={self.last_sig[target]}]')
-        for target in targets:
-            if target in self.alive:
-                continue
-            prt(f'INFO: gone: {target} [sig={self.last_sig.get(target, None)}]')
-        return not bool(self.alive)

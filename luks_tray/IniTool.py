@@ -28,7 +28,7 @@ class IniTool:
                 original_user = os.environ.get('SUDO_USER')
                 if original_user:
                     return pwd.getpwnam(original_user).pw_dir
-            
+
             # Fallback to current user
             return os.path.expanduser("~")
 
@@ -66,23 +66,6 @@ class IniTool:
             val = getattr(self.params_by_selector[selector], key)
             return val
         return self.the_default(key, selector) # should not get here
-
-#   def get_current_vals(self, selector, list_name):
-#       """ Expecting a list of two or more non-zero ints """
-#       if selector in self.params_by_selector and hasattr(self.params_by_selector[selector], list_name):
-#           vals = getattr(self.params_by_selector[selector], list_name)
-#           if isinstance(vals, list) and len(vals) >= 2:
-#               return vals
-#       return self.the_default(selector, list_name) # should not get here
-
-#   def get_rotated_vals(self, selector, list_name, first):
-#       """ TBD """
-#       vals = self.get_current_vals(selector, list_name)
-#       if first in vals:
-#           while vals[0] != first:
-#               vals = vals[1:] + vals[:1]
-#           setattr(self.params_by_selector[selector], list_name, vals)
-#       return vals
 
     def ensure_ini_file(self):
         """Check if the config file exists, create it if not."""
@@ -144,7 +127,7 @@ class IniTool:
                 if key.endswith('_list'):
                     list_value = to_array(value)
                     if not value:
-                        params[key] = self.the_default(selector, key)
+                        params[key] = self.the_default(key, selector)
                         prt(f'skip {selector}.{key}: {value!r} [bad list spec]')
                     else:
                         params[key] = list_value
@@ -159,7 +142,7 @@ class IniTool:
                     if isinstance(value, bool):
                         params[key] = value
                     else:
-                        params[key] = self.the_default(selector, key)
+                        params[key] = self.the_default(key, selector)
                         prt(f'skip {selector}.{key}: {value!r} [expecting bool]')
                     continue
 
@@ -168,7 +151,7 @@ class IniTool:
                         params[key] = int(value)
                         continue
                     except Exception:
-                        params[key] = self.the_default(selector, key)
+                        params[key] = self.the_default(key, selector)
                         prt(f'skip {selector}.{key}: {value!r} [expecting int repr]')
                         continue
 
@@ -176,7 +159,7 @@ class IniTool:
                     if isinstance(value, str):
                         params[key] = value
                     else:
-                        params[key] = self.the_default(selector, key)
+                        params[key] = self.the_default(key, selector)
                         prt(f'skip {selector}.{key}: {value!r} [expecting string]')
                     continue
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# tray.py (at project root)
+# runner.py (at project root) -- used for debugging mostly ... can be used
+# to run the project under development
 
 import sys
 from luks_tray.main import main

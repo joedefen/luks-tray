@@ -7,19 +7,22 @@ This is not working so well for sway (or wayland):
 Issue,Target,Summary of Failure
 
 - Floating/Decorations, PyQt6/Wayland CSD
-  - "PyQt's attempts to hint the window as a floating dialog and draw its own Client-Side Decorations (CSD)
+  - "PyQt's attempts to hint the window as a floating dialog
+    and draw its own Client-Side Decorations (CSD)
     were either stripped by the Xwayland layer or ignored by Sway.
     The CSD feature, meant to give apps control, failed to render even the basic title bar."
 - Taskbar Icon, PyQt6/Wayland CSD
-   - "The internal flag to skip the taskbar (WindowType.Tool) failed because the window was treated as a generic,
+   - "The internal flag to skip the taskbar (WindowType.Tool) failed
+     because the window was treated as a generic,
      primary application window (app_id: python3) by the Wayland compositor."
 
 """
 # pylint: disable=unused-import,broad-exception-caught, invalid-name
 # pylint: disable=no-name-in-module,import-outside-toplevel,too-many-instance-attributes
 # pylint: disable=too-many-locals,too-many-branches,too-many-statements
-# pylint: disable=too-many-arguments
-# pylint: disable=line-too-long,too-many-lines
+# pylint: disable=too-many-arguments,too-many-nested-blocks
+# pylint: disable=line-too-long,too-many-lines,too-many-public-methods
+# pylint: disable=too-many-return-statements
 import os
 import sys
 import json
@@ -77,12 +80,15 @@ def generate_uuid_for_file_path(file_path):
     return generated_uuid
 
 def sudo_cmd(args, errs=None, input_str=None):
-    # run sudo -n {args}; the -n will avoid prompting for a sudo password and fail if not allowed
+    """ run sudo -n {args}; the -n will avoid prompting for a
+        sudo password and fail if not allowed
+    """
     args = ['sudo', '-n'] + args
     return run_cmd(args, errs, input_str)
 
 def run_cmd(args, errs=None, input_str=None):
     """ TBD """
+    # pylint: disable=consider-using-with
 
     proc = subprocess.Popen(args, stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -94,7 +100,7 @@ def run_cmd(args, errs=None, input_str=None):
         return None
     err = f'FAIL: {' '.join(args)}: {stdout} {stderr} [rc={proc.returncode}]'
     if err and errs:
-            errs.append(err)
+        errs.append(err)
     return err
 
 
@@ -106,7 +112,7 @@ def run_unmount(mount_point: str, busy_warns: set) -> str | None:
     """
     try:
         sub = subprocess.run(['sudo', "umount", mount_point],
-                             capture_output=True, text=True)
+                    capture_output=True, text=True, check=False)
     except Exception as e:
         return f"FAIL: umount {mount_point}: Exception: {e}"
 
@@ -307,7 +313,7 @@ class DeviceInfo:
                                               self.tray.mount_infos.get(subentry.name, None))
                         if ns:
                             entry.readonly = ns.readonly
-                            # Optionally, you can also set entry.upon here if needed, 
+                            # Optionally, you can also set entry.upon here if needed,
                             # but it's often better to rely on lsblk's MOUNTPOINTS data first.
                             if self.is_banned(entry.mounts):
                                 continue # skip whole disk entries
@@ -374,11 +380,11 @@ class LuksTray():
         # self.has_emoji_font = bool("Noto Color Emoji" in QFontDatabase.families())
         # self.emoji_font = (QFont("Noto Color Emoji") if self.has_emoji_font
                            # else QFont("DejaVu Sans"))
-                           
+
         _, missing, self.udisks_cmd = self.check_dependencies()
 
         assert not missing, f"missing system commands: {missing}"
-        
+
         # Create an invisible base widget to serve as the dialog parent
         self.dialog_parent = QWidget(None) # Parented by None, so it's top-level
         self.dialog_parent.setWindowFlags(Qt.WindowType.Tool) # Hint to WM it's a utility window
@@ -434,7 +440,7 @@ class LuksTray():
         self.timer = QTimer(self.tray_icon)
         self.timer.timeout.connect(self.update_menu)
         self.timer.start(3000)  # 3000 milliseconds = 3 seconds
-        
+
     @staticmethod
     def check_dependencies(verbose=False):
         """ ensure the system utilities we need are available
@@ -466,7 +472,7 @@ class LuksTray():
                 prt(f'✗  {util} - please install',
                     ' one of' if isinstance(util, list) else '')
         return found, missing, udisks_cmd
-    
+
     @staticmethod
     def get_emoji_font(size=10):
         """Try to load Noto Color Emoji, fallback to system emoji-capable fonts."""
@@ -487,7 +493,7 @@ class LuksTray():
 
         prt("Warning: No known emoji font found — emojis likely degraded.")
         return QFont()  # system default
-    
+
     def update_mounts(self):
         """ TBD """
         self.mount_infos = {}
@@ -743,7 +749,7 @@ class LuksTray():
         """ Prompt for master passdword"""
         dialog = MasterPasswordDialog()
         dialog.exec()
-        
+
     def update_history(self, uuid, values):
         """ TBD """
         vital = self.history.get_vital(uuid)
@@ -756,14 +762,16 @@ class LuksTray():
             self.history.put_vital(vital)
             if mount_point:
                 vital.upon = mount_point
+
     @staticmethod
     def get_auto_mount_root():
+        """ TBD """
         tray = LuksTray.singleton
         auto_root = tray.ini_tool.get_current_val('auto_mount_folder')
         auto_root = LuksTray.expand_real_user(auto_root)
         auto_root = os.path.abspath(auto_root)
         return auto_root
-    
+
     @staticmethod
     def generate_auto_mount_folder():
         """ Generate auto mount folder"""
@@ -797,7 +805,7 @@ class LuksTray():
             if (fullpath := available(fallback)):
                 return fullpath
         assert False, "cannot generate automount directory (too many in use)"
- 
+
     @staticmethod
     def remove_if_auto(mount):
         """Remove target_dir if it is empty and within parent_dir"""
@@ -814,7 +822,7 @@ class LuksTray():
             return True
         except OSError:
             return False  # Not empty or permission denied
-        
+
     def remove_unused_automounts(self):
         """ A startup function (could be periodic) that cleans up the
             auto mount folder
@@ -838,7 +846,7 @@ class LuksTray():
                     pass  # Silently ignore unexpected errors like unreadable dirs
         except Exception:
             pass  # Silently ignore unexpected errors like unreadable dirs
-    
+
     @staticmethod
     def expand_real_user(path):
         """
@@ -852,12 +860,11 @@ class LuksTray():
             if path == '~' or path.startswith('~/'):
                 real_home = os.path.join('/home', real_user)
                 return os.path.join(real_home, path[2:]) if len(path) > 2 else real_home
-            elif path.startswith('~' + real_user):
+            if path.startswith('~' + real_user):
                 # e.g., ~joe/foo
                 return os.path.expanduser(path)
-            else:
-                # ~otheruser — let os.path.expanduser handle it
-                return os.path.expanduser(path)
+            # ~otheruser — let os.path.expanduser handle it
+            return os.path.expanduser(path)
         return path
 
 class CommonDialog(QDialog):
@@ -895,16 +902,16 @@ class CommonDialog(QDialog):
             # Apply some styling to make it look like a title bar
             title_label.setStyleSheet("""
                 QLabel {
-                    background-color: #333; 
-                    color: white; 
-                    padding: 5px; 
+                    background-color: #333;
+                    color: white;
+                    padding: 5px;
                     font-weight: bold;
                     border-bottom: 1px solid #555;
                 }
             """)
             # Insert the manual title at the very top of the layout
             self.main_layout.addWidget(title_label)
-    
+
     def showEvent(self, event):
         """
         Called automatically by Qt immediately before the dialog is shown.
@@ -912,28 +919,28 @@ class CommonDialog(QDialog):
         """
         # 1. Finalize size and get screen info
         # This forces the layout to calculate the final width/height of the dialog
-        self.adjustSize() 
+        self.adjustSize()
 
         cursor_pos = QCursor.pos()
         dialog_width = self.width()
         dialog_height = self.height()
-        
+
         # Get the screen where the cursor currently is, which is the most reliable
         screen = self.screen() or QApplication.primaryScreen()
         screen_geometry = screen.geometry()
 
         # 2. Calculate initial position (centered below cursor, with a small offset)
         x = cursor_pos.x() - (dialog_width // 2)
-        y = cursor_pos.y() + 20 
+        y = cursor_pos.y() + 20
 
         # 3. Add Explicit Boundary Checks
-        
+
         # Horizontal (X-Axis) Checks
         if x < screen_geometry.left():
             x = screen_geometry.left()
         elif (x + dialog_width) > screen_geometry.right():
             x = screen_geometry.right() - dialog_width
-        
+
         # Vertical (Y-Axis) Checks
         # If dialog is launching from the top tray, it's very likely to hit the top
         if y < screen_geometry.top():
@@ -943,7 +950,7 @@ class CommonDialog(QDialog):
 
         # 4. Move the dialog to the adjusted position
         self.move(x, y)
-        
+
         # IMPORTANT: Call the base class implementation
         super().showEvent(event)
 
@@ -1186,8 +1193,7 @@ class CommonDialog(QDialog):
         if text.startswith('/media/'):
             if is_device:
                 return 'ERR: cannot mount device in /media'
-            else:
-                return 'ERR: use empty field for automatic /media mounting'
+            return 'ERR: use empty field for automatic /media mounting'
         parent_dir = os.path.dirname(text)
         auto_root = LuksTray.get_auto_mount_root()
         parent_exists = os.path.isdir(parent_dir)
@@ -1211,7 +1217,7 @@ class CommonDialog(QDialog):
             return None  # Already unlocked
         args = ['cryptsetup', 'open', '--type', 'luks']
         if readonly:
-             args.append('--readonly')
+            args.append('--readonly')
         args += ['--key-file', '-', device_path, luks_device]
         return sudo_cmd(args, input_str=password)
 
@@ -1320,6 +1326,7 @@ class CommonDialog(QDialog):
 
             err = self._mount_manual(tray, mapper_path, upon,
                     do_bindfs=bool(luks_file), readonly=readonly)
+            return err
 
         except Exception as e:
             return f"An error occurred: {str(e)}"
@@ -1509,8 +1516,11 @@ class MountDeviceDialog(CommonDialog):
 
         if container:
             unmounteds = []
-            for filesystem in container.filesystems:
-                for mount in filesystem.mounts:
+            filesystem = ''
+            for fs in container.filesystems:
+                if not filesystem:
+                    filesystem = fs
+                for mount in fs.mounts:
                     ### self.kill_bindfs_on_mount(mount)
                     if tray.is_mounted(mount):
                         err = run_unmount(mount, busy_warns)
@@ -1535,11 +1545,6 @@ class MountDeviceDialog(CommonDialog):
 
         tray.update_menu()
         self.accept()
-
-#   def hide_partition(self, uuid):
-#       """ Hide the partition """
-#       # FIXME: need body
-#       return
 
 class MountFileDialog(CommonDialog):
     """ TBD """
@@ -1718,7 +1723,7 @@ class MountFileDialog(CommonDialog):
                 err = self.check_upon(path, mount_points)
                 if err:
                     errs.append(err)
-                    
+
             elif key == 'readonly':
                 pass
             elif key == 'size_str':
@@ -1739,7 +1744,7 @@ class MountFileDialog(CommonDialog):
                 back_file = container.back_file
             else:
                 back_file = values['back_file']
-                
+
             if 'overwrite_ok' in values:
                 overwrite_ok = values['overwrite_ok']
                 if os.path.exists(back_file) and not overwrite_ok:
@@ -1803,7 +1808,7 @@ def main():
         print(f'RUNNING: {args}')
         os.execvp(editor, args)
         sys.exit(1) # just in case ;-)
-        
+
     if opts.check_deps:
         _, missing, _ = LuksTray.check_dependencies(verbose=True)
         sys.exit(1 if missing else 0) # just in case ;-)
