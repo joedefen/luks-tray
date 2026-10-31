@@ -4,7 +4,7 @@
 
 **Method:** manual review, `python -m py_compile` (passes on 3.13), `ruff check` (64 findings), and contract tracing of `run_cmd`/`sudo_cmd`.
 
-**Progress:** 7 of 9 critical items fixed and re-verified — **#1** (env-var guard), **#2** (`run_cmd`/`sudo_cmd` contract), **#3** (anomaly-case `cryptsetup close` crash), **#4** (file containers not remembered), **#5** (master-password KDF), **#6** (declared Python floor, now 3.11) and **#7** (atomic, owner-only history writes). Items 8–9 are still open (plus the High-severity table below). Line links for #1–#7 were re-verified against the current tree; the later sections predate those edits and may drift (the #3/#4/#6 fixes added ~55 lines to `main.py` and the #5/#7 fixes ~50 lines to `History.py`, so links into other code are stale).
+**Progress:** 8 of 9 critical items fixed and re-verified — **#1** (env-var guard), **#2** (`run_cmd`/`sudo_cmd` contract), **#3** (anomaly-case `cryptsetup close` crash), **#4** (file containers not remembered), **#5** (master-password KDF), **#6** (declared Python floor, now 3.11), **#7** (atomic, owner-only history writes) and **#8** (`auto_mount_folder` validated before cleanup). Item 9 is still open (plus the High-severity table below). Line links for #1–#7 were re-verified against the current tree; the later sections predate those edits and may drift (the #3/#4/#6 fixes added ~55 lines to `main.py`, the #5/#7 fixes ~50 lines to `History.py`, and the #8 fix ~150 lines to `main.py`, so links into other code are stale).
 
 **Overall:** A functional PyQt6 tray app with clean separation of concerns (device discovery, history, config, UI). However it has **multiple crash-level defects on normal code paths**, **a weak password-encryption scheme**, a **declared-vs-actual Python version mismatch**, and no tests. Not production-ready as-is.
 
@@ -220,9 +220,27 @@ plus a `finally` that removes the temp file if anything failed before the rename
 
 **Not changed (deliberate):** clear-text mode still stores UUIDs, mount points and backing-file paths in the JSON — that is the documented purpose of the file (it must be readable without a master password), so "privacy metadata" is a policy decision, not a bug: use a master password, or move the file, if that matters. The `~/.config/luks-tray` directory itself is still created with default (0755) permissions by [`IniTool`](../luks_tray/IniTool.py#L72) — tightening it to `0700` would also cover `config.ini` and `debug.log`, and is left as a separate decision.
 
-### 8. Destructive cleanup driven by unvalidated config
+### ✅ 8. Destructive cleanup driven by unvalidated config — FIXED
 
-[`remove_unused_automounts()`](../luks_tray/main.py#L838) iterates **whatever** `auto_mount_folder` resolves to and runs `sudo rmdir` on every empty subdirectory ([main.py:854](../luks_tray/main.py#L854)). If a user sets `auto_mount_folder = /home` (or a typo such as `/`), it will remove empty directories under that path with root privileges. Validate that the folder is dedicated and user-owned before cleaning.
+[`remove_unused_automounts()`](../luks_tray/main.py#L1033) iterated **whatever** `auto_mount_folder` resolved to and ran `sudo rmdir` on every empty subdirectory. If a user set `auto_mount_folder = /home` (or a typo such as `/`), it removed empty directories under that path **with root privileges**.
+
+**Fix applied** — a new gate, [`validate_auto_mount_root()`](../luks_tray/main.py#L872), is consulted by *both* deletion paths ([`remove_unused_automounts()`](../luks_tray/main.py#L1039) and [`remove_if_auto()`](../luks_tray/main.py#L1026)); any returned string means "do nothing, log why". The folder must look like a **dedicated** vault area:
+
+- absolute, at least two levels deep, and not one of the exact system paths in [`FORBIDDEN_AUTO_MOUNT_ROOTS`](../luks_tray/main.py#L384) (`/`, `/home`, `/tmp`, `/mnt`, `/usr`, …) nor anywhere inside a system tree listed in [`FORBIDDEN_AUTO_MOUNT_PREFIXES`](../luks_tray/main.py#L395) (`/etc`, `/usr`, `/var`, `/boot`, `/opt`, `/srv`, …). Paths inside the real user's home are exempt from the prefix list, so non-standard layouts (`/var/home/<user>/Vaults`) still work;
+- not a symlink (which could point anywhere), not the real user's home, not an ancestor of it, and not inside *another* user's home — `/home` is thus checked as a multi-user tree explicitly (`/home/other/Vaults` is rejected while `~/Vaults` is not), which also holds when the tray's home is `/root`;
+- if it exists: a plain directory, not a mount point, owned by the real user ([`get_real_user_ids()`](../luks_tray/main.py#L843), sudo-aware) **or root** — the tray runs under `sudo` and creates the folder itself, so `~/Vaults` is root-owned in practice — and not writable by group/other (which also rejects `/tmp`).
+
+Cleanup itself no longer escalates at all: [`remove_empty_dir()`](../luks_tray/main.py#L1006) uses plain `os.rmdir` (which refuses non-empty directories), skipping symlinks and mount points, so a validated folder needs no root to be tidied. The subdirectory loop also skips dot-entries, symlinks and directories owned by a third uid, and reports each removal via `prt`. Containment is now checked by [`is_strictly_within()`](../luks_tray/main.py#L994) instead of `os.path.commonpath(...) == parent`, which treated "target == parent" as "inside the parent".
+
+**Verified** (`QT_QPA_PLATFORM=offscreen`, `LuksTray.singleton` stubbed with a fake `ini_tool`, real temp directories):
+
+- Rejected: `/`, `/home`, `/tmp`, `/etc`, `/usr`, `/var`, `/mnt`, `/boot`, `/dev`, `/proc`, `/sys`, `/root`, the home directory itself, `/etc/luks`, `/usr/local/Vaults`, `/var/lib/Vaults`, `/opt/Vaults`, `/srv/Vaults`, `/root/Vaults`, `/home/notjoe/Vaults`, a symlinked root, a `0777` root, and a regular file used as the root.
+- Accepted: the shipped default `~/Vaults` (= `/home/joe/Vaults`, root-owned `0755`), a not-yet-existing `~/Vaults`-style path, `~/Vaults` written without expansion, `/mnt/Vaults`, `/tmp/<random>/Vaults`, and — with `HOME=/root` — `/root/Vaults` (while `/home/<any-user>/Vaults` stays rejected).
+- Cleanup on a valid root: exactly the one empty subdirectory removed; a non-empty directory, a regular file, a dot-directory and a symlink were all left untouched, and the symlink's **target** outside the root was not deleted.
+- Hostile configs: `auto_mount_folder=/home` and `/` both log `WARN: skipping auto-mount cleanup: …` and return `0` (nothing inspected, nothing deleted); an invalid (group-writable) root disables both `remove_unused_automounts()` and `remove_if_auto()` while the child directories survive.
+- `remove_if_auto()`: `True` for an empty dir inside the root (and the dir is gone), `False` for the root itself, for a path outside the root, and for any path when the root fails validation.
+
+`python -m py_compile` passes; `ruff check --select F,E9 luks_tray/main.py` still reports the same 6 pre-existing `F401` unused imports and nothing new. **Trade-off:** on a folder that fails validation, stale empty mount directories are no longer cleaned (a log line explains why) — a safe failure, and the shipped default passes all checks.
 
 ### 9. In-memory password wiped as a side effect
 
@@ -296,11 +314,11 @@ The `legit` variable is redundant and the mutation zeroes the live password, aff
 
 ## Recommended fix order
 
-1. **Startup + crash fixes:** ✅ env-var guard (#1), ✅ stdout-returning command helper + `_setup_loop_device` (#2), ⬜ `filesystem.name` guard (#3).
+1. **Startup + crash fixes:** ✅ env-var guard (#1), ✅ stdout-returning command helper + `_setup_loop_device` (#2), ✅ `filesystem.name` guard (#3).
 2. **Correct history identity:** use `generate_uuid_for_file_path`/back-file key for new files and persist `back_file` (#4).
 3. **Crypto hardening:** PBKDF2/Argon2 with salt, `0600`, atomic write (#5, #7).
 4. ✅ **Packaging:** `requires-python` is now `>=3.11` and the two PEP 701 f-strings were rewritten (#6).
-5. **Safety:** validate `auto_mount_folder` before sudo `rmdir` (#8); scope the documented sudoers rule.
+5. ✅ **Safety:** `auto_mount_folder` is validated before any cleanup, and cleanup no longer uses sudo (#8); ⬜ scope the documented sudoers rule.
 6. **High-list correctness items** (`browse_folder`, `check_upon` mount set, `update_history` ordering, `add_input_field`, `luksFormat` sudo, asserts).
 7. **Refactor/perf:** worker thread + cached `blkid`, split `main.py`, add tests + a scoped ruff config.
 

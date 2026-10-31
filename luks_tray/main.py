@@ -30,6 +30,7 @@ import signal
 import subprocess
 import shutil
 import shlex
+import pwd
 import traceback
 import hashlib
 import time
@@ -375,6 +376,27 @@ class DeviceInfo:
     def get_relative(self, name):
         """ TBD """
         return self.entries.get(name, None)
+
+# Paths that must never be accepted as `auto_mount_folder`. The startup cleanup
+# pass deletes (empty) subdirectories below that path, so a careless config value
+# such as `/home` or `/` would otherwise turn a typo into an `rmdir` sweep over
+# unrelated, system-owned paths.
+FORBIDDEN_AUTO_MOUNT_ROOTS = frozenset((
+    '/', '/bin', '/boot', '/dev', '/etc', '/home', '/lib', '/lib32',
+    '/lib64', '/media', '/mnt', '/opt', '/proc', '/root', '/run',
+    '/sbin', '/srv', '/sys', '/tmp', '/usr', '/var',
+))
+# Same idea, but for whole system trees: nothing *inside* these may be used
+# either. `/home`, `/mnt`, `/media` and `/tmp` are absent on purpose -- a vault
+# directory may legitimately live there (e.g. `~/Vaults`, `/mnt/Vaults`); they
+# are covered by the home-directory and ownership/permission checks instead.
+# Paths inside the real user's home are exempt from this list, so non-standard
+# layouts such as /var/home/<user>/Vaults keep working.
+FORBIDDEN_AUTO_MOUNT_PREFIXES = tuple(os.path.normpath(path) for path in (
+    '/bin', '/boot', '/dev', '/etc', '/lib', '/lib32', '/lib64', '/opt',
+    '/proc', '/root', '/run', '/sbin', '/srv', '/sys', '/usr', '/var',
+))
+
 
 class LuksTray():
     """ TBD """
@@ -810,12 +832,129 @@ class LuksTray():
 
     @staticmethod
     def get_auto_mount_root():
-        """ TBD """
+        """ Return the configured `auto_mount_folder` as an absolute path. """
         tray = LuksTray.singleton
         auto_root = tray.ini_tool.get_current_val('auto_mount_folder')
         auto_root = LuksTray.expand_real_user(auto_root)
         auto_root = os.path.abspath(auto_root)
         return auto_root
+
+    @staticmethod
+    def get_real_user_ids():
+        """ Return (uid, gid) of the user this tray acts for.
+
+            Under `sudo` these are SUDO_UID/SUDO_GID; otherwise they are the
+            effective ids. The value is always an int -- SUDO_UID arrives as a
+            string from the environment, which cannot be compared with the
+            numeric st_uid reported by os.stat().
+        """
+        def as_int(value, fallback):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return int(fallback)
+
+        return (as_int(os.environ.get('SUDO_UID'), os.getuid()),
+                as_int(os.environ.get('SUDO_GID'), os.getgid()))
+
+    @staticmethod
+    def get_real_user_home():
+        """ Home directory of the user this tray acts for (sudo aware). """
+        real_user = os.environ.get('SUDO_USER')
+        if real_user:
+            try:
+                return pwd.getpwnam(real_user).pw_dir
+            except KeyError:
+                return os.path.join('/home', real_user)
+        return os.path.expanduser('~')
+
+    @staticmethod
+    def validate_auto_mount_root(auto_root=None):
+        """ Return None if `auto_root` may be cleaned, else an error string.
+
+            [`remove_unused_automounts()`](main.py) deletes (empty)
+            subdirectories below `auto_mount_folder`, which comes straight from
+            config.ini, so a typo (`/`, `/home`) or a shared system path must not
+            turn the startup cleanup into an `rmdir` sweep over unrelated paths.
+            The folder therefore has to look like a *dedicated* vault area:
+
+            - an absolute path, at least two levels deep, not in/under a system
+              tree, and not a symlink (which could point anywhere);
+            - neither the real user's home nor an ancestor of it, and not inside
+              another user's home;
+            - if it exists: a plain directory, not a mount point, owned by the
+              real user or by root (the tray creates it as root when run under
+              sudo), and not writable by group/other.
+
+            The checks are deliberately conservative: when in doubt, skip the
+            cleanup and log why (`remove_unused_automounts` treats any returned
+            string as "do nothing").
+        """
+        if auto_root is None:
+            auto_root = LuksTray.get_auto_mount_root()
+        try:
+            path = os.path.abspath(auto_root)
+        except Exception as exc:                       # pylint: disable=broad-except
+            return f'auto_mount_folder {auto_root!r} is not a usable path: {exc}'
+
+        if not os.path.isabs(path):
+            return f'auto_mount_folder {path!r} is not an absolute path'
+        if path in FORBIDDEN_AUTO_MOUNT_ROOTS:
+            return f'auto_mount_folder {path!r} is a system directory'
+        if len([part for part in path.split(os.sep) if part]) < 2:
+            return f'auto_mount_folder {path!r} is too close to the filesystem root'
+        if os.path.islink(path):
+            # A symlinked root can point anywhere; never follow it for deletes.
+            return f'auto_mount_folder {path!r} is a symlink'
+
+        home = os.path.abspath(LuksTray.get_real_user_home())
+        if path == home:
+            return (f'auto_mount_folder {path!r} is the home directory itself '
+                    f'(not a dedicated vault area)')
+        if home.startswith(path.rstrip(os.sep) + os.sep):
+            return (f'auto_mount_folder {path!r} contains the home directory '
+                    f'{home!r} (shared folder, not a dedicated vault area)')
+
+        within_home = LuksTray.is_strictly_within(path, home)
+        if not within_home:
+            for prefix in FORBIDDEN_AUTO_MOUNT_PREFIXES:
+                if path == prefix or path.startswith(prefix + os.sep):
+                    return (f'auto_mount_folder {path!r} is inside the system '
+                            f'directory {prefix!r}')
+            # `~/Vaults` lives under /home, which is why /home is not in the
+            # prefix list -- so any multi-user home tree is checked explicitly:
+            # a path below one of them must belong to *our* home (e.g.
+            # /home/<other-user>/Vaults is not ours to clean). The parents of
+            # `/` and `/` itself are dropped: "within /" says nothing.
+            home_roots = {os.path.dirname(home), '/home'} - {'/', ''}
+            for home_root in sorted(home_roots):
+                if LuksTray.is_strictly_within(path, home_root):
+                    return (f'auto_mount_folder {path!r} is inside another '
+                            f'user\'s home directory ({home_root!r})')
+
+        if not os.path.exists(path):
+            return None            # nothing to clean yet -- harmless
+
+        if not os.path.isdir(path):
+            return f'auto_mount_folder {path!r} exists but is not a directory'
+        if os.path.ismount(path):
+            return f'auto_mount_folder {path!r} is a mount point'
+        try:
+            stat_info = os.stat(path)
+        except OSError as exc:
+            return f'auto_mount_folder {path!r} cannot be inspected: {exc}'
+
+        real_uid, _real_gid = LuksTray.get_real_user_ids()
+        # root is accepted on purpose: the tray runs under sudo and creates the
+        # folder itself, so its owner is either the real user or root.
+        if stat_info.st_uid not in (real_uid, os.geteuid(), 0):
+            return (f'auto_mount_folder {path!r} is owned by uid '
+                    f'{stat_info.st_uid}, not by the real user (uid {real_uid}) '
+                    f'or root')
+        if stat_info.st_mode & 0o022:
+            return (f'auto_mount_folder {path!r} is writable by group/other '
+                    f'(shared directory)')
+        return None
 
     @staticmethod
     def generate_auto_mount_folder():
@@ -852,45 +991,100 @@ class LuksTray():
         assert False, "cannot generate automount directory (too many in use)"
 
     @staticmethod
+    def is_strictly_within(child, parent):
+        """ True if `child` is inside `parent` (and not `parent` itself). """
+        try:
+            child = os.path.abspath(child)
+            parent = os.path.abspath(parent)
+        except Exception:                               # pylint: disable=broad-except
+            return False
+        if child == parent:
+            return False
+        return child.startswith(parent.rstrip(os.sep) + os.sep)
+
+    @staticmethod
+    def remove_empty_dir(path):
+        """ rmdir `path` if (and only if) it is an empty, plain directory.
+
+            This is intentionally unprivileged: the caller has validated the
+            auto-mount root (see [`validate_auto_mount_root()`](main.py)), so
+            `os.rmdir` suffices and a failure is simply reported instead of
+            escalating to sudo. `rmdir` itself refuses to delete non-empty
+            directories, and mount points are skipped here as well.
+        """
+        if os.path.islink(path) or not os.path.isdir(path):
+            return False
+        if os.path.ismount(path):
+            return False
+        try:
+            os.rmdir(path)              # only removes empty dirs
+            return True
+        except OSError:
+            return False                # not empty or permission denied
+
+    @staticmethod
     def remove_if_auto(mount):
         """Remove target_dir if it is empty and within parent_dir"""
         parent_dir = LuksTray.get_auto_mount_root()
         target_dir = os.path.abspath(mount)
 
-        if not os.path.isdir(target_dir):
-            return False  # Not a directory, nothing to do
-        if not os.path.commonpath([target_dir, parent_dir]) == parent_dir:
+        if not LuksTray.is_strictly_within(target_dir, parent_dir):
             return False  # Not safely within the parent
-        try:
-            # os.rmdir(target_dir)  # Only removes empty dirs
-            sudo_cmd(['rmdir', target_dir])
-            return True
-        except OSError:
-            return False  # Not empty or permission denied
+        problem = LuksTray.validate_auto_mount_root(parent_dir)
+        if problem:
+            prt(f'WARN: not removing {target_dir!r}: {problem}')
+            return False
+        return LuksTray.remove_empty_dir(target_dir)
 
     def remove_unused_automounts(self):
         """ A startup function (could be periodic) that cleans up the
-            auto mount folder
+            auto mount folder.
+
+            Deletes empty subdirectories of `auto_mount_folder`, which is read
+            from config.ini -- so the folder is validated first (see
+            [`validate_auto_mount_root()`](main.py)); when it is not a
+            dedicated, user-owned directory the whole pass is skipped. Returns
+            the number of directories removed.
         """
         parent_dir = LuksTray.get_auto_mount_root()
+        problem = LuksTray.validate_auto_mount_root(parent_dir)
+        if problem:
+            prt(f'WARN: skipping auto-mount cleanup: {problem}')
+            return 0
+        if not os.path.isdir(parent_dir):
+            return 0  # Nothing to clean yet
 
         try:
-            for name in os.listdir(parent_dir):
-                try:
-                    full_path = os.path.join(parent_dir, name)
-                    if not os.path.isdir(full_path):
-                        continue  # Skip files or symlinks
-                    if os.path.ismount(full_path):
-                        continue  # Skip mount points
-                    try:
-                        # os.rmdir(full_path)  # Only removes empty dirs
-                        sudo_cmd(['rmdir', full_path])
-                    except OSError:
-                        pass  # Not empty or permission denied, silently skip
-                except Exception:
-                    pass  # Silently ignore unexpected errors like unreadable dirs
-        except Exception:
-            pass  # Silently ignore unexpected errors like unreadable dirs
+            names = os.listdir(parent_dir)
+        except OSError as exc:
+            prt(f'WARN: cannot list auto_mount_folder {parent_dir!r}: {exc}')
+            return 0
+
+        real_uid, _real_gid = LuksTray.get_real_user_ids()
+        # Same owners as validate_auto_mount_root(): the real user, the effective
+        # user, and root (auto-mount dirs are created by the tray via sudo).
+        allowed_uids = {real_uid, os.geteuid(), 0}
+        removed = 0
+        for name in names:
+            if name.startswith('.'):
+                continue  # Never touch dot-entries (markers, trash, ...)
+            full_path = os.path.join(parent_dir, name)
+            if os.path.islink(full_path):
+                continue  # Never follow symlinks out of the vault directory
+            if not os.path.isdir(full_path):
+                continue  # Regular file, nothing to do
+            if os.path.ismount(full_path):
+                continue  # Skip mount points -- still mounted/used
+            try:
+                stat_info = os.stat(full_path)
+            except OSError:
+                continue
+            if stat_info.st_uid not in allowed_uids:
+                continue  # Someone else's directory: not ours to delete
+            if LuksTray.remove_empty_dir(full_path):
+                removed += 1
+                prt(f'removed unused auto-mount folder {full_path!r}')
+        return removed
 
     @staticmethod
     def expand_real_user(path):
