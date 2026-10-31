@@ -1677,11 +1677,17 @@ class MountDeviceDialog(CommonDialog):
             self.add_push_button('Cancel', self.cancel)
             self.main_layout.addLayout(self.button_layout)
 
-        elif container.opened:  # unmount dialog
+        elif container.opened:  # close dialog: unlocked but nothing mounted
             self.set_title('Close Unmounted Device [luks-tray]')
             # self.setFixedSize(300, 200)
             self.add_line(f'{container.name}')
-            self.add_line(f'Close {",".join(mounts)}?')
+            # `mounts` is empty in this branch by definition (that is what
+            # selected it), so joining it rendered a bare "Close ?". Name the
+            # mapper device when it is known, else the container itself.
+            mappers = [fs.name for fs in (container.filesystems or [])
+                       if getattr(fs, 'name', '')]
+            target = ', '.join(mappers) if mappers else container.name
+            self.add_line(f'Close {target}?')
             self.add_push_button('OK', self.unmount_device, container.uuid)
             self.add_push_button('Cancel', self.cancel)
             self.main_layout.addLayout(self.button_layout)
