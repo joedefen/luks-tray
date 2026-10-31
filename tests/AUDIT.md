@@ -288,9 +288,9 @@ The password is still withheld from a clear-text file (that part is deliberate �
 
 | # | Location | Issue |
 |---|----------|-------|
-| 1 | [`browse_folder()`](../luks_tray/main.py#L1086) | `self.home_dir()` calls a **string** (`home_dir` is a `str` set by [`get_real_user_home_directory()`](../luks_tray/main.py#L1074)) → `TypeError` when the mount field is cleared. |
+| 1 | ✅ [`browse_folder()`](../luks_tray/main.py#L1313) | ~~`self.home_dir()` calls a **string** (`home_dir` is a `str` set by [`get_real_user_home_directory()`](../luks_tray/main.py#L1301)) → `TypeError` when the mount field is cleared.~~ **Fixed** — the empty-field fallback now calls `self.get_real_user_home_directory()`, which returns the `str` (and lazily initializes it). |
 | 2 | ✅ [`update_history()`](../luks_tray/main.py#L780) | ~~Sets `vital.upon` **after** `put_vital()` (which saves), so a new mount point is not persisted on that save.~~ **Fixed with critical item 4** — `upon` and `back_file` are now written before the single `put_vital()`. |
-| 3 | [`check_upon()` callers](../luks_tray/main.py#L1482) | `mount_points = tray.update_mounts()` returns the **device key set** ([main.py:509](../luks_tray/main.py#L509)), not mount points, yet [`check_upon`](../luks_tray/main.py#L1186) treats it as mount points (`text in mount_points`). Duplicate-mount detection is broken; pass `tray.upons`. |
+| 3 | ✅ [`check_upon()` callers](../luks_tray/main.py#L1714) | ~~`mount_points = tray.update_mounts()` returns the **device key set** ([main.py:563](../luks_tray/main.py#L563)), not mount points, yet [`check_upon`](../luks_tray/main.py#L1415) treats it as mount points (`text in mount_points`). Duplicate-mount detection is broken; pass `tray.upons`.~~ **Fixed** — both callers ([`mount_device()`](../luks_tray/main.py#L1714), [`mount_file()`](../luks_tray/main.py#L1985)) now call `tray.update_mounts()` for its side effect and pass `tray.upons`; `check_upon()` documents the required argument. |
 | 4 | [`add_input_field()`](../luks_tray/main.py#L995) | With a scalar label and multiple `keys`, it does `placeholder_texts.append(text_str)` while `placeholder_texts` may still be a `str` → `AttributeError`. Normalize both to lists first. |
 | 5 | [`mount_luks_container()`](../luks_tray/main.py#L1273) | `luksFormat` runs **without `sudo`** (unlike everything else) and uses `check=True`, so the `if sub.returncode != 0` branch is unreachable and real stderr is swallowed by the outer `except` → generic "An error occurred". Convert to [`sudo_run()`](../luks_tray/main.py#L114) (see #2). |
 | 6 | [`mount_device()`](../luks_tray/main.py#L1457) | `luks_device = ''` when `len(container.filesystems) != 1`; `cryptsetup open ... ''` then fails with a confusing error. |
@@ -347,7 +347,7 @@ The password is still withheld from a clear-text file (that part is deliberate �
 3. **Crypto hardening:** PBKDF2/Argon2 with salt, `0600`, atomic write (#5, #7), and saves that no longer wipe the in-memory password (#9).
 4. ✅ **Packaging:** `requires-python` is now `>=3.11` and the two PEP 701 f-strings were rewritten (#6).
 5. ✅ **Safety:** `auto_mount_folder` is validated before any cleanup, and cleanup no longer uses sudo (#8); ⬜ scope the documented sudoers rule.
-6. **High-list correctness items** (`browse_folder`, `check_upon` mount set, `update_history` ordering, `add_input_field`, `luksFormat` sudo, asserts).
+6. **High-list correctness items** (✅ `browse_folder`, ✅ `check_upon` mount set, `update_history` ordering, `add_input_field`, `luksFormat` sudo, asserts).
 7. **Refactor/perf:** worker thread + cached `blkid`, split `main.py`, add tests + a scoped ruff config.
 
 `ruff check .` currently reports **64 issues** (16 blind `except`, 6 unused imports, 2 real `invalid-syntax` under the declared Python, 4 `try/except/pass`, plus style). Most are auto-fixable with `ruff check --fix`; the critical items above require manual work.

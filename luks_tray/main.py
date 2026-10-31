@@ -1314,7 +1314,9 @@ class CommonDialog(QDialog):
         """ Open a dialog to select a folder and update the input field with the selected path. """
         # Determine the initial directory to open
         initial_dir = input_field.text()
-        initial_dir = initial_dir if initial_dir else self.home_dir()
+        # `home_dir` is a plain string, not a method -- calling it raised
+        # TypeError when the field was empty.
+        initial_dir = initial_dir if initial_dir else self.get_real_user_home_directory()
 
         # Open the folder dialog starting at the determined directory
         folder_path = QFileDialog.getExistingDirectory(self, "Select Folder", initial_dir)
@@ -1412,6 +1414,9 @@ class CommonDialog(QDialog):
     @staticmethod
     def check_upon(text, mount_points, is_device=False):
         """ Validate candidate mount point.
+            `mount_points` must be the set of *currently mounted mount points*
+            (i.e. [`LuksTray.upons`](main.py)), **not** `update_mounts()`, which
+            returns the set of device keys.
             Returns error (or None if no error)
         """
         if not text:
@@ -1695,7 +1700,7 @@ class MountDeviceDialog(CommonDialog):
             return
 
         errs.append(f'{container.name}')
-        mount_points = tray.update_mounts()
+        tray.update_mounts()
 
         # Parse and validate inputs
         for key, field in self.inputs.items():
@@ -1706,7 +1711,7 @@ class MountDeviceDialog(CommonDialog):
                 if not text:
                     errs.append('ERR: cannot leave password empty')
             elif key == 'upon':
-                err = self.check_upon(text, mount_points, is_device=True)
+                err = self.check_upon(text, tray.upons, is_device=True)
                 if err:
                     errs.append(err)
             elif key == 'readonly':
@@ -1937,7 +1942,7 @@ class MountFileDialog(CommonDialog):
         else:
             errs.append(f'{container.name}')
 
-        mount_points = tray.update_mounts()
+        tray.update_mounts()
         mount_point = None
 
         for key, field in self.inputs.items():
@@ -1977,7 +1982,7 @@ class MountFileDialog(CommonDialog):
                         path = os.path.join(self.vault_dir, basename)
 
                 mount_point = path
-                err = self.check_upon(path, mount_points)
+                err = self.check_upon(path, tray.upons)
                 if err:
                     errs.append(err)
 
