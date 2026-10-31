@@ -172,7 +172,11 @@ class IniTool:
                         prt(f'skip {selector}.{key}: {value!r} [expecting string]')
                     continue
 
-                assert False, f'unhandled goldens[{key}]: {value!r}'
+                # Unknown golden type: keep the default like every other
+                # mismatch above, instead of relying on `assert` -- which
+                # `python -O` strips, silently skipping the key altogether.
+                params[key] = self.the_default(key, selector)
+                prt(f'skip {selector}.{key}: {value!r} [unhandled type]')
             all_params[selector] = SimpleNamespace(**params)
 
         self.params_by_selector = all_params

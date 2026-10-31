@@ -434,7 +434,11 @@ class LuksTray():
 
         _, missing, self.udisks_cmd = self.check_dependencies()
 
-        assert not missing, f"missing system commands: {missing}"
+        if missing:
+            # Was a bare `assert`: `python -O` strips it, so the tray carried
+            # on with half the system commands missing (no cryptsetup, no
+            # mkfs.ext4, ...) and failed later in confusing ways.
+            raise RuntimeError(f'missing system commands: {missing}')
 
         # Create an invisible base widget to serve as the dialog parent
         self.dialog_parent = QWidget(None) # Parented by None, so it's top-level
@@ -470,7 +474,13 @@ class LuksTray():
                 continue
 
             self.icons[key] = QIcon(dest_path)
-        assert len(self.icons) == len(self.svgs)
+
+        missing_icons = sorted(set(self.svgs) - set(self.icons))
+        if missing_icons:
+            # Same reasoning as the dependency check above: this `assert`
+            # vanished under `python -O`, leaving the tray half-initialized
+            # and every later `self.icons[key]` lookup a KeyError.
+            raise RuntimeError(f'missing tray icon(s): {missing_icons}')
 
 
         # ??? Load JSON data
@@ -971,7 +981,10 @@ class LuksTray():
         auto_root = LuksTray.get_auto_mount_root()
         if os.path.exists(auto_root):
             if not os.path.isdir(auto_root):
-                assert False, f"auto_mount_folder ({auto_root!r}) exists but is not a directory"
+                # `assert` is stripped by `python -O`, and the caller would
+                # then hand out mount points inside a non-directory.
+                raise RuntimeError(
+                    f'auto_mount_folder ({auto_root!r}) exists but is not a directory')
         else:
             # os.makedirs(auto_root)
             run_cmd(['mkdir', auto_root])
@@ -988,7 +1001,7 @@ class LuksTray():
             fallback = f'vault{random.randint(1000, 9999)}'
             if (fullpath := available(fallback)):
                 return fullpath
-        assert False, "cannot generate automount directory (too many in use)"
+        raise RuntimeError('cannot generate automount directory (too many in use)')
 
     @staticmethod
     def is_strictly_within(child, parent):
@@ -1279,7 +1292,9 @@ class CommonDialog(QDialog):
                 field_layout.addWidget(label)
                 field_layout.addWidget(input_field)
             else:
-                assert False, f'invalid field_type{field_type}'
+                # Validation must survive `python -O`; the old `assert` also
+                # left `input_field` unbound for the code that follows.
+                raise ValueError(f'invalid field_type {field_type!r}')
 
             if add_on == 'password':
                 exposed = tray.ini_tool.get_current_val('show_passwords_by_default')
@@ -1535,7 +1550,11 @@ class CommonDialog(QDialog):
             luks_file: Path to LUKS file (for files)
             size: Size for new file creation
         """
-        assert upon, "cannot specify empty mount point"
+        if not upon:
+            # This function reports failure by returning a string (callers do
+            # `if err:`), and must keep doing so under `python -O`, where an
+            # `assert` would vanish and let a bogus mount point reach `mount`.
+            return 'ERR: cannot mount without a mount point'
         try:
             # Determine if this is a file or device container
             is_file_container = luks_file is not None
@@ -1970,7 +1989,12 @@ class MountFileDialog(CommonDialog):
 
         tray, container = LuksTray.singleton, None
         errs, values = [], {}
-        assert tray
+        if tray is None:
+            # `LuksTray.singleton` is assigned in LuksTray.__init__; the old
+            # `assert` (stripped by `python -O`) merely deferred the failure
+            # to the first `tray.` dereference below.
+            self.alert_errors(['ERR: tray is not initialized'])
+            return
 
         if uuid is None:
             container = DeviceInfo.make_partition_namespace('', '')
