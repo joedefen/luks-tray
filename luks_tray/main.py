@@ -2118,6 +2118,11 @@ def main():
 
     if opts.edit_config:
         ini_tool = IniTool(paths_only=True)
+        # `paths_only=True` deliberately skips __init__'s ensure_ini_file(),
+        # so on a fresh install neither the folder nor config.ini exists and
+        # $EDITOR would open -- or create -- the file with the wrong owner or
+        # in a missing directory. Create both before exec'ing.
+        ini_tool.ensure_ini_file()
         editor = os.getenv('EDITOR', 'vim')
         args = [editor, ini_tool.ini_path]
         print(f'RUNNING: {args}')
@@ -2130,6 +2135,14 @@ def main():
 
     if opts.follow_log:
         ini_tool = IniTool(paths_only=True)
+        # Same reason as --edit-config: `paths_only` skips ensure_ini_file(),
+        # so the folder may not exist yet. Create the folder and an empty log
+        # file up front -- `tail -F` would otherwise print
+        # "cannot open ... for reading" on a fresh install.
+        ini_tool.ensure_folder()
+        if not os.path.exists(ini_tool.log_path):
+            with open(ini_tool.log_path, 'a', encoding='utf-8'):
+                pass
         args = ['tail', '-n50', '-F', ini_tool.log_path]
         print(f'RUNNING: {args}')
         os.execvp('tail', args)

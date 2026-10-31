@@ -67,10 +67,19 @@ class IniTool:
             return val
         return self.the_default(key, selector) # should not get here
 
+    def ensure_folder(self):
+        """Create the config folder if it does not exist; return its path.
+
+        Split out of ensure_ini_file() so callers that only need the folder
+        (e.g. `--follow-log`, which tails debug.log) do not have to create a
+        config.ini as a side effect.
+        """
+        os.makedirs(self.folder, exist_ok=True)
+        return self.folder
+
     def ensure_ini_file(self):
         """Check if the config file exists, create it if not."""
-        if not os.path.exists(self.folder):
-            os.makedirs(self.folder, exist_ok=True)
+        self.ensure_folder()
         if not os.path.exists(self.ini_path):
             self.config.read_dict(self.defaults)
             with open(self.ini_path, 'w', encoding='utf-8') as configfile:
