@@ -89,21 +89,31 @@ def sudo_cmd(args, errs=None, input_str=None):
     return run_cmd(args, errs, input_str)
 
 def run_cmd(args, errs=None, input_str=None):
-    """ TBD """
-    # pylint: disable=consider-using-with
+    """ Run args and return None on success, or a 'FAIL: ...' string on failure.
 
-    proc = subprocess.Popen(args, stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
-    # Communicate() writes to stdin and waits for the process to finish
-    stdout, stderr = proc.communicate(input=input_str)
-    # print(f'+++ {stdout=}\n+++ {stderr=}')
-    if proc.returncode == 0:
+        stdout is deliberately NOT returned here -- this helper is a
+        success/failure predicate. Use run_cmd_capture() when you need the
+        child's output.
+    """
+    rc, stdout, stderr = run_cmd_capture(args, input_str)
+    if rc == 0:
         return None
-    err = f'FAIL: {' '.join(args)}: {stdout} {stderr} [rc={proc.returncode}]'
-    if err and errs:
+    err = f'FAIL: {' '.join(args)}: {stdout} {stderr} [rc={rc}]'
+    # NOTE: test against None, not truthiness -- callers routinely pass a
+    # freshly created [] to collect errors and an empty list is falsy.
+    if errs is not None:
         errs.append(err)
     return err
+
+def run_cmd_capture(args, input_str=None):
+    """ Run args via subprocess.run(); return (returncode, stdout, stderr). """
+    sub = subprocess.run(args, input=input_str, capture_output=True,
+                         text=True, check=False)
+    return sub.returncode, sub.stdout, sub.stderr
+
+def sudo_run(args, input_str=None):
+    """ Like run_cmd_capture(), but with sudo -n (never prompts). """
+    return run_cmd_capture(['sudo', '-n'] + args, input_str)
 
 
 
@@ -1240,12 +1250,18 @@ class CommonDialog(QDialog):
         if hasattr(self, 'opened') and self.opened:
             return None, f'/dev/{container.name}'
 
-        # Use --show to get the loop device name
-        result = sudo_cmd(['losetup', '-f', '--show', container.back_file])
-        if result.startswith('FAIL:'):
-            return result, None
+        # Use --show to get the loop device name; we need its stdout, so call
+        # subprocess directly instead of sudo_cmd() (which only reports errors).
+        args = ['losetup', '-f', '--show', container.back_file]
+        rc, stdout, stderr = sudo_run(args)
+        if rc != 0:
+            return (f"FAIL: {' '.join(args)}: "
+                    f'{stdout.strip()} {stderr.strip()} [rc={rc}]'), None
 
-        loop_device = result.strip()
+        loop_device = stdout.strip()
+        if not loop_device:
+            return f"FAIL: {' '.join(args)}: no loop device returned", None
+
         # Update container.name to match the loop device (e.g., 'loop0')
         container.name = os.path.basename(loop_device)
 
