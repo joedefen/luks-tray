@@ -1227,14 +1227,34 @@ class CommonDialog(QDialog):
 
         if not isinstance(keys, list):
             keys = [keys]
-        if not isinstance(label_texts, list):
-            text_str, label_texts = label_texts, [label_texts]
-            while len(label_texts) < len(keys):
-                placeholder_texts.append(text_str)
-        if not isinstance(placeholder_texts, list):
-            text_str, placeholder_texts = placeholder_texts, [placeholder_texts]
-            while len(placeholder_texts) < len(keys):
-                placeholder_texts.append(text_str)
+
+        # Normalize both arguments to lists *before* padding them: a scalar
+        # label/placeholder is repeated for every key, and appending to a
+        # still-scalar `placeholder_texts` used to raise AttributeError.
+        if not isinstance(label_texts, (list, tuple)):
+            label_texts = [label_texts]
+        else:
+            label_texts = list(label_texts)
+        if not isinstance(placeholder_texts, (list, tuple)):
+            placeholder_texts = [placeholder_texts]
+        else:
+            placeholder_texts = list(placeholder_texts)
+
+        if not label_texts:
+            label_texts = ['']
+        if not placeholder_texts:
+            placeholder_texts = ['']
+
+        if len(label_texts) == 1 and len(keys) > 1:
+            label_texts = label_texts * len(keys)
+        if len(placeholder_texts) == 1 and len(keys) > 1:
+            placeholder_texts = placeholder_texts * len(keys)
+
+        if len(label_texts) != len(keys) or len(placeholder_texts) != len(keys):
+            raise ValueError(
+                f'add_input_field: {len(keys)} key(s) but '
+                f'{len(label_texts)} label(s) and '
+                f'{len(placeholder_texts)} placeholder(s)')
 
         for idx, key in enumerate(keys):
             label_text = label_texts[idx]
@@ -1541,13 +1561,18 @@ class CommonDialog(QDialog):
                     if not err:
                         err = sudo_cmd(['truncate', '-s', f'{size}M', luks_file])
                     if not err:
-                        # Execute the cryptsetup command directly
+                        # Run luksFormat through sudo like every other
+                        # privileged operation: `sudo -n` never prompts and
+                        # returning rc/stderr keeps the real failure visible
+                        # instead of swallowing it in the outer except.
                         args = ['cryptsetup', 'luksFormat', '--type', 'luks2']
                         args += ['--batch-mode', '--key-file', '-', luks_file]
-                        sub = subprocess.run(args, input=f'{password}',
-                             check=True, capture_output=True, text=True)
-                        if sub.returncode != 0:
-                            err = f"FAIL: {' '.join(args)}: {sub.stdout} {sub.stderr} [rc={sub.returncode}]"
+                        rc, stdout, stderr = sudo_run(args, input_str=f'{password}')
+                        if rc != 0:
+                            err = (f"FAIL: {' '.join(args)}: {stdout} {stderr} "
+                                   f'[rc={rc}]')
+                    if err:
+                        return err
                     needs_filesystem = True
             else:
                 # Handle device container setup
