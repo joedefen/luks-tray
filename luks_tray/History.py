@@ -9,6 +9,7 @@ import os
 import time
 import json
 import subprocess
+import tempfile
 from types import SimpleNamespace
 import hashlib
 import base64
@@ -202,6 +203,34 @@ class HistoryClass:
         cipher = Fernet(self._password_to_fernet_key())
         return cipher.decrypt(payload).decode('utf-8'), True
 
+    def _write_atomic(self, data, binary):
+        """ Write `data` to self.path atomically, owner-readable/writable only.
+
+            A temp file is created in the *same* directory (so os.replace() is
+            guaranteed to be a same-filesystem rename), written, fsync'd and
+            chmod'd 0600, then swapped in. A crash or short write can therefore
+            never leave a truncated or world-readable history file behind.
+        """
+        tmp_path = None
+        try:
+            dirname = os.path.dirname(os.path.abspath(self.path)) or '.'
+            fd, tmp_path = tempfile.mkstemp(dir=dirname,
+                    prefix=os.path.basename(self.path) + '.', suffix='.tmp')
+            with os.fdopen(fd, 'wb' if binary else 'w',
+                           encoding=None if binary else 'utf-8') as file:
+                file.write(data)
+                file.flush()
+                os.fsync(file.fileno())  # flush before the rename
+            os.chmod(tmp_path, 0o600)    # mkstemp's default, made explicit
+            os.replace(tmp_path, self.path)
+            tmp_path = None
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
     def save(self, force=False):
         """
         Saves the history file. Encrypts with the master password if set,
@@ -214,13 +243,11 @@ class HistoryClass:
             if self.master_password:
                 # Save Encrypted with Header + salted PBKDF2 payload
                 json_data = json.dumps(entries).encode('utf-8')
-                with open(self.path, 'wb') as file:
-                    file.write(self.ENCRYPTED_HEADER)
-                    file.write(self._encrypt_payload(json_data))
+                payload = self.ENCRYPTED_HEADER + self._encrypt_payload(json_data)
+                self._write_atomic(payload, binary=True)
             else:
                 # Save Clear-Text
-                with open(self.path, 'w', encoding='utf-8') as file:
-                    json.dump(entries, file, indent=4)
+                self._write_atomic(json.dumps(entries, indent=4), binary=False)
         except Exception as e:
             prt(f'Error saving history: {e}')
             return f'failed saving history: {e}'

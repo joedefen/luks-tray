@@ -4,7 +4,7 @@
 
 **Method:** manual review, `python -m py_compile` (passes on 3.13), `ruff check` (64 findings), and contract tracing of `run_cmd`/`sudo_cmd`.
 
-**Progress:** 6 of 9 critical items fixed and re-verified — **#1** (env-var guard), **#2** (`run_cmd`/`sudo_cmd` contract), **#3** (anomaly-case `cryptsetup close` crash), **#4** (file containers not remembered), **#5** (master-password KDF) and **#6** (declared Python floor, now 3.11). Items 7–9 are still open (plus the High-severity table below). Line links for #1–#6 were re-verified against the current tree; the later sections predate those edits and may drift (the #3/#4/#6 fixes added ~55 lines to `main.py` and the #5 fix ~8 lines to `History.py`, so links into other code are stale).
+**Progress:** 7 of 9 critical items fixed and re-verified — **#1** (env-var guard), **#2** (`run_cmd`/`sudo_cmd` contract), **#3** (anomaly-case `cryptsetup close` crash), **#4** (file containers not remembered), **#5** (master-password KDF), **#6** (declared Python floor, now 3.11) and **#7** (atomic, owner-only history writes). Items 8–9 are still open (plus the High-severity table below). Line links for #1–#7 were re-verified against the current tree; the later sections predate those edits and may drift (the #3/#4/#6 fixes added ~55 lines to `main.py` and the #5/#7 fixes ~50 lines to `History.py`, so links into other code are stale).
 
 **Overall:** A functional PyQt6 tray app with clean separation of concerns (device discovery, history, config, UI). However it has **multiple crash-level defects on normal code paths**, **a weak password-encryption scheme**, a **declared-vs-actual Python version mismatch**, and no tests. Not production-ready as-is.
 
@@ -189,14 +189,36 @@ Design points:
 
 **Caveat:** only CPython 3.13 is installed in this environment, so 3.11 compatibility is established by ruff's `py311` parser, not by execution — note that `ast.parse(..., feature_version=(3, 11))` does **not** catch PEP 701 quote reuse (it accepts the 3.12 tokenizer), so ruff is the authority here. A CI matrix on 3.11 would settle it.
 
-### 7. Plaintext metadata + no file hardening / non-atomic writes
+### ✅ 7. No file hardening / non-atomic writes — FIXED (metadata privacy remains by design)
 
-[`save()`](../luks_tray/History.py#L205) writes `history.json` with the default umask (typically `0644`) and no atomic replace. Consequences:
+[`save()`](../luks_tray/History.py#L234) wrote `history.json` with the default umask (typically `0644`) and no atomic replace. Consequences:
 
-- Even without a master password it stores mount paths, UUIDs and backing-file paths in clear text (privacy metadata).
-- A crash mid-write corrupts history.
+- ~~A crash mid-write corrupts history.~~
+- Even without a master password it stores mount paths, UUIDs and backing-file paths in clear text (privacy metadata by design — see below).
 
-Should `chmod 0600` the file and write to a temp file then `os.replace()`.
+**Fix applied** — all writes now go through [`_write_atomic()`](../luks_tray/History.py#L206):
+
+```python
+dirname = os.path.dirname(os.path.abspath(self.path)) or '.'
+fd, tmp_path = tempfile.mkstemp(dir=dirname,
+        prefix=os.path.basename(self.path) + '.', suffix='.tmp')
+with os.fdopen(fd, 'wb' if binary else 'w', ...) as file:
+    file.write(data)
+    file.flush()
+    os.fsync(file.fileno())      # flush before the rename
+os.chmod(tmp_path, 0o600)        # mkstemp's default, made explicit
+os.replace(tmp_path, self.path)  # same-directory rename => atomic
+```
+
+plus a `finally` that removes the temp file if anything failed before the rename.
+
+- **Owner-only:** `mkstemp` creates the file `0600` and the explicit `chmod` keeps it that way through the rename, so a pre-existing world-readable `history.json` is tightened on the next save (the umask no longer matters).
+- **Atomic:** the temp file lives in the *same* directory, so `os.replace()` is a single rename — a crash or a short write leaves the previous (valid) file in place.
+- **Failure-safe:** a write error returns the usual `'failed saving history: ...'` string, deletes the temp file, and does not touch the real file.
+
+**Verified** (`HistoryClass` in a temp dir with `umask 0o022`): clear-text and encrypted saves both land at mode `0o600`; an existing `0644` file is tightened to `0600`; no `*.tmp` files remain after a successful or a failed save; a simulated exception inside `_encrypt_payload()` leaves the previous file **byte-identical** and returns an error string; saving into a non-existent directory returns an error string instead of raising; encrypted output still starts with `{{{ENCRYPTED}}}` + `v2:600000:` and restores; clear-text content and restore unchanged. The item-5 crypto harness still passes end to end.
+
+**Not changed (deliberate):** clear-text mode still stores UUIDs, mount points and backing-file paths in the JSON — that is the documented purpose of the file (it must be readable without a master password), so "privacy metadata" is a policy decision, not a bug: use a master password, or move the file, if that matters. The `~/.config/luks-tray` directory itself is still created with default (0755) permissions by [`IniTool`](../luks_tray/IniTool.py#L72) — tightening it to `0700` would also cover `config.ini` and `debug.log`, and is left as a separate decision.
 
 ### 8. Destructive cleanup driven by unvalidated config
 
