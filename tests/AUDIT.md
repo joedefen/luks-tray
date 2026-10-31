@@ -4,7 +4,7 @@
 
 **Method:** manual review, `python -m py_compile` (passes on 3.13), `ruff check` (64 findings), and contract tracing of `run_cmd`/`sudo_cmd`.
 
-**Progress:** 3 of 9 critical items fixed and re-verified — **#1** (env-var guard), **#2** (`run_cmd`/`sudo_cmd` contract) and **#3** (anomaly-case `cryptsetup close` crash). Items 4–9 are still open. Line links for #1/#2 were re-verified against the current tree; the later sections predate those edits and may drift by a few lines (the #3 fix added 12 lines at `main.py:1535`, so links into code below ~line 1567 are stale by +12).
+**Progress:** 4 of 9 critical items fixed and re-verified — **#1** (env-var guard), **#2** (`run_cmd`/`sudo_cmd` contract), **#3** (anomaly-case `cryptsetup close` crash) and **#4** (file containers not remembered). Items 5–9 are still open. Line links for #1–#4 were re-verified against the current tree; the later sections predate those edits and may drift (the #3 and #4 fixes added ~52 lines to `main.py`, so links into code below ~line 1567 are stale).
 
 **Overall:** A functional PyQt6 tray app with clean separation of concerns (device discovery, history, config, UI). However it has **multiple crash-level defects on normal code paths**, **a weak password-encryption scheme**, a **declared-vs-actual Python version mismatch**, and no tests. Not production-ready as-is.
 
@@ -97,13 +97,48 @@ if len(errs) <= 1:
 
 The normal device path is byte-for-byte the same command as before; the anomaly path now closes the mapping for file containers and, where no mapper name is derivable at all (partition container with no crypt child), reports an actionable error through the existing `alert_errors()` dialog and keeps the dialog open — same contract as every other failure branch.
 
-**Verified:** `unmount_device()` was driven directly (Qt offscreen, `sudo_cmd` stubbed) with four fake containers: (a) partition + `filesystems=[luks-1111-2222]` → `cryptsetup close luks-1111-2222`; (b) partition + `opened=True` + `filesystems=[]` (the anomaly) → **no exception**, no `cryptsetup` call, `ERR: cannot close sdb1: ...` alert, dialog not accepted; (c) `type='crypt'` (file container) + `filesystems=[]` → `cryptsetup close mycrypt`; (d) `filesystems=[<name=''>]` → **no exception**, same actionable alert. `py_compile` passes. Note: `main.py` grew 12 lines, so links below to code after line 1567 (`unmount_file`, `mount_file`, …) shift by +12.
+**Verified:** `unmount_device()` was driven directly (Qt offscreen, `sudo_cmd` stubbed) with four fake containers: (a) partition + `filesystems=[luks-1111-2222]` → `cryptsetup close luks-1111-2222`; (b) partition + `opened=True` + `filesystems=[]` (the anomaly) → **no exception**, no `cryptsetup` call, `ERR: cannot close sdb1: ...` alert, dialog not accepted; (c) `type='crypt'` (file container) + `filesystems=[]` → `cryptsetup close mycrypt`; (d) `filesystems=[<name=''>]` → **no exception**, same actionable alert. `py_compile` passes. Note: this fix added 12 lines at `main.py:1535`, so pre-existing links into code below that point (`unmount_file`, `mount_file`, …) are stale (the #4 fix shifted them further).
 
-### 4. New/added file containers are never remembered
+### ✅ 4. New/added file containers are never remembered — FIXED
 
-[`mount_file()`](../luks_tray/main.py#L1681) creates a container with `uuid=None`, mounts it, then calls [`update_history(uuid, ...)`](../luks_tray/main.py#L1790) with `uuid=None` → [`HistoryClass.get_vital(None)`](../luks_tray/History.py#L86) stores an entry under the `None` key and never records `back_file`.
+[`mount_file()`](../luks_tray/main.py#L1724) created a container with `uuid=None`, mounted it, then called `update_history(uuid, ...)` with `uuid=None` → [`HistoryClass.get_vital(None)`](../luks_tray/History.py#L86) stored an entry under the `None` key and never recorded `back_file`. After restart, file containers vanished from the menu and the JSON gained a `"null"` key.
 
-The helper intended for this — [`generate_uuid_for_file_path()`](../luks_tray/main.py#L74) — is **dead code** (never called). After restart, file containers vanish from the menu and the JSON gains a `"null"` key.
+The helper the audit originally pointed at — [`generate_uuid_for_file_path()`](../luks_tray/main.py#L74) — is **the wrong key** for this job: [`_json_data_to_namespaces()`](../luks_tray/History.py#L191) re-derives every `back_file`'s LUKS UUID with `blkid` on restore and **purges** the entry unless it equals the dict key, so a path-hash key would be culled on the very next load. The entry must be keyed by the LUKS UUID *inside* the file.
+
+**Fix applied** — three parts:
+
+1. New helper [`get_luks_uuid_for_file()`](../luks_tray/main.py#L84) (next to `generate_uuid_for_file_path`, which is no longer dead and is now only the last-resort fallback):
+
+```python
+rc, stdout, _stderr = run_cmd_capture(
+        ['blkid', '-o', 'value', '-s', 'UUID', file_path])
+return stdout.strip() if rc == 0 else ''
+```
+
+2. [`mount_file()`](../luks_tray/main.py#L1836) resolves the key after a successful mount and hands the backing file to the history:
+
+```python
+if not uuid:
+    uuid = (container.uuid or get_luks_uuid_for_file(back_file)
+            or generate_uuid_for_file_path(back_file))
+tray.update_history(uuid, values, back_file=back_file)
+```
+
+3. [`update_history()`](../luks_tray/main.py#L780) gained `back_file=None` (device containers, which omit it, keep an empty `back_file`), sets `vital.uuid`, and now writes `upon` **before** `put_vital()` instead of after, so the mount point is actually persisted on the first save. It also only saves when something changed (`dirty`), covering a `back_file`-only change.
+
+4. [`History.py:212`](../luks_tray/History.py#L212) drops legacy damage on load — keys `None`/`""`/`"None"`/`"null"` are skipped and the file flagged dirty, so an already-polluted `history.json` is rewritten without the `"null"` key.
+
+**Verified** (Qt offscreen, `run_cmd`/`sudo_cmd`/`blkid`/`mount_luks_container` stubbed, real `HistoryClass` on a temp file):
+
+- `get_luks_uuid_for_file()` → UUID for a LUKS file, `''` for an empty path, a missing file and a non-LUKS file (never raises).
+- `update_history(uuid, values, back_file=...)` → entry stored **under the LUKS UUID**, JSON contains `back_file` and `upon`, and keys are exactly `[<uuid>]` (no `"null"`); device containers still get `back_file == ''`; repeating an update adds no key.
+- `mount_file(uuid=None)` (new/added file) → `update_history` receives the real LUKS UUID and `back_file=/home/joe/Crypts/my.luks`, never `None`; `mount_luks_container` still gets the same `upon`/`luks_file`/`size`.
+- `mount_file(uuid=<known>)` (the "Mount Crypt File" layout, which has no `back_file` field) → keeps the container's UUID and `back_file`.
+- `restore()` on a hand-written legacy file with a `"null"` key → only the valid entry survives, `dirty` is set, and the re-saved JSON has no `"null"`.
+
+`py_compile` passes on both files; `ruff --select F,E9` still reports the same 8 pre-existing findings.
+
+**Side finding (not fixed here, belongs with item 7):** [`_namespaces_to_json_data()`](../luks_tray/History.py#L139) does `legit = vars(vital)` — the live `__dict__` — so the `legit['password'] = ''` clear-text zap also erases the in-memory password of every vital on each save (confirmed: `vitals[<uuid>].password == ''` after a clear-text save). The serialized output is correct, but the remembered password is lost in the running app (dialog prefill) and every subsequent update looks like a change. Fix is `legit = dict(vars(vital))` plus `entries[uuid] = legit`.
 
 ### 5. Weak master-password KDF
 

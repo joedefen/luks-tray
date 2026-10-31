@@ -209,6 +209,13 @@ class HistoryClass:
             self.status = 'locked'
             return False
         for uuid, entry in entries.items():
+            # Earlier versions wrote uuid-less updates under the JSON key
+            # "null" (uuid=None was passed to update_history). Such entries
+            # carry no usable identity or back_file -- drop them on load and
+            # rewrite the file.
+            if uuid is None or str(uuid).strip().lower() in ('', 'none', 'null'):
+                self.dirty = True
+                continue
             legit = vars(self.make_ns(uuid))
             for key in legit.keys():
                 if key in entry:

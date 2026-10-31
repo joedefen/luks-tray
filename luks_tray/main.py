@@ -81,6 +81,21 @@ def generate_uuid_for_file_path(file_path):
 
     return generated_uuid
 
+def get_luks_uuid_for_file(file_path):
+    """ Return the LUKS UUID *inside* a LUKS file ('' if it cannot be read).
+
+        History entries for file containers are keyed by this UUID -- the same
+        value lsblk reports for the loop device and the same value
+        HistoryClass re-checks with blkid on restore. A path-derived UUID
+        (generate_uuid_for_file_path) never matches, so such an entry is
+        silently purged the next time the history is loaded.
+    """
+    if not file_path:
+        return ''
+    rc, stdout, _stderr = run_cmd_capture(
+            ['blkid', '-o', 'value', '-s', 'UUID', file_path])
+    return stdout.strip() if rc == 0 else ''
+
 def sudo_cmd(args, errs=None, input_str=None):
     """ run sudo -n {args}; the -n will avoid prompting for a
         sudo password and fail if not allowed
@@ -762,18 +777,34 @@ class LuksTray():
         dialog = MasterPasswordDialog()
         dialog.exec()
 
-    def update_history(self, uuid, values):
-        """ TBD """
+    def update_history(self, uuid, values, back_file=None):
+        """ Record/refresh the history entry for a container.
+
+            `back_file` is only meaningful for LUKS *file* containers, and it
+            must be stored here: HistoryClass re-derives the LUKS UUID of every
+            back_file on restore and purges the entry when it does not match
+            the key. A file entry written without its back_file can therefore
+            never be found again after a restart.
+        """
         vital = self.history.get_vital(uuid)
+        if uuid:
+            vital.uuid = uuid
         mount_point = values['upon']
         if not hasattr(vital, 'when'):
             vital.when = 0
+        dirty = False
+        if back_file is not None and vital.back_file != back_file:
+            vital.back_file = back_file
+            dirty = True
         if (values['password'] != vital.password or mount_point != vital.upon
                 or time.time() - 24*3600 >= vital.when):
             vital.password = values['password']
+            dirty = True
+        if mount_point and mount_point != vital.upon:
+            vital.upon = mount_point   # set before saving, so it is persisted
+            dirty = True
+        if dirty:
             self.history.put_vital(vital)
-            if mount_point:
-                vital.upon = mount_point
 
     @staticmethod
     def get_auto_mount_root():
@@ -1799,7 +1830,16 @@ class MountFileDialog(CommonDialog):
             return
 
         # update history with new values if mount worked
-        tray.update_history(uuid, values)
+        #
+        # A new/added file still has uuid=None here. File entries are keyed by
+        # the LUKS UUID inside the file (see get_luks_uuid_for_file), so look
+        # it up now that the file exists; the path-derived UUID is a
+        # best-effort fallback only (such an entry is culled on the next
+        # restore if the real UUID cannot be verified).
+        if not uuid:
+            uuid = (container.uuid or get_luks_uuid_for_file(back_file)
+                    or generate_uuid_for_file_path(back_file))
+        tray.update_history(uuid, values, back_file=back_file)
 
         tray.update_menu()
         self.accept()
