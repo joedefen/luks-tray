@@ -4,7 +4,7 @@
 
 **Method:** manual review, `python -m py_compile` (passes on 3.13), `ruff check` (64 findings), and contract tracing of `run_cmd`/`sudo_cmd`.
 
-**Progress:** 4 of 9 critical items fixed and re-verified — **#1** (env-var guard), **#2** (`run_cmd`/`sudo_cmd` contract), **#3** (anomaly-case `cryptsetup close` crash) and **#4** (file containers not remembered). Items 5–9 are still open. Line links for #1–#4 were re-verified against the current tree; the later sections predate those edits and may drift (the #3 and #4 fixes added ~52 lines to `main.py`, so links into code below ~line 1567 are stale).
+**Progress:** 5 of 9 critical items fixed and re-verified — **#1** (env-var guard), **#2** (`run_cmd`/`sudo_cmd` contract), **#3** (anomaly-case `cryptsetup close` crash), **#4** (file containers not remembered) and **#5** (master-password KDF). Items 6–9 are still open (plus the High-severity table below). Line links for #1–#5 were re-verified against the current tree; the later sections predate those edits and may drift (the #3/#4 fixes added ~52 lines to `main.py` and the #5 fix ~8 lines to `History.py`, so links into other code are stale).
 
 **Overall:** A functional PyQt6 tray app with clean separation of concerns (device discovery, history, config, UI). However it has **multiple crash-level defects on normal code paths**, **a weak password-encryption scheme**, a **declared-vs-actual Python version mismatch**, and no tests. Not production-ready as-is.
 
@@ -101,9 +101,9 @@ The normal device path is byte-for-byte the same command as before; the anomaly 
 
 ### ✅ 4. New/added file containers are never remembered — FIXED
 
-[`mount_file()`](../luks_tray/main.py#L1724) created a container with `uuid=None`, mounted it, then called `update_history(uuid, ...)` with `uuid=None` → [`HistoryClass.get_vital(None)`](../luks_tray/History.py#L86) stored an entry under the `None` key and never recorded `back_file`. After restart, file containers vanished from the menu and the JSON gained a `"null"` key.
+[`mount_file()`](../luks_tray/main.py#L1724) created a container with `uuid=None`, mounted it, then called `update_history(uuid, ...)` with `uuid=None` → [`HistoryClass.get_vital(None)`](../luks_tray/History.py#L97) stored an entry under the `None` key and never recorded `back_file`. After restart, file containers vanished from the menu and the JSON gained a `"null"` key.
 
-The helper the audit originally pointed at — [`generate_uuid_for_file_path()`](../luks_tray/main.py#L74) — is **the wrong key** for this job: [`_json_data_to_namespaces()`](../luks_tray/History.py#L191) re-derives every `back_file`'s LUKS UUID with `blkid` on restore and **purges** the entry unless it equals the dict key, so a path-hash key would be culled on the very next load. The entry must be keyed by the LUKS UUID *inside* the file.
+The helper the audit originally pointed at — [`generate_uuid_for_file_path()`](../luks_tray/main.py#L74) — is **the wrong key** for this job: [`_json_data_to_namespaces()`](../luks_tray/History.py#L235) re-derives every `back_file`'s LUKS UUID with `blkid` on restore and **purges** the entry unless it equals the dict key, so a path-hash key would be culled on the very next load. The entry must be keyed by the LUKS UUID *inside* the file.
 
 **Fix applied** — three parts:
 
@@ -126,7 +126,7 @@ tray.update_history(uuid, values, back_file=back_file)
 
 3. [`update_history()`](../luks_tray/main.py#L780) gained `back_file=None` (device containers, which omit it, keep an empty `back_file`), sets `vital.uuid`, and now writes `upon` **before** `put_vital()` instead of after, so the mount point is actually persisted on the first save. It also only saves when something changed (`dirty`), covering a `back_file`-only change.
 
-4. [`History.py:212`](../luks_tray/History.py#L212) drops legacy damage on load — keys `None`/`""`/`"None"`/`"null"` are skipped and the file flagged dirty, so an already-polluted `history.json` is rewritten without the `"null"` key.
+4. [`History.py:256`](../luks_tray/History.py#L256) drops legacy damage on load — keys `None`/`""`/`"None"`/`"null"` are skipped and the file flagged dirty, so an already-polluted `history.json` is rewritten without the `"null"` key.
 
 **Verified** (Qt offscreen, `run_cmd`/`sudo_cmd`/`blkid`/`mount_luks_container` stubbed, real `HistoryClass` on a temp file):
 
@@ -138,17 +138,39 @@ tray.update_history(uuid, values, back_file=back_file)
 
 `py_compile` passes on both files; `ruff --select F,E9` still reports the same 8 pre-existing findings.
 
-**Side finding (not fixed here, belongs with item 7):** [`_namespaces_to_json_data()`](../luks_tray/History.py#L139) does `legit = vars(vital)` — the live `__dict__` — so the `legit['password'] = ''` clear-text zap also erases the in-memory password of every vital on each save (confirmed: `vitals[<uuid>].password == ''` after a clear-text save). The serialized output is correct, but the remembered password is lost in the running app (dialog prefill) and every subsequent update looks like a change. Fix is `legit = dict(vars(vital))` plus `entries[uuid] = legit`.
+**Side finding (already tracked as critical item 9, deliberately left unfixed here):** [`_namespaces_to_json_data()`](../luks_tray/History.py#L150) does `legit = vars(vital)` — the live `__dict__` — so the `legit['password'] = ''` clear-text zap also erases the in-memory password of every vital on each save (confirmed: `vitals[<uuid>].password == ''` after a clear-text save). The serialized output is correct, but the remembered password is lost in the running app (dialog prefill) and every subsequent update looks like a change. Fix is `legit = dict(vars(vital))` plus `entries[uuid] = legit`.
 
-### 5. Weak master-password KDF
+### ✅ 5. Weak master-password KDF — FIXED
 
-[`_password_to_fernet_key()`](../luks_tray/History.py#L149) uses a **single unsalted SHA-256** of the password as the Fernet key:
+[`_password_to_fernet_key()`](../luks_tray/History.py#L160) used a **single unsalted SHA-256** of the password as the Fernet key:
 
 ```python
 key = hashlib.sha256(self.master_password.encode()).digest()
 ```
 
-No salt, no iteration count, no memory hardness → trivially brute-forceable offline if `history.json` is obtained. Use `PBKDF2HMAC` (≥600k iterations) or Argon2id with a random per-file salt.
+No salt, no iteration count, no memory hardness → trivially brute-forceable offline if `history.json` is obtained.
+
+**Fix applied** — PBKDF2-HMAC-SHA256, 600 000 rounds, fresh 16-byte random salt per save ([`History.py:33`](../luks_tray/History.py#L33), [`_password_to_fernet_key()`](../luks_tray/History.py#L160), [`_encrypt_payload()`](../luks_tray/History.py#L178), [`_decrypt_payload()`](../luks_tray/History.py#L189)):
+
+```python
+ENCRYPTED_VERSION = 2
+KDF_ITERATIONS = 600_000      # OWASP-style floor for PBKDF2-HMAC-SHA256
+KDF_SALT_BYTES = 16
+...
+salt = os.urandom(self.KDF_SALT_BYTES)
+cipher = Fernet(self._password_to_fernet_key(salt))
+header = f'v{self.ENCRYPTED_VERSION}:{self.KDF_ITERATIONS}:'.encode()
+return header + salt + cipher.encrypt(json_data)
+```
+
+Design points:
+
+- **The file header is unchanged** (`{{{ENCRYPTED}}}`); the salt and iteration count are carried in the payload as `b'v2:600000:' + salt + token`. Existing files still look encrypted to every reader, and the parameters can be raised later without a format break.
+- **Backward compatible reads:** a payload without the `v2:` prefix is still decrypted with the legacy unsalted SHA-256 key, then `restore()` sets `dirty` so the next `save()` rewrites the file with PBKDF2 ([`History.py:324`](../luks_tray/History.py#L324)). Users are migrated silently on first unlock.
+- **Downgrade-safe:** because the marker lives *inside* the header, an older luks-tray opening a v2 file fails authentication and reports `status='locked'` instead of falling through to the clear-text path, where a non-JSON file is treated as corrupt and **re-initialised** (i.e. wiped). Verified: the legacy key raises `InvalidToken` on a v2 payload.
+- Salted and unsalted derivations both produce 32 bytes, so `Fernet` is unchanged; no new dependency.
+
+**Verified** (`HistoryClass` on a temp file): v2 round-trip (save → bytes start with header + `v2:600000:` + 16-byte salt, no plaintext password in the file, restore unlocks with all fields intact, `dirty` stays `False`); salted key byte-identical to `pbkdf2_hmac('sha256', pw, salt, 600_000)` and different from the legacy key; wrong password → `locked`, file bytes untouched; no master password → `locked`, file untouched; legacy SHA-256 file → unlocks, data intact, `dirty=True`, next `save()` produces a v2 file that re-unlocks; three consecutive saves use three distinct salts; clear-text path unchanged. Cost measured on this machine: **115 ms** per 600k-round derivation (only on save/restore). `py_compile` passes; `ruff --select F,E9 luks_tray/History.py` → *All checks passed*.
 
 ### 6. Declared Python support is wrong (install/run breaks on 3.8–3.11)
 
@@ -161,7 +183,7 @@ The effective floor is **3.12**.
 
 ### 7. Plaintext metadata + no file hardening / non-atomic writes
 
-[`save()`](../luks_tray/History.py#L157) writes `history.json` with the default umask (typically `0644`) and no atomic replace. Consequences:
+[`save()`](../luks_tray/History.py#L205) writes `history.json` with the default umask (typically `0644`) and no atomic replace. Consequences:
 
 - Even without a master password it stores mount paths, UUIDs and backing-file paths in clear text (privacy metadata).
 - A crash mid-write corrupts history.
@@ -174,7 +196,7 @@ Should `chmod 0600` the file and write to a temp file then `os.replace()`.
 
 ### 9. In-memory password wiped as a side effect
 
-[`_namespaces_to_json_data()`](../luks_tray/History.py#L139):
+[`_namespaces_to_json_data()`](../luks_tray/History.py#L150):
 
 ```python
 legit = vars(vital)          # alias to vital.__dict__
@@ -191,7 +213,7 @@ The `legit` variable is redundant and the mutation zeroes the live password, aff
 | # | Location | Issue |
 |---|----------|-------|
 | 1 | [`browse_folder()`](../luks_tray/main.py#L1086) | `self.home_dir()` calls a **string** (`home_dir` is a `str` set by [`get_real_user_home_directory()`](../luks_tray/main.py#L1074)) → `TypeError` when the mount field is cleared. |
-| 2 | [`update_history()`](../luks_tray/main.py#L765) | Sets `vital.upon` **after** `put_vital()` (which saves), so a new mount point is not persisted on that save. Move the assignment before `put_vital`. |
+| 2 | ✅ [`update_history()`](../luks_tray/main.py#L780) | ~~Sets `vital.upon` **after** `put_vital()` (which saves), so a new mount point is not persisted on that save.~~ **Fixed with critical item 4** — `upon` and `back_file` are now written before the single `put_vital()`. |
 | 3 | [`check_upon()` callers](../luks_tray/main.py#L1482) | `mount_points = tray.update_mounts()` returns the **device key set** ([main.py:509](../luks_tray/main.py#L509)), not mount points, yet [`check_upon`](../luks_tray/main.py#L1186) treats it as mount points (`text in mount_points`). Duplicate-mount detection is broken; pass `tray.upons`. |
 | 4 | [`add_input_field()`](../luks_tray/main.py#L995) | With a scalar label and multiple `keys`, it does `placeholder_texts.append(text_str)` while `placeholder_texts` may still be a `str` → `AttributeError`. Normalize both to lists first. |
 | 5 | [`mount_luks_container()`](../luks_tray/main.py#L1273) | `luksFormat` runs **without `sudo`** (unlike everything else) and uses `check=True`, so the `if sub.returncode != 0` branch is unreachable and real stderr is swallowed by the outer `except` → generic "An error occurred". Convert to [`sudo_run()`](../luks_tray/main.py#L114) (see #2). |

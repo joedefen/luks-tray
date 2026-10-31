@@ -22,6 +22,17 @@ class HistoryClass:
     using a master password.
     """
     ENCRYPTED_HEADER = b'{{{ENCRYPTED}}}'
+    # What follows the header is self-describing:
+    #     b'v2:<iterations>:' + <salt> + <Fernet token>
+    # Files written by older versions carry a bare Fernet token keyed by an
+    # unsalted single SHA-256 of the password; those are still readable, and
+    # they are re-written in the v2 format on the next save. The salt lives
+    # *inside* the existing header, so an older luks-tray opening a v2 file
+    # fails to decrypt and reports "locked" instead of treating the file as
+    # corrupt and re-initialising it.
+    ENCRYPTED_VERSION = 2
+    KDF_ITERATIONS = 600_000  # OWASP-style floor for PBKDF2-HMAC-SHA256
+    KDF_SALT_BYTES = 16
 
     def __init__(self, path, master_password=''):
         self.status = None # 'clear_text', 'unlocked', 'locked'
@@ -146,13 +157,50 @@ class HistoryClass:
             entries[uuid] = vars(vital)
         return entries
 
-    def _password_to_fernet_key(self) -> bytes:
-        """Derive a Fernet-compatible key directly from a password using SHA256."""
-        # Hash the password to create a 32-byte key
-        key = hashlib.sha256(self.master_password.encode()).digest()
+    def _password_to_fernet_key(self, salt=None, iterations=None) -> bytes:
+        """Derive a Fernet-compatible key from the master password.
+
+            With `salt`, PBKDF2-HMAC-SHA256 (>= KDF_ITERATIONS rounds) is used
+            -- that is what every new/updated file gets. Without one the legacy
+            derivation is reproduced (a single unsalted SHA-256 of the
+            password), which exists only so older encrypted files stay
+            readable.
+        """
+        password = self.master_password.encode()
+        if salt is None:
+            key = hashlib.sha256(password).digest()
+        else:
+            key = hashlib.pbkdf2_hmac('sha256', password, salt,
+                    iterations or self.KDF_ITERATIONS)
         # Base64 encode the key to make it suitable for Fernet
-        fernet_key = base64.urlsafe_b64encode(key)
-        return fernet_key
+        return base64.urlsafe_b64encode(key)
+
+    def _encrypt_payload(self, json_data):
+        """Encrypt `json_data` with a fresh random salt.
+
+            Salt and iteration count travel with the payload, so the work
+            factor can be raised later without breaking existing files.
+        """
+        salt = os.urandom(self.KDF_SALT_BYTES)
+        cipher = Fernet(self._password_to_fernet_key(salt))
+        header = f'v{self.ENCRYPTED_VERSION}:{self.KDF_ITERATIONS}:'.encode()
+        return header + salt + cipher.encrypt(json_data)
+
+    def _decrypt_payload(self, payload):
+        """Decrypt an encrypted payload.
+
+            Returns (json_str, used_legacy_kdf) so callers can schedule a
+            rewrite of legacy files.
+        """
+        if payload.startswith(f'v{self.ENCRYPTED_VERSION}:'.encode()):
+            _version, iterations, rest = payload.split(b':', 2)
+            salt = rest[:self.KDF_SALT_BYTES]
+            token = rest[self.KDF_SALT_BYTES:]
+            cipher = Fernet(self._password_to_fernet_key(salt, int(iterations)))
+            return cipher.decrypt(token).decode('utf-8'), False
+        # Legacy: bare Fernet token keyed by the unsalted SHA-256 derivation
+        cipher = Fernet(self._password_to_fernet_key())
+        return cipher.decrypt(payload).decode('utf-8'), True
 
     def save(self, force=False):
         """
@@ -164,15 +212,11 @@ class HistoryClass:
         try:
             entries = self._namespaces_to_json_data()
             if self.master_password:
-                # Save Encrypted with Header
-                cipher = Fernet(self._password_to_fernet_key())
+                # Save Encrypted with Header + salted PBKDF2 payload
                 json_data = json.dumps(entries).encode('utf-8')
-                encrypted_data = cipher.encrypt(json_data)
-
-                # Write header and encrypted data
                 with open(self.path, 'wb') as file:
                     file.write(self.ENCRYPTED_HEADER)
-                    file.write(encrypted_data)
+                    file.write(self._encrypt_payload(json_data))
             else:
                 # Save Clear-Text
                 with open(self.path, 'w', encoding='utf-8') as file:
@@ -277,13 +321,15 @@ class HistoryClass:
 
             # Try to decrypt
             try:
-                cipher = Fernet(self._password_to_fernet_key())
-                decrypted_str = cipher.decrypt(encrypted_data).decode('utf-8')
+                decrypted_str, used_legacy_kdf = self._decrypt_payload(encrypted_data)
                 decrypted_data = json.loads(decrypted_str)
                 self._json_data_to_namespaces(decrypted_data)
 
                 # State 3: Successfully Decrypted (unlocked)
                 self.status = 'unlocked'
+                if used_legacy_kdf:
+                    # upgrade to the salted PBKDF2 format on the next save
+                    self.dirty = True
                 return True
             except Exception:
                 # Decryption failed (wrong password or corrupt encrypted data)
