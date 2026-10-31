@@ -1534,10 +1534,9 @@ class MountDeviceDialog(CommonDialog):
 
         if container:
             unmounteds = []
-            filesystem = ''
-            for fs in container.filesystems:
-                if not filesystem:
-                    filesystem = fs
+            filesystems = [fs for fs in container.filesystems
+                           if getattr(fs, 'name', '')]
+            for fs in filesystems:
                 for mount in fs.mounts:
                     ### self.kill_bindfs_on_mount(mount)
                     if tray.is_mounted(mount):
@@ -1547,8 +1546,21 @@ class MountDeviceDialog(CommonDialog):
                         else:
                             unmounteds.append(mount)
 
+            # cryptsetup close takes the *mapper* name, which lives in the
+            # child filesystem entries. An opened container may legitimately
+            # have none -- the '‼' open-but-unmounted anomaly -- so fall back
+            # to the container's own name (file containers are their own
+            # mapper) and, failing that, report a usable error.
+            close_name = filesystems[0].name if filesystems else ''
+            if not close_name and container.type == 'crypt':
+                close_name = container.name
             if len(errs) <= 1:
-                sudo_cmd(["cryptsetup", "close", filesystem.name], errs)
+                if close_name:
+                    sudo_cmd(["cryptsetup", "close", close_name], errs)
+                else:
+                    errs.append(
+                        f'ERR: cannot close {container.name}: no mapper '
+                        f'device name known (no filesystem detected)')
             if len(errs) <= 1:
                 for mount in unmounteds:
                     LuksTray.remove_if_auto(mount)
