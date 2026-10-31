@@ -4,7 +4,7 @@
 
 **Method:** manual review, `python -m py_compile` (passes on 3.13), `ruff check` (64 findings), and contract tracing of `run_cmd`/`sudo_cmd`.
 
-**Progress:** 5 of 9 critical items fixed and re-verified — **#1** (env-var guard), **#2** (`run_cmd`/`sudo_cmd` contract), **#3** (anomaly-case `cryptsetup close` crash), **#4** (file containers not remembered) and **#5** (master-password KDF). Items 6–9 are still open (plus the High-severity table below). Line links for #1–#5 were re-verified against the current tree; the later sections predate those edits and may drift (the #3/#4 fixes added ~52 lines to `main.py` and the #5 fix ~8 lines to `History.py`, so links into other code are stale).
+**Progress:** 6 of 9 critical items fixed and re-verified — **#1** (env-var guard), **#2** (`run_cmd`/`sudo_cmd` contract), **#3** (anomaly-case `cryptsetup close` crash), **#4** (file containers not remembered), **#5** (master-password KDF) and **#6** (declared Python floor, now 3.11). Items 7–9 are still open (plus the High-severity table below). Line links for #1–#6 were re-verified against the current tree; the later sections predate those edits and may drift (the #3/#4/#6 fixes added ~55 lines to `main.py` and the #5 fix ~8 lines to `History.py`, so links into other code are stale).
 
 **Overall:** A functional PyQt6 tray app with clean separation of concerns (device discovery, history, config, UI). However it has **multiple crash-level defects on normal code paths**, **a weak password-encryption scheme**, a **declared-vs-actual Python version mismatch**, and no tests. Not production-ready as-is.
 
@@ -172,14 +172,22 @@ Design points:
 
 **Verified** (`HistoryClass` on a temp file): v2 round-trip (save → bytes start with header + `v2:600000:` + 16-byte salt, no plaintext password in the file, restore unlocks with all fields intact, `dirty` stays `False`); salted key byte-identical to `pbkdf2_hmac('sha256', pw, salt, 600_000)` and different from the legacy key; wrong password → `locked`, file bytes untouched; no master password → `locked`, file untouched; legacy SHA-256 file → unlocks, data intact, `dirty=True`, next `save()` produces a v2 file that re-unlocks; three consecutive saves use three distinct salts; clear-text path unchanged. Cost measured on this machine: **115 ms** per 600k-round derivation (only on save/restore). `py_compile` passes; `ruff --select F,E9 luks_tray/History.py` → *All checks passed*.
 
-### 6. Declared Python support is wrong (install/run breaks on 3.8–3.11)
+### ✅ 6. Declared Python support was wrong (install/run broke on 3.8–3.11) — FIXED, floor is now 3.11
 
-[`pyproject.toml`](../pyproject.toml#L14) says `requires-python = ">=3.8"`, but:
+[`pyproject.toml`](../pyproject.toml#L14) claimed `requires-python = ">=3.8"`, but:
 
-- [main.py:101](../luks_tray/main.py#L101) and [main.py:1318](../luks_tray/main.py#L1318) use **PEP 701** quote reuse in f-strings (`f'... {' '.join(args)} ...'`) — parser error **before Python 3.12** (ruff flags `invalid-syntax`).
-- [main.py:120](../luks_tray/main.py#L120) uses PEP 604 `str | None` without `from __future__ import annotations` → import-time `TypeError` on <3.10.
+- [main.py:116](../luks_tray/main.py#L118) and [main.py:1318](../luks_tray/main.py#L1351) used **PEP 701** quote reuse in f-strings (`f'FAIL: {' '.join(args)} ...'`) — a parser error **before Python 3.12** (ruff `invalid-syntax`).
+- [main.py:120](../luks_tray/main.py#L137) uses PEP 604 `str | None` without `from __future__ import annotations` → import-time `TypeError` on <3.10.
 
-The effective floor is **3.12**.
+**Fix applied:**
+
+- Both f-strings now use an outer double quote — `f"FAIL: {' '.join(args)}: {stdout} {stderr} [rc={rc}]"` ([main.py:118](../luks_tray/main.py#L118), [main.py:1351](../luks_tray/main.py#L1351)) — which every supported interpreter parses; a short comment at the first site records why the quote characters must differ.
+- PEP 604 annotations need Python ≥3.10, so with the floor at 3.11 nothing has to change: [`run_unmount(..., busy_warns: set) -> str | None`](../luks_tray/main.py#L137) stays as-is and no `__future__` import is needed.
+- [`pyproject.toml`](../pyproject.toml#L14) now declares `requires-python = ">=3.11"` and lists 3.11/3.12/3.13 classifiers.
+
+**Verified:** `ruff --target-version py311 --select F,E9 luks_tray runner.py` → **0** `invalid-syntax` findings (was 2); the 6 remaining findings are pre-existing `F401` unused imports (`shlex`, `tempfile`, `pathlib.Path`, `io.StringIO`, `QSizePolicy`, `QFontDatabase`). A sweep for other 3.12-only APIs (`itertools.batched`, `typing.override`, `sys.monitoring`, `Path.walk`, PEP 695 `type` aliases/generics) found none. `py_compile` passes for every module on 3.13.
+
+**Caveat:** only CPython 3.13 is installed in this environment, so 3.11 compatibility is established by ruff's `py311` parser, not by execution — note that `ast.parse(..., feature_version=(3, 11))` does **not** catch PEP 701 quote reuse (it accepts the 3.12 tokenizer), so ruff is the authority here. A CI matrix on 3.11 would settle it.
 
 ### 7. Plaintext metadata + no file hardening / non-atomic writes
 
@@ -269,7 +277,7 @@ The `legit` variable is redundant and the mutation zeroes the live password, aff
 1. **Startup + crash fixes:** ✅ env-var guard (#1), ✅ stdout-returning command helper + `_setup_loop_device` (#2), ⬜ `filesystem.name` guard (#3).
 2. **Correct history identity:** use `generate_uuid_for_file_path`/back-file key for new files and persist `back_file` (#4).
 3. **Crypto hardening:** PBKDF2/Argon2 with salt, `0600`, atomic write (#5, #7).
-4. **Packaging:** bump `requires-python` to `>=3.12` (or rewrite the two f-strings + annotations) (#6).
+4. ✅ **Packaging:** `requires-python` is now `>=3.11` and the two PEP 701 f-strings were rewritten (#6).
 5. **Safety:** validate `auto_mount_folder` before sudo `rmdir` (#8); scope the documented sudoers rule.
 6. **High-list correctness items** (`browse_folder`, `check_upon` mount set, `update_history` ordering, `add_input_field`, `luksFormat` sudo, asserts).
 7. **Refactor/perf:** worker thread + cached `blkid`, split `main.py`, add tests + a scoped ruff config.

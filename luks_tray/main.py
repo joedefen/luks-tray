@@ -113,7 +113,9 @@ def run_cmd(args, errs=None, input_str=None):
     rc, stdout, stderr = run_cmd_capture(args, input_str)
     if rc == 0:
         return None
-    err = f'FAIL: {' '.join(args)}: {stdout} {stderr} [rc={rc}]'
+    # NB: keep the outer quote different from the one used inside the
+    # expression -- quote reuse is PEP 701 / Python 3.12+ only.
+    err = f"FAIL: {' '.join(args)}: {stdout} {stderr} [rc={rc}]"
     # NOTE: test against None, not truthiness -- callers routinely pass a
     # freshly created [] to collect errors and an empty list is falsy.
     if errs is not None:
@@ -1346,7 +1348,7 @@ class CommonDialog(QDialog):
                         sub = subprocess.run(args, input=f'{password}',
                              check=True, capture_output=True, text=True)
                         if sub.returncode != 0:
-                            err = f'FAIL: {' '.join(args)}: {sub.stdout} {sub.stderr} [rc={sub.returncode}]'
+                            err = f"FAIL: {' '.join(args)}: {sub.stdout} {sub.stderr} [rc={sub.returncode}]"
                     needs_filesystem = True
             else:
                 # Handle device container setup
