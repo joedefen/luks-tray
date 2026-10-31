@@ -1730,7 +1730,10 @@ class MountDeviceDialog(CommonDialog):
             errs.append(f'ERR: container w UUID={uuid} not found')
             return
 
-        errs.append(f'{container.name}')
+        # `errs` holds *errors only*. The container name used to be pushed in
+        # as a placeholder so callers could test `len(errs) <= 1`; that made
+        # the first element magic and the emptiness test off by one. The
+        # context line is now added only where the dialog is built.
         tray.update_mounts()
 
         # Parse and validate inputs
@@ -1762,9 +1765,8 @@ class MountDeviceDialog(CommonDialog):
         else:
             luks_device = f'{container.name}-luks'
 
-
         # Proceed with mounting if no errors
-        if len(errs) <= 1:
+        if not errs:
             mount_point = values['upon']
             if mount_point and not os.path.exists(mount_point):
                 # os.makedirs(mount_point, exist_ok=True)
@@ -1779,8 +1781,8 @@ class MountDeviceDialog(CommonDialog):
             if err:
                 errs.append(err)
 
-        if len(errs) > 1:
-            self.alert_errors(errs)
+        if errs:
+            self.alert_errors([f'{container.name}'] + errs)
             return
 
         tray.update_history(uuid, values)
@@ -1794,7 +1796,6 @@ class MountDeviceDialog(CommonDialog):
         errs, container = [], None
         tray = LuksTray.singleton
         container = tray.containers.get(uuid, None)
-        errs.append(f'{container.name}')
 
         # Show progress - disable buttons and add progress indicator
         self.show_progress("Unmount/Close device...")
@@ -1824,23 +1825,27 @@ class MountDeviceDialog(CommonDialog):
             close_name = filesystems[0].name if filesystems else ''
             if not close_name and container.type == 'crypt':
                 close_name = container.name
-            if len(errs) <= 1:
+            if not errs:
                 if close_name:
                     sudo_cmd(["cryptsetup", "close", close_name], errs)
                 else:
                     errs.append(
                         f'ERR: cannot close {container.name}: no mapper '
                         f'device name known (no filesystem detected)')
-            if len(errs) <= 1:
+            if not errs:
                 for mount in unmounteds:
                     LuksTray.remove_if_auto(mount)
+        else:
+            errs.append(f'ERR: container w UUID={uuid} not found')
 
         # Hide progress indicator
         self.hide_progress()
 
-        if len(errs) > 1:
+        if errs:
             if not busy_warns:
-                self.alert_errors(errs)
+                # Name the container first, as the old placeholder element did.
+                heading = [f'{container.name}'] if container else []
+                self.alert_errors(heading + errs)
             return # don't close dialog box
 
         tray.update_menu()
@@ -1975,10 +1980,11 @@ class MountFileDialog(CommonDialog):
             if not container:
                 errs.append(f'ERR: container w UUID={uuid} not found')
                 return
-        if not container.name and container.back_file:
-            errs.append(f'{container.back_file}')
-        else:
-            errs.append(f'{container.name}')
+        # Label for the error dialog; kept out of `errs` so that list contains
+        # errors only (the `if not errs` / `if errs` tests below stay honest).
+        context = (container.back_file
+                   if (not container.name and container.back_file)
+                   else container.name)
 
         tray.update_mounts()
         mount_point = None
@@ -2039,7 +2045,7 @@ class MountFileDialog(CommonDialog):
             else:
                 errs.append(f'ERR: unknown key({key})')
 
-        if len(errs) <= 1:
+        if not errs:
             if container.back_file:
                 back_file = container.back_file
             else:
@@ -2050,7 +2056,7 @@ class MountFileDialog(CommonDialog):
                 if os.path.exists(back_file) and not overwrite_ok:
                     errs.append(f'cannot overwrite {back_file!r} w/o checking allowed')
 
-        if len(errs) <= 1:
+        if not errs:
             self.show_progress('Mount file...')
             if mount_point and not os.path.exists(mount_point):
                 # os.makedirs(mount_point, exist_ok=True)
@@ -2063,8 +2069,8 @@ class MountFileDialog(CommonDialog):
 
             if err:
                 errs.append(err)
-        if len(errs) > 1:
-            self.alert_errors(errs)
+        if errs:
+            self.alert_errors([f'{context}'] + errs)
             # self.accept()
             return
 
