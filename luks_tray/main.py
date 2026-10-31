@@ -62,7 +62,9 @@ def requires_manual_title():
     # If using Xwayland under a tiling WM, XDG_CURRENT_DESKTOP might be helpful
     params = ['XDG_CURRENT_DESKTOP', 'DESKTOP_SESSION']
     for param in params:
-        if 'sway' in os.environ.get(param).lower():
+        # .get() returns None when unset (headless, cron, some autostart
+        # contexts), so coerce to '' before calling .lower().
+        if 'sway' in (os.environ.get(param) or '').lower():
             return True
     return False
 
