@@ -1492,8 +1492,12 @@ class CommonDialog(QDialog):
     ####################################################
     def _unlock_luks(self, device_path, password, luks_device, readonly=False):
         """Common LUKS unlock logic"""
-        if hasattr(self, 'opened') and self.opened:
-            return None  # Already unlocked
+        # No "already unlocked?" short-circuit here on purpose. It used to be
+        # `if hasattr(self, 'opened') and self.opened`, but `self` is the
+        # dialog, which never defines `opened`, so the test never fired.
+        # Making it live (e.g. "the mapper path exists") would skip the
+        # password check and mount a volume somebody else has open, so a
+        # repeat `cryptsetup open` is left to fail with its own message.
         args = ['cryptsetup', 'open', '--type', 'luks']
         if readonly:
             args.append('--readonly')
@@ -1514,8 +1518,9 @@ class CommonDialog(QDialog):
 
     def _setup_loop_device(self, container):
         """Set up loop device for file-based containers"""
-        if hasattr(self, 'opened') and self.opened:
-            return None, f'/dev/{container.name}'
+        # The same dead `hasattr(self, 'opened')` test lived here: `self` is
+        # the dialog, so it never fired -- and it tested the wrong object
+        # anyway, since the loop state ends up on `container.name` below.
 
         # Use --show to get the loop device name; we need its stdout, so call
         # subprocess directly instead of sudo_cmd() (which only reports errors).
