@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import hashlib
 import base64
 from cryptography.fernet import Fernet
-from luks_tray.Utils import prt
+from luks_tray.Utils import prt, PROBE_TIMEOUT
 
 class HistoryClass:
     """
@@ -275,12 +275,20 @@ class HistoryClass:
         """
         def get_luks_uuid(path):
             try:
-                # Run blkid on the file and capture the output
+                # Run blkid on the file and capture the output. The deadline
+                # matters here because this runs once per history entry while
+                # loading: a back_file on hung media would otherwise stall
+                # startup for as long as the mount is wedged.
                 result = subprocess.run(['blkid', '-o', 'value', '-s', 'UUID', path],
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                        text=True, check=True)
+                        text=True, check=True, timeout=PROBE_TIMEOUT)
                 return result.stdout.strip()  # Return the UUID as a string
             except subprocess.CalledProcessError:
+                return ''
+            except subprocess.TimeoutExpired:
+                # Same outcome as a failing blkid: treat the UUID as unknown,
+                # which makes the caller purge the unverifiable entry.
+                prt(f'blkid timed out after {PROBE_TIMEOUT}s: {path}')
                 return ''
 
         self.vitals = {}

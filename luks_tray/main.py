@@ -53,7 +53,7 @@ from PyQt6.QtCore import QTimer, Qt
     # from PyQt6.QtCore import Qt
 
 from luks_tray.History import HistoryClass
-from luks_tray.Utils import prt
+from luks_tray.Utils import prt, CMD_TIMEOUT, PROBE_TIMEOUT, FORMAT_TIMEOUT, TIMEOUT_RC
 from luks_tray import Utils
 from luks_tray.IniTool import IniTool
 
@@ -97,21 +97,24 @@ def get_luks_uuid_for_file(file_path):
             ['blkid', '-o', 'value', '-s', 'UUID', file_path])
     return stdout.strip() if rc == 0 else ''
 
-def sudo_cmd(args, errs=None, input_str=None):
+def sudo_cmd(args, errs=None, input_str=None, timeout=None):
     """ run sudo -n {args}; the -n will avoid prompting for a
         sudo password and fail if not allowed
     """
     args = ['sudo', '-n'] + args
-    return run_cmd(args, errs, input_str)
+    return run_cmd(args, errs, input_str, timeout)
 
-def run_cmd(args, errs=None, input_str=None):
+def run_cmd(args, errs=None, input_str=None, timeout=None):
     """ Run args and return None on success, or a 'FAIL: ...' string on failure.
 
         stdout is deliberately NOT returned here -- this helper is a
         success/failure predicate. Use run_cmd_capture() when you need the
         child's output.
+
+        `timeout` is forwarded to run_cmd_capture() (default CMD_TIMEOUT);
+        pass FORMAT_TIMEOUT for the slow, one-shot setup commands.
     """
-    rc, stdout, stderr = run_cmd_capture(args, input_str)
+    rc, stdout, stderr = run_cmd_capture(args, input_str, timeout)
     if rc == 0:
         return None
     # NB: keep the outer quote different from the one used inside the
@@ -123,15 +126,43 @@ def run_cmd(args, errs=None, input_str=None):
         errs.append(err)
     return err
 
-def run_cmd_capture(args, input_str=None):
-    """ Run args via subprocess.run(); return (returncode, stdout, stderr). """
-    sub = subprocess.run(args, input=input_str, capture_output=True,
-                         text=True, check=False)
-    return sub.returncode, sub.stdout, sub.stderr
+def _as_text(value):
+    """ Coerce TimeoutExpired.stdout/.stderr to str.
 
-def sudo_run(args, input_str=None):
+        Depending on the Python version those attributes hold None, raw bytes
+        (the child was killed mid-write) or already-decoded text.
+    """
+    if value is None:
+        return ''
+    if isinstance(value, bytes):
+        return value.decode(errors='replace')
+    return value
+
+def run_cmd_capture(args, input_str=None, timeout=None):
+    """ Run args via subprocess.run(); return (returncode, stdout, stderr).
+
+        `timeout` defaults to CMD_TIMEOUT. A child that overruns the deadline
+        is killed (subprocess.run() does that for us) and reported through
+        TIMEOUT_RC, so callers need no extra branch: run_cmd()/sudo_cmd()
+        just render it as their usual 'FAIL: ...' string. Without this, a
+        hung cryptsetup/mount blocked the Qt main thread forever and the tray
+        had no terminal left (stdin is /dev/null) to interrupt it.
+    """
+    if timeout is None:
+        timeout = CMD_TIMEOUT
+    try:
+        sub = subprocess.run(args, input=input_str, capture_output=True,
+                             text=True, check=False, timeout=timeout)
+        return sub.returncode, sub.stdout, sub.stderr
+    except subprocess.TimeoutExpired as exce:
+        # sudo execs the real command in the same process, so the kill lands
+        # on cryptsetup/mount itself rather than on a wrapper.
+        return TIMEOUT_RC, _as_text(exce.stdout), (
+            f'{_as_text(exce.stderr)}timed out after {timeout}s')
+
+def sudo_run(args, input_str=None, timeout=None):
     """ Like run_cmd_capture(), but with sudo -n (never prompts). """
-    return run_cmd_capture(['sudo', '-n'] + args, input_str)
+    return run_cmd_capture(['sudo', '-n'] + args, input_str, timeout)
 
 
 
@@ -142,7 +173,10 @@ def run_unmount(mount_point: str, busy_warns: set) -> str | None:
     """
     try:
         sub = subprocess.run(['sudo', "umount", mount_point],
-                    capture_output=True, text=True, check=False)
+                    capture_output=True, text=True, check=False,
+                    timeout=CMD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return f'FAIL: umount {mount_point}: timed out after {CMD_TIMEOUT}s'
     except Exception as e:
         return f"FAIL: umount {mount_point}: Exception: {e}"
 
@@ -161,7 +195,8 @@ def run_unmount(mount_point: str, busy_warns: set) -> str | None:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                check=True
+                check=True,
+                timeout=PROBE_TIMEOUT
             )
         fuser_out = fuser.stderr.strip()  # This is the real data
 
@@ -291,9 +326,18 @@ class DeviceInfo:
             return entry
 
                # Run the `lsblk` command and get its output in JSON format with additional columns
-        result = subprocess.run(['lsblk', '-J', '-o',
-                    'NAME,MAJ:MIN,TYPE,RO,FSTYPE,LABEL,PARTLABEL,FSUSE%,SIZE,UUID,MOUNTPOINTS', ],
-                    stdout=subprocess.PIPE, text=True, check=False)
+        try:
+            result = subprocess.run(['lsblk', '-J', '-o',
+                        'NAME,MAJ:MIN,TYPE,RO,FSTYPE,LABEL,PARTLABEL,FSUSE%,SIZE,UUID,MOUNTPOINTS', ],
+                        stdout=subprocess.PIPE, text=True, check=False,
+                        timeout=PROBE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # This runs from the menu-refresh timer: block the event loop for
+            # the whole deadline and the tray looks dead. Keep the previous
+            # snapshot instead (it is {} on the very first poll) and let the
+            # next tick try again.
+            prt(f'lsblk timed out after {PROBE_TIMEOUT}s {Utils.where()}')
+            return self.entries
         parsed_data = json.loads(result.stdout)
         dev_cons, file_cons = {}, {}
 
@@ -1591,7 +1635,8 @@ class CommonDialog(QDialog):
                         # instead of swallowing it in the outer except.
                         args = ['cryptsetup', 'luksFormat', '--type', 'luks2']
                         args += ['--batch-mode', '--key-file', '-', luks_file]
-                        rc, stdout, stderr = sudo_run(args, input_str=f'{password}')
+                        rc, stdout, stderr = sudo_run(args, input_str=f'{password}',
+                                                      timeout=FORMAT_TIMEOUT)
                         if rc != 0:
                             err = (f"FAIL: {' '.join(args)}: {stdout} {stderr} "
                                    f'[rc={rc}]')
@@ -1619,7 +1664,9 @@ class CommonDialog(QDialog):
 
             # Create filesystem if needed (for new files)
             if needs_filesystem:
-                err = sudo_cmd(['mkfs.ext4', mapper_path])
+                # mke2fs writes every inode/bitmap up front: minutes on a
+                # large container, so it gets the generous deadline.
+                err = sudo_cmd(['mkfs.ext4', mapper_path], timeout=FORMAT_TIMEOUT)
                 if err:
                     return err
 
@@ -2178,6 +2225,12 @@ def main():
         sys.exit(1) # just in case ;-)
 
     try:
+        # Detach stdin from the terminal: every command runs with `sudo -n`
+        # and feeds its password over a pipe, so a child that tried to read
+        # the tty would steal keystrokes from the user's shell. The price is
+        # that there is no terminal left to interrupt a wedged child, which
+        # is why every subprocess call carries a deadline (CMD_TIMEOUT /
+        # PROBE_TIMEOUT in Utils) and cannot freeze the UI indefinitely.
         devnull_fd = os.open('/dev/null', os.O_RDWR)
         os.dup2(devnull_fd, sys.stdin.fileno())
         os.close(devnull_fd)

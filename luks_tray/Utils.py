@@ -21,6 +21,24 @@ prt_kb = 512
 prt_path = ''
 prt_to_init = True
 
+# Deadline, in seconds, for external commands that change system state
+# (cryptsetup, mount, umount, mkfs, losetup). They all run on the Qt main
+# thread, so a wedged child freezes the tray menu until it returns -- and
+# main() points stdin at /dev/null, so there is no terminal left to
+# interrupt it. 60s leaves room for a slow argon2id unlock on old hardware.
+CMD_TIMEOUT = 60
+# Deadline for read-only probes (lsblk, blkid, fuser). They are expected to
+# answer at once; a hung probe just keeps the previous snapshot and is
+# retried on the next menu refresh.
+PROBE_TIMEOUT = 15
+# Deadline for the one-shot setup commands that legitimately take a while
+# (mke2fs on a multi-terabyte container, luksFormat's PBKDF benchmark on a
+# slow machine). Still bounded -- just far more generous than CMD_TIMEOUT.
+FORMAT_TIMEOUT = 900
+# Status reported when a deadline is hit (the value coreutils `timeout` uses);
+# every caller already treats a non-zero status as failure.
+TIMEOUT_RC = 124
+
 def copy_to_folder(resource_name, dest):
     """ Get the path of a resource """
     with pkg_resources.path('luks_tray.resources', resource_name) as file_path:
