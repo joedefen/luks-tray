@@ -149,13 +149,22 @@ class HistoryClass:
             self.vitals[uuid].back_file = container.back_file
 
     def _namespaces_to_json_data(self):
-        """Converts internal vital namespaces to a JSON-serializable dictionary."""
+        """Converts internal vital namespaces to a JSON-serializable dictionary.
+
+            Each vital is *copied* into a plain dict first. Without a master
+            password the copy's password is blanked (it must never be written
+            in clear text), and that blanking used to happen on
+            `vital.__dict__` itself -- the live object in `self.vitals` -- so
+            every clear-text save erased the remembered password. Dialogs then
+            prefilled an empty password and `update_history()` compared against
+            '' and considered the entry changed on every call.
+        """
         entries = {}
         for uuid, vital in self.vitals.items():
-            legit = vars(vital)
+            legit = dict(vars(vital))  # copy, never the live namespace
             if not self.master_password:
-                legit['password'] = '' # zap password w/o master password
-            entries[uuid] = vars(vital)
+                legit['password'] = ''  # never persist it in clear text
+            entries[uuid] = legit
         return entries
 
     def _password_to_fernet_key(self, salt=None, iterations=None) -> bytes:
