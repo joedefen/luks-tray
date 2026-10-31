@@ -1744,10 +1744,17 @@ class MountDeviceDialog(CommonDialog):
             else:
                 errs.append(f'ERR: unknown key({key})')
 
-        # Determine LUKS device name
-        luks_device = ''
-        if len(container.filesystems) == 1:
-            luks_device = container.filesystems[0].name
+        # Determine the device-mapper name for `cryptsetup open`. Normally the
+        # LUKS header has exactly one child filesystem whose name *is* the
+        # mapper name. Any other case (no filesystem parsed yet, or several)
+        # used to yield '' and end up as an empty argument to `cryptsetup
+        # open`, so derive a deterministic name from the container instead.
+        filesystems = [fs for fs in (container.filesystems or [])
+                       if getattr(fs, 'name', '')]
+        if len(filesystems) == 1:
+            luks_device = filesystems[0].name
+        else:
+            luks_device = f'{container.name}-luks'
 
 
         # Proceed with mounting if no errors
