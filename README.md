@@ -8,15 +8,15 @@ Version 3.0.0 (v3) added and enhanced features and improved quality.
 
 - **System tray integration** - Simple click-to-mount/unmount interface for LUKS devices and files
 - **Visual status indicators** - Symbols mounted (▣), mounted read-only (⧈), unmounted (▽), and open-but-unmounted (‼) states
-- **Options dialog** (added in v3) - `⚙ Options…` edits the settings below and reaches the master password; the fixed entries carry a symbol too (`✦` create, `✚` add, `⚙` options, `☓` exit, `↺` restart)
+- **Options dialog** - `⚙ Options…` edits the settings below and reaches the master password; the fixed entries carry a symbol too (`✦` create, `✚` add, `⚙` options, `☓` exit, `↺` restart) [**added in v3**]
 - **File container support** - Add, create, and manage LUKS file containers from the tray.
 - **Mount point history** - Remembers previous mount locations for convenience and clarity
 - **Background monitoring** - Automatically detects newly inserted devices with LUKS containers
 - **Password management** - Optional master password to encrypt stored credentials
-- **Single instance** (added in v3) - A second copy refuses to start (exit status 3) instead of racing the running one; `--replace` terminates the holder and takes over.
-- **Restart from the menu** (added in v3) - The bottom menu entry reads `↺ Restart luks-tray v<version>`, so the running build is visible without leaving the menu.
-- **Late or restarting panels** (improved in v3) - If the bar starts after the applet, or restarts later, the tray icon registers itself with it instead of staying invisible until the applet is restarted.
-- **Start at login** (added in v3) - The `--svc-*` verbs write, render, enable and manage a `systemd --user` unit for the session. See [Starting at Login](#starting-at-login).
+- **Single instance** - A second copy refuses to start (exit status 3) instead of racing the running one; `--replace` terminates the holder and takes over [**added in v3**]
+- **Restart from the menu** - The bottom menu entry reads `↺ Restart luks-tray v<version>`, so the running build is visible without leaving the menu [**added in v3**]
+- **Late or restarting panels** - If the bar starts after the applet, or restarts later, the tray icon registers itself with it instead of staying invisible until the applet is restarted [**improved in v3**]
+- **Start at login** - The `--svc-*` verbs write, render, enable and manage a `systemd --user` unit for the session. See [Starting at Login](#starting-at-login) [**added in v3**]
 
 ## Quick Start
 
