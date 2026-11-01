@@ -34,6 +34,11 @@ class HistoryClass:
     ENCRYPTED_VERSION = 2
     KDF_ITERATIONS = 600_000  # OWASP-style floor for PBKDF2-HMAC-SHA256
     KDF_SALT_BYTES = 16
+    # Upper bound for the `blkid` result cache keyed on (path, mtime, size),
+    # see _probe_back_file_uuid(). One entry per backing file the history
+    # refers to is the normal occupancy; the cap only stops a long-lived tray
+    # from accumulating paths that were renamed or deleted.
+    BLKID_CACHE_MAX = 64
 
     def __init__(self, path, master_password=''):
         self.status = None # 'clear_text', 'unlocked', 'locked'
@@ -44,6 +49,10 @@ class HistoryClass:
         self.last_mtime = None
         self.file_existed = False
         self.upons = set() # all known mounts
+        # path -> ((mtime_ns, size), uuid). Filled by _probe_back_file_uuid();
+        # survives _json_data_to_namespaces() so that re-parsing the history
+        # does not shell out to blkid again for unchanged backing files.
+        self._back_file_uuid_cache = {}
         # self._load_initial_state()
 
 
@@ -268,28 +277,84 @@ class HistoryClass:
         self.status = 'unlocked' if self.master_password else 'clear_text'
         return None
 
+    @staticmethod
+    def _file_stamp(path):
+        """(mtime, size) of `path`, or None if it cannot be stat'ed.
+
+            A cheap identity for "has this backing file changed since we last
+            looked?": no content hashing, no reads, one stat call.
+        """
+        try:
+            info = os.stat(path)
+        except OSError:
+            return None
+        return (info.st_mtime_ns, info.st_size)
+
+    def _probe_back_file_uuid(self, path):
+        """UUID of the LUKS header stored in `path`, or '' if it has none.
+
+            `blkid` is an external program and this runs for every history
+            entry with a back_file. `restore()` re-parses the whole history
+            whenever its mtime moves -- which any mount, unmount or newly
+            discovered container causes -- so an uncached probe meant one
+            `blkid` per entry per re-parse, on the Qt main thread.
+
+            The answer can only change when the file's contents change, so it
+            is remembered against (mtime, size): writing, reformatting or
+            truncating the file always moves at least one of them, which is
+            why a stale UUID cannot outlive the data it describes.
+
+            Negative answers are cached too (a back_file that legitimately
+            carries no LUKS header should stop being probed), but *only* when
+            blkid reported it cleanly. A timeout, an unstattable path or an
+            I/O/permission complaint is not an answer: it is left uncached so
+            the next refresh retries instead of purging a valid entry.
+        """
+        stamp = self._file_stamp(path)
+        if stamp is not None:
+            cached = self._back_file_uuid_cache.get(path)
+            if cached is not None and cached[0] == stamp:
+                return cached[1]
+        try:
+            # The deadline matters here because this runs while the tray is
+            # loading history: a back_file on hung media would otherwise stall
+            # the caller for as long as the mount is wedged.
+            result = subprocess.run(['blkid', '-o', 'value', '-s', 'UUID', path],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, check=True, timeout=PROBE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # Unknown -- not "no UUID". Caching this would permanently purge a
+            # perfectly valid entry because a disk was briefly busy.
+            prt(f'blkid timed out after {PROBE_TIMEOUT}s: {path}')
+            return ''
+        except subprocess.CalledProcessError as exce:
+            complaint = (exce.stderr or '').strip()
+            if complaint:
+                # "cannot open ...: Permission denied", I/O errors and the
+                # like: no verdict about the contents, so no caching.
+                prt(f'blkid failed for {path}: {complaint}')
+                return ''
+            # blkid exits 2 with no complaint when the file simply has no
+            # signature -- a real answer, just an empty one.
+            uuid = ''
+        except OSError as exce:  # blkid missing, fork failure, ...
+            prt(f'blkid could not run for {path}: {exce}')
+            return ''
+        else:
+            uuid = result.stdout.strip()  # the UUID as a string
+        if stamp is not None:
+            if len(self._back_file_uuid_cache) >= self.BLKID_CACHE_MAX:
+                # Rebuilt lazily, so dropping everything is cheaper than
+                # maintaining an LRU: worst case one blkid per live entry.
+                self._back_file_uuid_cache.clear()
+            self._back_file_uuid_cache[path] = (stamp, uuid)
+        return uuid
+
     def _json_data_to_namespaces(self, entries):
         """
         Converts a JSON-serializable dictionary back into internal vital namespaces.
         Also validates `back_file` entries and purges invalid ones.
         """
-        def get_luks_uuid(path):
-            try:
-                # Run blkid on the file and capture the output. The deadline
-                # matters here because this runs once per history entry while
-                # loading: a back_file on hung media would otherwise stall
-                # startup for as long as the mount is wedged.
-                result = subprocess.run(['blkid', '-o', 'value', '-s', 'UUID', path],
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                        text=True, check=True, timeout=PROBE_TIMEOUT)
-                return result.stdout.strip()  # Return the UUID as a string
-            except subprocess.CalledProcessError:
-                return ''
-            except subprocess.TimeoutExpired:
-                # Same outcome as a failing blkid: treat the UUID as unknown,
-                # which makes the caller purge the unverifiable entry.
-                prt(f'blkid timed out after {PROBE_TIMEOUT}s: {path}')
-                return ''
 
         self.vitals = {}
         purges = []
@@ -309,7 +374,7 @@ class HistoryClass:
                 if key in entry:
                     legit[key] = entry[key]
             ns = SimpleNamespace(**legit)
-            if ns.back_file and get_luks_uuid(ns.back_file) != uuid:
+            if ns.back_file and self._probe_back_file_uuid(ns.back_file) != uuid:
                 purges.append(uuid)
             self.vitals[uuid] = ns
             if ns.upon:
