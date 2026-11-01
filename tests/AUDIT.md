@@ -375,7 +375,24 @@ The password is still withheld from a clear-text file (that part is deliberate �
 
 Verified on **niri** (`XDG_CURRENT_DESKTOP=niri`, `WAYLAND_DISPLAY=wayland-1`, `QT_QPA_PLATFORM` unset → the `wayland` platform plugin): dialogs appear on the output the tray icon was clicked on and take focus correctly. That is the *compositor's* doing, not ours — under an `xdg_toplevel` surface the protocol has no client-side positioning, so `self.move(x, y)` in [`showEvent()`](../luks_tray/dialogs/Common.py#L152) is a no-op. The failures below are therefore not generic Wayland problems; they are **sway + waybar** problems, and none of them reproduce on niri.
 
-**History — do not resurrect `origin/sway`.** `origin/sway` (`6e02692`, "sway incr dev: trying to get it work ... still shit", 2025-10-08) is four commits forked from `574d56b` (2025-09-28) and is **42 commits behind `dev`**: it predates the entire remediation and still edits the pre-split `luks_tray/main.py`. It was never merged (it is not an ancestor of `main` or `dev`), and its whole delta is that module plus a standalone repro script, `test-app`. Two of its ideas were re-implemented independently on `main` on 2025-11-04 — `349df08` "Fixed just broken i3 by trying to fix sway" and `c658d3e` "re-fix the issue of sway menus not updating, good grief" — which is where the failure table in the [`Common.py`](../luks_tray/dialogs/Common.py#L3) header, [`requires_manual_title()`](../luks_tray/dialogs/Common.py#L38), the in-dialog title in [`set_title()`](../luks_tray/dialogs/Common.py#L96) and the persistent-menu scheme behind [`replace_menu_if_different()`](../luks_tray/Main.py#L479) came from. A fresh branch off `dev` is cheaper than reconciling a 42-commit-old `main.py`, so the branch can be deleted with nothing lost.
+**History — do not resurrect `origin/sway`.** `origin/sway` (`6e02692`, "sway incr dev: trying to get it work ... still shit", 2025-10-08) was four commits forked from `574d56b` (2025-09-28) and was **42 commits behind `dev`**: it predates the entire remediation and still edits the pre-split `luks_tray/main.py`. It was never merged (it is not an ancestor of `main` or `dev`), and its whole delta is that module plus a standalone repro script, `test-app`. Two of its ideas were re-implemented independently on `main` on 2025-11-04 — `349df08` "Fixed just broken i3 by trying to fix sway" and `c658d3e` "re-fix the issue of sway menus not updating, good grief" — which is where the failure table in the [`Common.py`](../luks_tray/dialogs/Common.py#L3) header, [`requires_manual_title()`](../luks_tray/dialogs/Common.py#L38), the in-dialog title in [`set_title()`](../luks_tray/dialogs/Common.py#L96) and the persistent-menu scheme behind [`replace_menu_if_different()`](../luks_tray/Main.py#L479) came from. A fresh branch off `dev` is cheaper than reconciling a 42-commit-old `main.py`, so the branch was deleted with nothing lost — but the commits were tagged first, so the option stays open cheaply.
+
+**Removal and retrieval.** `refs/heads/sway` is gone from `origin`; the four commits are preserved by the lightweight tag `archive/sway` → `6e02692`, pushed to `origin` as `refs/tags/archive/sway`. Inspect it without touching the working tree:
+
+```sh
+git fetch --tags origin                       # if the tag is not local yet
+git log --oneline 574d56b..archive/sway       # the four commits
+git diff --stat 574d56b archive/sway          # luks_tray/main.py + test-app, nothing else
+git show archive/sway:test-app > /tmp/test-app.py   # the standalone repro script
+```
+
+Restore it as a branch only if it is ever actually needed:
+
+```sh
+git branch sway archive/sway && git switch sway
+```
+
+Do not `git switch archive/sway` directly: that lands on a detached HEAD, and the tree it checks out is 42 commits behind `dev` with the pre-split `luks_tray/main.py`, so nothing there matches the current module layout. To drop the archive for good, `git push origin --delete archive/sway && git tag -d archive/sway`.
 
 **Still unresolved (real, not cosmetic):**
 
@@ -406,7 +423,7 @@ Verified on **niri** (`XDG_CURRENT_DESKTOP=niri`, `WAYLAND_DISPLAY=wayland-1`, `
 5. ✅ **Safety:** `auto_mount_folder` is validated before any cleanup, and cleanup no longer uses sudo (#8); ✅ the documented sudoers rule is scoped to the eleven commands the app runs under `sudo -n` (see 🔵 Documentation & packaging).
 6. **High-list correctness items** (✅ `browse_folder`, ✅ `check_upon` mount set, `update_history` ordering, ✅ `add_input_field`, ✅ `luksFormat` sudo, ✅ `mount_device` mapper name, ✅ `MountDeviceDialog` close prompt, ✅ error-sentinel idiom, ✅ CLI `paths_only` config/log, ✅ runtime `assert`s, ✅ dead `_unlock_luks` guard, ✅ `subprocess` deadlines).
 7. **Refactor/perf:** ✅ `update_menu` re-entrancy guard + `processEvents` removal (medium #1), ✅ `blkid` result cache keyed on `(mtime, size)` so unchanged backing files are probed once (medium #2), ✅ logging for every swallowed exception via `prt`/`prt_once` (medium #4), ✅ `Main.py` split into `DeviceInfo.py` / `LuksOps.py` / `dialogs/` (medium #5), ✅ every `TBD` docstring written and the stale commented-out code removed (medium #6), ✅ dead code and unused imports removed (medium #7), ✅ `LuksTray.singleton`, `IS_SWAY_LIKE_ENV`, `Utils.prt_path` and `IniTool`'s `os.chdir()` removed (medium #8), ✅ the dependency check now covers every command the code actually shells out to, `sudo` and `blkid` included (medium #9); still open: worker-thread polling, add tests + a scoped ruff config.
-8. **Sway/Wayland** (see ⚪ above): decide whether [`dialog_parent`](../luks_tray/Main.py#L155) becomes a real hidden surface — testing i3 *and* sway, because that trade is what broke i3 the last time — make the decoration decision capability-based instead of a `sway` string match, use `QApplication.screenAt()` for dialog placement, and correct the sway rule in the README. What is **not** worth doing is resurrecting `origin/sway`: the resolution has to be reinvented against the current tree.
+8. **Sway/Wayland** (see ⚪ above): decide whether [`dialog_parent`](../luks_tray/Main.py#L155) becomes a real hidden surface — testing i3 *and* sway, because that trade is what broke i3 the last time — make the decoration decision capability-based instead of a `sway` string match, use `QApplication.screenAt()` for dialog placement, and correct the sway rule in the README. What is **not** worth doing is resurrecting `origin/sway` (deleted; its four commits survive as the `archive/sway` tag): the resolution has to be reinvented against the current tree.
 
 `ruff check .` (ruff 0.17.0) now reports **50 issues**: 10 blind `except` (each of which now logs), 6 unused imports, 5 unsorted-imports, 5 `UP009`, 4 `RUF010`, 4 `EXE001`, plus style — and **0** `try/except/pass` (was 4) and no `invalid-syntax` since the PEP 701 rewrite. Most are auto-fixable with `ruff check --fix`; the critical items above required manual work.
 
