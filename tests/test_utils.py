@@ -8,10 +8,13 @@ stdout is a regular file the caller opened -- because pytest's own capture turns
 the inherited stdout into a regular file.
 """
 
+import contextlib
 import io
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from luks_tray import Utils
@@ -170,9 +173,12 @@ def test_configure_log_leaves_a_users_redirect_alone(tmp_path):
         result = _run_child(USERS_REDIRECT, str(tmp_path), stdout=handle)
     assert result.returncode == 0, result.stderr
     assert 'goes to the caller file' in theirs.read_text()
-    # stdout was already a regular file this process did not open, so the log
-    # was configured but never taken over.
-    assert not (tmp_path / 'debug.log').exists()
+    # stdout was already a regular file this process did not open, so it was
+    # never taken over: the caller's file still has the line, once.
+    assert len(theirs.read_text().splitlines()) == 1
+    # ... and prt() mirrored the line into the log anyway, because the log is
+    # the default destination even when stdout goes somewhere else.
+    assert 'goes to the caller file' in (tmp_path / 'debug.log').read_text()
 
 
 def test_a_second_configure_log_moves_the_log(tmp_path):
@@ -406,3 +412,201 @@ def test_log_viewer_argv_skips_a_rotated_file_that_is_not_there(monkeypatch,
     argv = Utils.log_viewer_argv(str(log), str(tmp_path / 'debug.log.old'), '')
     assert argv[-2:] == ['+F', str(log)]
     assert '--follow-name' not in argv
+
+
+# --- the log is the default, even when started from a terminal --------------
+
+
+def test_prt_mirrors_the_line_into_the_log_from_a_terminal(tmp_path, monkeypatch,
+                                                           capsys):
+    log = tmp_path / 'debug.log'
+    # A terminal is the one stdout prt() must not take over: the person is
+    # watching it. The line goes to both places instead.
+    monkeypatch.setattr(Utils, '_is_tty', lambda: True)
+    monkeypatch.setattr(Utils, '_is_reg', lambda: False)
+    Utils.configure_log(str(log))
+    try:
+        Utils.prt('hello from a terminal')
+    finally:
+        Utils.configure_log('', max_kb=0)
+    assert 'hello from a terminal' in capsys.readouterr().out
+    assert 'hello from a terminal' in log.read_text()
+
+
+def test_keep_stdout_does_not_mirror_anything(tmp_path, monkeypatch, capsys):
+    log = tmp_path / 'debug.log'
+    monkeypatch.setattr(Utils, '_is_tty', lambda: True)
+    monkeypatch.setattr(Utils, '_is_reg', lambda: False)
+    Utils.configure_log(str(log), keep_stdout=True)
+    try:
+        Utils.prt('terminal only, please')
+    finally:
+        Utils.configure_log('', max_kb=0)
+    assert 'terminal only, please' in capsys.readouterr().out
+    # -o/--stdout is the documented opt-out: nothing is written to the log.
+    assert not log.exists()
+
+
+def test_the_mirror_rotates_the_log_at_the_cap(tmp_path, monkeypatch):
+    log = tmp_path / 'debug.log'
+    log.write_text('x' * 4096 + '\n')
+    monkeypatch.setattr(Utils, '_is_tty', lambda: True)
+    monkeypatch.setattr(Utils, '_is_reg', lambda: False)
+    Utils.configure_log(str(log), max_kb=1)
+    try:
+        Utils.prt('after the cap')
+    finally:
+        Utils.configure_log('', max_kb=0)
+    assert 'after the cap' in log.read_text()
+    assert 'x' * 4096 in (tmp_path / 'debug.log.old').read_text()
+
+
+def test_a_stdout_that_is_already_the_log_is_not_written_twice(tmp_path,
+                                                               monkeypatch):
+    log = tmp_path / 'debug.log'
+    monkeypatch.setattr(Utils, '_is_tty', lambda: False)
+    Utils.configure_log(str(log))
+    try:
+        # `luks-tray >> debug.log`: same file, so the mirror must notice before
+        # it appends a second copy of every line.
+        with open(log, 'a', encoding='utf-8') as handle:
+            with contextlib.redirect_stdout(handle):
+                Utils.prt('said once')
+    finally:
+        Utils.configure_log('', max_kb=0)
+    assert log.read_text().count('said once') == 1
+
+
+# --- what the session reported, and where it began and ended ---------------
+
+
+def test_only_failure_lines_are_counted(capsys, quiet_prt):
+    Utils.prt('WARN: skipping auto-mount cleanup: not empty')
+    assert Utils.session_problems() == 0
+    Utils.prt('ERROR: no terminal emulator found')
+    assert Utils.session_problems() == 1
+    Utils.prt('exception:', 'boom')
+    assert Utils.session_problems() == 2
+    Utils.prt('FAIL: cannot restart the applet: no such file')
+    assert Utils.session_problems() == 3
+    assert 'FAIL: cannot restart' in Utils._problems.last
+
+
+def test_note_problem_returns_the_running_count(quiet_prt):
+    assert Utils.note_problem('ERR: mount failed') == 1
+    assert Utils.note_problem('ERR: unlock failed') == 2
+    assert Utils.session_problems() == 2
+
+
+def test_clear_session_problems_forgets_the_tally(quiet_prt):
+    Utils.note_problem('ERR: whatever')
+    Utils.clear_session_problems()
+    assert Utils.session_problems() == 0
+    assert Utils._problems.last == ''
+
+
+def test_log_session_start_names_the_build_and_the_pid(capsys, quiet_prt):
+    Utils.note_problem('ERR: from the run before')
+    Utils.log_session_start('luks-tray', '9.9.9', note=' (systemd)')
+    out = capsys.readouterr().out
+    assert '=== luks-tray v9.9.9 started, pid ' in out
+    assert f'pid {os.getpid()}' in out
+    assert '(systemd)' in out
+    # The banner has no [file:line] footer: it is not about a line of code.
+    assert out.rstrip().endswith('===')
+    # A new session starts with a clean tally, whatever the file holds.
+    assert Utils.session_problems() == 0
+
+
+def test_log_session_stop_reports_how_many_failures_happened(capsys, quiet_prt):
+    Utils.note_problem('ERR: one')
+    Utils.note_problem('ERR: two')
+    Utils.log_session_stop('luks-tray', '9.9.9', note=' (signal 15)')
+    out = capsys.readouterr().out
+    assert '=== luks-tray v9.9.9 stopped, pid ' in out
+    assert '(signal 15)' in out
+    assert '2 errors' in out
+
+
+def test_a_clean_session_stop_does_not_mention_errors(capsys, quiet_prt):
+    Utils.log_session_stop('luks-tray', '9.9.9')
+    out = capsys.readouterr().out
+    assert 'stopped, pid ' in out
+    assert 'error' not in out
+
+
+def test_a_termination_logs_a_stop_line_and_reprises_the_signal(monkeypatch,
+                                                                quiet_prt):
+    installed, killed, stopped = {}, [], []
+
+    def fake_signal(number, handler):
+        installed[number] = handler
+
+    monkeypatch.setattr(Utils.signal, 'signal', fake_signal)
+    monkeypatch.setattr(Utils.os, 'kill', lambda pid, number: killed.append(number))
+    monkeypatch.setattr(Utils, 'log_session_stop',
+                        lambda name, version, note='': stopped.append(note))
+    Utils.install_termination_log('luks-tray', '9.9.9', signals=(signal.SIGTERM,))
+    installed[signal.SIGTERM](signal.SIGTERM, None)
+    assert stopped == [' (signal 15)']
+    # Re-raised, so the exit status systemd sees is the one it expects.
+    assert killed == [signal.SIGTERM]
+    assert installed[signal.SIGTERM] is not None
+
+
+TERMINATES = """\
+import os, sys, time
+from luks_tray import Utils
+Utils.configure_log(os.path.join(sys.argv[1], 'debug.log'))
+Utils.install_termination_log('luks-tray', '9.9.9')
+Utils.log_session_start('luks-tray', '9.9.9')
+print('ready', flush=True)
+time.sleep(60)
+"""
+
+
+def test_a_real_sigterm_leaves_the_stop_line_and_the_signal_status(tmp_path):
+    # The end-to-end version of the test above: a real process, a real signal,
+    # and a supervisor's view of the exit status (death *by* the signal, not a
+    # quiet exit 0 that a unit's Restart=always would misread).
+    env = dict(os.environ)
+    env['PYTHONPATH'] = str(ROOT)
+    child = subprocess.Popen([sys.executable, '-c', TERMINATES, str(tmp_path)],
+                             cwd=str(ROOT), env=env, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+    log = tmp_path / 'debug.log'
+    try:
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if log.exists() and 'ready' in log.read_text():
+                break
+            time.sleep(0.05)
+        child.send_signal(signal.SIGTERM)
+        child.wait(timeout=30)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=30)
+    text = log.read_text()
+    assert 'started' in text
+    assert 'stopped' in text
+    assert '(signal 15)' in text
+    assert child.returncode == -signal.SIGTERM
+
+
+def test_a_termination_log_that_cannot_be_installed_is_a_no_op(monkeypatch):
+    def refuse(_number, _handler):
+        raise ValueError('signal only works in main thread')
+
+    monkeypatch.setattr(Utils.signal, 'signal', refuse)
+    # No exception escapes: a signal handler that cannot be installed must not
+    # be the reason the applet fails to start.
+    Utils.install_termination_log('luks-tray', '9.9.9', signals=(signal.SIGTERM,))
+
+
+def test_prt_qt_keeps_qt_s_own_file_and_line(capsys, quiet_prt):
+    Utils.prt_qt('bad paint', '[painter.cpp:42]')
+    out = capsys.readouterr().out
+    assert 'qt: bad paint' in out
+    assert '[painter.cpp:42]' in out
+    assert '[Utils.py' not in out      # the footer is Qt's, not this module's

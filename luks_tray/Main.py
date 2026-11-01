@@ -41,7 +41,7 @@ import petname
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PyQt6.QtWidgets import QWidgetAction, QWidget, QLabel
 from PyQt6.QtGui import QIcon, QCursor, QAction, QFont, QFontInfo
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt, QtMsgType, qInstallMessageHandler
 
 from luks_tray.History import HistoryClass
 from luks_tray.Utils import PyKill, prt, prt_once
@@ -89,6 +89,52 @@ __all__ = [
 # bus yet is an event, not a wait: the item is registered again when one
 # appears, so start-up never blocks on the bar.
 TRAY_ATTACH_DELAY_MS = 500      # let a new host start serving calls
+
+# The name the log lines, the unit file and the menu all agree on.  The session
+# banner pairs it with `__version__` and the pid, so "which build wrote this
+# line, and which run?" is answered by the log itself.
+APP_NAME = 'luks-tray'
+
+# Qt messages that are chatter rather than news.  The Qt6CT platform theme
+# prints its whole palette table through qDebug() every time a widget asks for
+# one, which used to put some forty lines in debug.log between the messages a
+# reader actually wanted.  The markers catch that plugin's output even where it
+# arrives at warning level.
+QT_NOISE = (
+    'Qt6CTPlatformTheme::',
+    'QWindowsWindow::',
+)
+_qt_seen = set()
+
+
+def qt_message_handler(mode, context, message):
+    """ Qt's own console output, filtered, deduplicated and stamped into the log.
+
+        Called by Qt through `install_qt_messages()`. Debug and information
+        messages are dropped: they are the internals of Qt and of its plugins,
+        and nothing in this applet acts on them. What is kept is a warning or an
+        error -- once per distinct text, with the `[file:line]` of the C++ side
+        as the footer, so "who said this?" is answerable at a glance instead of
+        looking like a luks-tray bug.
+    """
+    if mode in (QtMsgType.QtDebugMsg, QtMsgType.QtInfoMsg):
+        return
+    text = ' '.join(str(message).split())
+    if not text or any(marker in text for marker in QT_NOISE):
+        return
+    if text in _qt_seen:
+        return              # Qt retries the same warning on every repaint
+    if len(_qt_seen) >= 64:
+        _qt_seen.clear()    # bounded, like prt_once()'s set: the tray runs for weeks
+    _qt_seen.add(text)
+    file_name = os.path.basename(str(getattr(context, 'file', '') or ''))
+    line = getattr(context, 'line', 0) or 0
+    Utils.prt_qt(text, f'[{file_name}:{line}]' if file_name else '[qt]')
+
+
+def install_qt_messages():
+    """ Send Qt's console output through prt(); call before QApplication exists. """
+    qInstallMessageHandler(qt_message_handler)
 
 
 # Paths that must never be accepted as `auto_mount_folder`. The startup cleanup
@@ -456,7 +502,11 @@ class LuksTray():
             "Open Log" is offered only when something can actually show it --
             a terminal emulator, or the `log_viewer` prefix from `config.ini` --
             because the applet's own stdout is the log file, so `less` has no
-            tty to draw on without one.
+            tty to draw on without one. It carries a count once this session has
+            reported a failure (see `log_entry_text()`), which is the one piece
+            of menu state that changes on its own: `replace_menu_if_different()`
+            compares the rendered text, so the marker appears (and the menu is
+            rebuilt) as soon as an error is logged.
         """
         actions = []
 
@@ -542,7 +592,7 @@ class LuksTray():
         actions.append(action)
 
         if self.log_viewer_available():
-            action = QAction('≡ Open Log', self.app)
+            action = QAction(self.log_entry_text(), self.app)
             action.setFont(self.mono_font)
             action.triggered.connect(self.open_log)
             actions.append(action)
@@ -665,6 +715,21 @@ class LuksTray():
         return bool(Utils.terminal_argv(
             [], self.ini_tool.get_current_val('log_viewer') or ''))
 
+    def log_entry_text(self):
+        """ The "Open Log" label, marked once this session reported a failure.
+
+            A failure the user was told about -- a mount that could not be
+            completed, a viewer that would not start -- is worth a pointer back
+            to the log, because the dialog says *what* failed and the log says
+            why. The count is of this session only (`log_session_start()` resets
+            it), so a restart clears the marker; the log file itself is not read
+            back, which keeps the menu's build cheap.
+        """
+        problems = Utils.session_problems()
+        if not problems:
+            return '≡ Open Log'
+        return f'≡ Open Log [{problems} error{"" if problems == 1 else "s"}]'
+
     def open_log(self):
         """ Page debug.log -- and its one rotated generation -- in a terminal.
 
@@ -743,6 +808,9 @@ class LuksTray():
             if lock is not None:
                 lock.acquire()
             return
+        # os._exit() skips atexit handlers, so the stop line is written here --
+        # the replacement starts its own session banner a moment later.
+        Utils.log_session_stop(APP_NAME, __version__, note=' (restarting)')
         os._exit(0)
 
     def _restart_via_systemd(self):
@@ -1394,8 +1462,9 @@ def main():
     parser.add_argument('-D', '--debug', action='store_true',
             help='enable debug_mode')
     parser.add_argument('-o', '--stdout', action='store_true',
-            help='keep logging on stdout instead of debug.log (ignored when a'
-                 ' systemd unit started us: there stdout is the unit\'s)')
+            help='log to the terminal only, not to debug.log (default: both;'
+                 ' ignored when a systemd unit started us: there stdout is the'
+                 ' unit\'s)')
     parser.add_argument('-f', '--follow-log', action='store_true',
             help='exec tail -n50 -F on log file')
     parser.add_argument('-e', '--edit-config', action='store_true',
@@ -1501,6 +1570,11 @@ def main():
         Utils.configure_log(configure_ini.log_path,
                             keep_stdout=opts.stdout
                             and not Utils.in_systemd_service())
+        # Qt's own output goes through prt() from here on, so a theme plugin's
+        # chatter cannot drown the log and a real Qt warning arrives with a
+        # timestamp like every other line. Must precede the QApplication that
+        # LuksTray creates.
+        install_qt_messages()
 
         ini_tool = IniTool(paths_only=False)
 
@@ -1526,6 +1600,16 @@ def main():
             Utils.error_print(f'ERROR: {message}')
             sys.exit(3)
         atexit.register(lock.release)
+
+        # From here on this process *is* the tray, so the log gets its first and
+        # last line. The stop line is registered with atexit (the menu's exit and
+        # QApplication.exec() both leave that way) and with a signal handler
+        # (systemd stopping us, --replace, a closing terminal).
+        Utils.log_session_start(APP_NAME, __version__,
+                                note=' (systemd)' if Utils.in_systemd_service()
+                                else '')
+        atexit.register(Utils.log_session_stop, APP_NAME, __version__)
+        Utils.install_termination_log(APP_NAME, __version__)
 
         # Detach stdin from the terminal: every command runs with `sudo -n`
         # and feeds its password over a pipe, so a child that tried to read

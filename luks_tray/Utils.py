@@ -45,6 +45,17 @@ _log = SimpleNamespace(path='', opened_path='', max_kb=512, keep_stdout=False)
 _prt_seen = set()
 PRT_ONCE_MAX = 256
 
+# Failures this session reported, for the menu's "the log has something to say"
+# marker. Counted where the message is made rather than by reading the file
+# back: prt() counts its own "ERROR: ..." / "exception: ..." lines, the dialogs
+# count the errors they are about to show, and a warning that is part of normal
+# operation ("skipping auto-mount cleanup: ...") is deliberately not an error.
+_problems = SimpleNamespace(count=0, last='')
+# A prt() call whose first argument starts with one of these is a failure. The
+# strings are the ones the code already uses; nothing has to remember to report
+# itself twice.
+_ERROR_PREFIXES = ('ERROR', 'FAIL:', 'exception:')
+
 # One generation of history: `debug.log` becomes `debug.log.old`, and the .old
 # that was there before is discarded. Two files are all we keep, and the log
 # viewer pages both of them (`:n` in less), so the suffix is a constant rather
@@ -106,6 +117,23 @@ def _is_reg():
         return False
 
 
+def _same_file(fd, path):
+    """ True when `fd` and `path` are the same file. Silent, same reason. """
+    try:
+        open_file, named_file = os.fstat(fd), os.stat(path)
+    except (OSError, ValueError):
+        return False
+    return (open_file.st_dev, open_file.st_ino) == (named_file.st_dev,
+                                                    named_file.st_ino)
+
+
+def _is_error_message(args):
+    """ True when a prt() call reports a failure, judged by its first argument. """
+    if not args or not isinstance(args[0], str):
+        return False
+    return args[0].lstrip().startswith(_ERROR_PREFIXES)
+
+
 def _reopen_log():
     """ Point stdout and stderr at the configured log, in append mode.
 
@@ -130,6 +158,34 @@ def _reopen_log():
     os.dup2(sys.stdout.fileno(), 1)
     os.dup2(sys.stderr.fileno(), 2)
     _log.opened_path = _log.path
+
+
+def _append_log(text):
+    """ Append one line to the log without owning stdout.
+
+        The mirror case: stdout is a terminal (or a file the caller redirected
+        themselves), so prt() keeps writing there -- but the log is still the
+        default destination, and "Open Log" has to be able to show a session the
+        user started from a terminal, not only one a desktop started.
+
+        The file is opened and closed per line, because this path only exists
+        when we are *not* holding the stream; rotation is decided here, on the
+        log's own size, before the append that would cross the cap.
+    """
+    if not _log.path:
+        return
+    if _log.max_kb > 0:
+        rotate_log()
+    try:
+        fd = os.open(_log.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    except OSError:
+        return              # Cannot write there; the terminal copy still printed.
+    try:
+        os.write(fd, f'{text}\n'.encode('utf-8', 'replace'))
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def rotate_log(path=None, max_bytes=None):
@@ -169,8 +225,9 @@ def configure_log(path, max_kb=512, keep_stdout=False):
         A second call *moves* the log: `opened_path` records the file this
         process opened, so the stream can be taken over again, where the old
         globals kept the very first decision for the lifetime of the process. A
-        terminal is left alone (prt() keeps printing to it), and so is a stdout
-        the caller redirected to a file of their own. `max_kb <= 0` disables the
+        terminal is not taken over -- prt() keeps printing to it *and* mirrors
+        the line into the log, see `_append_log()` -- and neither is a stdout the
+        caller redirected to a file of their own. `max_kb <= 0` disables the
         redirection and the size cap, so prt() just prints.
 
         `keep_stdout` is `-o/--stdout`: the path is recorded but the streams are
@@ -195,16 +252,22 @@ def configure_log(path, max_kb=512, keep_stdout=False):
 def prt(*args, **kwargs):
     """ Our custom print routine ...
      - use instead of print() to get time stamps.
-     - unless stdout is a tty, say for debugging, ~/.config/luks-tray/debug.log is used for stdout
+     - the log is the default destination: a stdout that is not a terminal is
+       taken over (`~/.config/luks-tray/debug.log`), and one that *is* a terminal
+       keeps the line *and* gets it mirrored into the log, so a session started
+       by hand is visible in "Open Log" like one a desktop started
      - if we create a log file, its size is capped at `_log.max_kb` and then it
        rotates: debug.log becomes debug.log.old (one generation, see
        `rotate_log()`), so the log the menu shows never grows without bound
      - `to_stdout=True` keeps whatever stdout is, `to_stdout=False` insists on
        the log file (`configure_log(..., keep_stdout=True)` is the same request
-       made once, for the whole run)
+       made once, for the whole run -- that is what `-o/--stdout` sets)
+     - `_origin=` replaces the `[file:line]` footer, for lines that know better
+       than a stack frame where they come from (the session banner, Qt's own
+       messages)
     """
     def check_stdout(use_stdout=None):
-        """ Make sure stdout points at a terminal or at the debug log.
+        """ Point stdout at the log; True when the line must also be appended.
 
             The probes above (`_is_tty()` / `_is_reg()`) stay silent on purpose:
             they run *inside* prt(), so reporting a failure here would call prt()
@@ -212,18 +275,24 @@ def prt(*args, **kwargs):
             regular file" is also the normal answer for a tray started by a
             desktop session.
         """
-        if _log.max_kb > 0 and _log.path: # non-positive disables stdout "tuning"
-            if use_stdout is False:       # explicit "write the log file"
-                _log.keep_stdout = False
-            if _log.keep_stdout:
-                return      # -o: whatever stdout already is, the log stays there.
-            if not _log.opened_path and (sys.stdout.closed # stdout is closed
-                    or (not _is_tty() and not _is_reg())):
-                _reopen_log()
+        if not (_log.max_kb > 0 and _log.path): # non-positive disables tuning
+            return False
+        if use_stdout is False:       # explicit "write the log file"
+            _log.keep_stdout = False
+        if _log.keep_stdout:
+            return False      # -o: whatever stdout already is, the log stays there.
+        if not _log.opened_path and (sys.stdout.closed # stdout is closed
+                or (not _is_tty() and not _is_reg())):
+            _reopen_log()
+        if _log.opened_path:
             # Only a stream we opened ourselves can be rotated: a terminal, or
             # a file the caller redirected, is not ours to move.
-            if _log.opened_path and rotate_log():
+            if rotate_log():
                 _reopen_log()   # the file we were appending to is now the .old
+            return False        # stdout *is* the log, so printing is logging.
+        if _is_reg() and _same_file(sys.stdout.fileno(), _log.path):
+            return False        # stdout already *is* the log: do not write twice
+        return True             # a terminal, or the caller's own file: mirror it
 
     to_stdout = None
     if 'to_stdout' in kwargs:
@@ -236,7 +305,11 @@ def prt(*args, **kwargs):
     if '_above' in kwargs:
         above = int(kwargs['_above'])
         del kwargs['_above']
-    check_stdout(to_stdout)
+    origin = None
+    if '_origin' in kwargs:
+        origin = kwargs['_origin']
+        del kwargs['_origin']
+    mirror = check_stdout(to_stdout)
 
     dt = datetime.now().strftime('%m-%d^%H:%M:%S')
     s = StringIO()
@@ -244,8 +317,93 @@ def prt(*args, **kwargs):
     kwargs['end'] = ' '
     kwargs['file'] = s
     print(*args, **kwargs)
-    string = f'{s.getvalue()} {where(above)}'
+    footer = where(above) if origin is None else str(origin)
+    string = f'{s.getvalue()} {footer}'.rstrip()
+    if _is_error_message(args):
+        note_problem(string)
     print(string, flush=True)
+    if mirror:
+        _append_log(string)
+
+
+def prt_qt(text, origin=''):
+    """ Print a message Qt itself produced, stamped and footed like our lines.
+
+        `origin` is the `[file:line]` Qt reported -- the C++ side, which is where
+        the reader has to look, not a line of this package.
+    """
+    prt('qt:', text, _origin=origin)
+
+
+# --- the session's first line, its last, and how many failures it saw -------
+
+
+def note_problem(message):
+    """ Record a failure this session reported; returns the new count.
+
+        prt() calls this for its own error lines, and `alert_errors()` calls it
+        before showing a message box, so the menu's marker counts what the user
+        would call failures -- not every line in the file, and not the warnings
+        that belong to normal operation.
+    """
+    _problems.count += 1
+    _problems.last = str(message)
+    return _problems.count
+
+
+def session_problems():
+    """ How many failures this process has reported (what the menu shows). """
+    return _problems.count
+
+
+def clear_session_problems():
+    """ Forget the tally: a new session, or a test that wants a clean slate. """
+    _problems.count = 0
+    _problems.last = ''
+
+
+def log_session_start(name, version, pid=None, note=''):
+    """ Write the "this run started here" line: name, version, pid (prt dates it).
+
+        What a reader of a log needs first is *which* run they are reading: the
+        applet may have been restarted twice since the interesting line was
+        written, and two instances of different builds can share one file. The
+        failure tally is cleared here because the menu's marker is about this
+        session, not about everything the file has ever collected.
+    """
+    clear_session_problems()
+    pid = os.getpid() if pid is None else pid
+    prt(f'=== {name} v{version} started, pid {pid}{note} ===', _origin='')
+
+
+def log_session_stop(name, version, pid=None, note=''):
+    """ Write the matching "this run ended here" line, with its failure count. """
+    pid = os.getpid() if pid is None else pid
+    problems = _problems.count
+    tail = f', {problems} error{"" if problems == 1 else "s"}' if problems else ''
+    prt(f'=== {name} v{version} stopped, pid {pid}{note}{tail} ===', _origin='')
+
+
+def install_termination_log(name, version, signals=(signal.SIGTERM, signal.SIGHUP)):
+    """ Log the stop line when a signal ends us, then die of that signal.
+
+        `systemctl --user stop`, `--replace` and a closing terminal all end the
+        process with a signal, and no atexit handler runs then -- so without this
+        the most common way for a tray to go away left no trace at all. The
+        handler restores the default disposition and re-raises, so the exit
+        status the supervisor sees is exactly what it was before (`Restart=always`
+        and `RestartPreventExitStatus=` keep working).
+    """
+    def handler(signum, _frame):
+        log_session_stop(name, version, note=f' (signal {signum})')
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    for number in signals:
+        try:
+            signal.signal(number, handler)
+        except (OSError, ValueError):   # not the main thread, or no such signal
+            return
 
 
 def prt_once(key, *args, **kwargs):

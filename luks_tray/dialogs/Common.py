@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog,
 from PyQt6.QtGui import QCursor
 from PyQt6.QtCore import Qt
 
-from luks_tray.Utils import prt_once
+from luks_tray.Utils import note_problem, prt_once
 from luks_tray.DeviceInfo import DeviceInfo
 
 
@@ -355,8 +355,18 @@ class CommonDialog(QDialog):
         self.reject()
 
     def alert_errors(self, error_lines):
-        """Callback to show errors if present."""
+        """Callback to show errors if present.
+
+            Every failure the dialogs have to announce comes through here -- a
+            mount that did not happen, a password that did not unlock, a write
+            that was refused -- so it is also where the session's failure tally
+            is kept, which is what the tray menu's "Open Log [n errors]" marker
+            shows. Counting the message box, not just prt()'s own error lines,
+            is what makes the marker agree with what the user was told.
+        """
         if error_lines:  # Check if there are any errors
+            for line in error_lines:
+                note_problem(line)
             error_text = '\n'.join(error_lines)  # Join the list of error lines into one string
 
             error_dialog = QMessageBox(self)

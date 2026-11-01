@@ -410,3 +410,35 @@ def test_a_viewer_that_cannot_start_is_reported_not_raised(qapp, monkeypatch,
     instance.open_log()
 
     assert 'cannot open the log' in capsys.readouterr().out
+
+
+def test_the_log_entry_is_plain_while_nothing_has_failed(qapp):
+    texts = menu_texts(
+        menu_builder(qapp, log_viewer_available=lambda: True).update_menu_items())
+
+    assert '≡ Open Log' in texts
+
+
+def test_the_log_entry_carries_the_session_s_failure_count(qapp):
+    Main.Utils.note_problem('ERR: unlock failed')
+
+    texts = menu_texts(
+        menu_builder(qapp, log_viewer_available=lambda: True).update_menu_items())
+
+    # The dialog says what failed; the marker says the log has the why.
+    assert '≡ Open Log [1 error]' in texts
+
+
+def test_the_marker_grows_and_says_errors_in_the_plural(qapp):
+    for _ in range(3):
+        Main.Utils.note_problem('ERR: nope')
+
+    assert menu_builder(qapp).log_entry_text() == '≡ Open Log [3 errors]'
+
+
+def test_a_new_session_clears_the_marker(qapp):
+    Main.Utils.note_problem('ERR: from a run that is over')
+
+    Main.Utils.log_session_start('luks-tray', '9.9.9')
+
+    assert menu_builder(qapp).log_entry_text() == '≡ Open Log'

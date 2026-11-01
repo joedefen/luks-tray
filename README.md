@@ -16,6 +16,7 @@ Version 3.0.0 (v3) added and enhanced features and improved quality.
 - **Password management** - Optional master password to encrypt stored credentials
 - **Single instance** - A second copy refuses to start (exit status 3) instead of racing the running one; `--replace` terminates the holder and takes over [**added in v3**]
 - **Restart from the menu** - The bottom menu entry reads `↺ Restart luks-tray v<version>`, so the running build is visible without leaving the menu [**added in v3**]
+- **A log that explains itself** - `≡ Open Log` pages `debug.log` live, and the entry becomes `≡ Open Log [n errors]` once *this session* has reported a failure, so a dialog that says what failed is one click away from the log that says why. The log starts with a `=== luks-tray v<version> started, pid <pid> ===` line and ends with the matching one [**added in v3**]
 - **Late or restarting panels** - If the bar starts after the applet, or restarts later, the tray icon registers itself with it instead of staying invisible until the applet is restarted [**improved in v3**]
 - **Start at login** - The `--svc-*` verbs write, render, enable and manage a `systemd --user` unit for the session. See [Starting at Login](#starting-at-login) [**added in v3**]
 
@@ -62,6 +63,7 @@ Notes:
 - click a ‼ entry to lock an unmounted, unlocked container (considered an anomaly)
 - the fixed entries at the bottom carry a symbol: `✦` create a new crypt file, `✚` add an existing one, `⚙` options, `≡` open the log, `☓` exit, `↺` restart
 - `≡ Open Log` only appears when it can work: the applet's own output *is* the log file, so `less` needs a terminal emulator to be started in. If none is found, set `log_viewer` in `config.ini` (see below).
+- once this session has reported a failure, that entry reads `≡ Open Log [n errors]`; the count is of this session only, so a restart clears it, and the dialogs' own errors (a mount that did not happen, a viewer that would not start) are included, not only the ones that reached the file.
 - LUKS devices must be created with other tools such as Gnome Disks.
 - LUKS files are only automatically detected in its history; when you add or create new LUKS files, they are added to the history.
 - A TrueCrypt/VeraCrypt file is managed like a LUKS file once added, except that it can never be *discovered*: its header is encrypted, so nothing can tell it apart from random data without the password. Add it once with `✚`, and the history carries it from then on.
@@ -74,7 +76,7 @@ Notes:
 Settings and data files are stored in `~/.config/luks-tray/`:
 - **History file** - Stored of passwords and mount preferences; it is encrypted when the master password enabled.
 - **Lock file** - `luks-tray.lock` holds the PID of the running instance; the kernel releases the lock when that process exits, so a crash never blocks the next start.
-- **Log file** - `debug.log` is where the applet writes everything it does (the command it ran, what it refused, with a timestamp and the code location). It is created owner-only, since it names container paths and mount points, and at 512 KB it rotates to `debug.log.old` — one generation, which the viewer pages as its second file. `≡ Open Log` shows it live, `luks-tray --follow-log` tails it from a shell, and `luks-tray -o` keeps the output on the terminal it was started from instead (a systemd unit ignores `-o`: there stdout is the unit's own).
+- **Log file** - `debug.log` is where the applet writes everything it does (the command it ran, what it refused, with a timestamp and the code location). It is the destination whether a desktop, a systemd unit or a terminal started the applet: started from a terminal the lines are printed *and* mirrored into the file, so `≡ Open Log` shows that session as well; `luks-tray -o` is the opt-out that keeps them on the terminal only (a systemd unit ignores `-o`: there stdout is the unit's own). The file opens with `=== luks-tray v<version> started, pid <pid> ===` and closes with the matching `stopped` line — also after `systemctl --user stop` or `--replace`, which end the process with a signal — so a file holding several runs is still readable. It is created owner-only, since it names container paths and mount points, and at 512 KB it rotates to `debug.log.old` — one generation, which the viewer pages as its second file. Lines Qt itself produces arrive as `qt: …` with Qt's own `[file:line]`, each reported once, while a platform theme's chatter (the Qt6CT palette dump) is dropped. `luks-tray --follow-log` tails the file from a shell.
 - **INI file** - the default .ini file looks like:
 
       [ui]

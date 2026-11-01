@@ -62,13 +62,16 @@ def vault_root():
 
 @pytest.fixture(autouse=True)
 def clean_utils_state(monkeypatch):
-    """`prt()`'s destination and one-shot keys are process state; reset them."""
+    """`prt()`'s destination, one-shot keys and failure tally are process state."""
     from luks_tray import Utils
 
     monkeypatch.setattr(
         Utils, '_log',
         SimpleNamespace(path='', opened_path='', max_kb=0, keep_stdout=False))
     Utils._prt_seen.clear()
+    # The menu says "Open Log [n errors]" from this count, so a test that logged
+    # a failure must not make the next test's menu look like it had one.
+    Utils.clear_session_problems()
     yield
     Utils._prt_seen.clear()
 
