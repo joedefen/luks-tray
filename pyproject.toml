@@ -112,9 +112,9 @@ luks-tray = "luks_tray.Main:main"
 
 [tool.flit.sdist]
 # The tests are part of the contract: an sdist that cannot run its own gate
-# leaves a downstream packager guessing.  conftest.py joins this list once it
-# exists (Phase 2 of tests/BLESS-ADOPTION-PLAN.md).
-include = ["tests/"]
+# leaves a downstream packager guessing.  tests/test_repo_hygiene.py asserts
+# both entries are still here.
+include = ["tests/", "conftest.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -397,8 +397,15 @@ class CommonDialog(QDialog):
         self.repaint()
 
     def hide_progress(self):
-        """Hide progress indicator and re-enable buttons."""
-        if hasattr(self, 'progress_label'):
+        """Hide progress indicator and re-enable buttons.
+
+            `progress_label` exists from `__init__` (as None), so `hasattr()`
+            was always true and the `finally:` calls in the dialogs' unmount
+            paths -- which run whether or not a progress bar was ever shown --
+            hit `AttributeError: 'NoneType' object has no attribute 'hide'`.
+            Test what is there, not what attribute exists.
+        """
+        if self.progress_label and self.progress_bar:
             self.progress_label.hide()
             self.progress_bar.hide()
 

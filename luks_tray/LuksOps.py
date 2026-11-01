@@ -195,10 +195,13 @@ def run_unmount(mount_point: str, busy_warns: set) -> str | None:
 
     info = "\n - ".join(process_lines) if process_lines else "(No user-space processes found using the mount)"
 
-    # Show user-friendly popup
+    # Show user-friendly popup.  `setWindowTitle`, not `set_title`: QMessageBox
+    # has no `set_title`, so this path raised AttributeError on the first
+    # "target is busy" -- the most ordinary unmount failure there is -- instead
+    # of naming the processes holding the mount open.
     msg = QMessageBox()
     msg.setIcon(QMessageBox.Icon.Warning)
-    msg.set_title("Unmount Failed — Device Busy [luks-tray]")
+    msg.setWindowTitle("Unmount Failed — Device Busy [luks-tray]")
     msg.setText(f"'{mount_point}' busy by these processes:\n - {info}")
     msg.setStandardButtons(QMessageBox.StandardButton.Ok)
     msg.exec()
