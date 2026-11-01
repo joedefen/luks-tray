@@ -1,24 +1,28 @@
 # Adopting `bless` in `luks-tray`
 
-**Status: plan, not yet implemented.** This document is the record of what
-adoption requires, verified against the tree and against PyPI on 2026-11-01.
-Nothing in it has been applied yet.
+**Status: Phase 1 done, Phases 2–4 open.** [`bless`](../bless) is present,
+executable and copied verbatim; the tree now satisfies its assumptions except
+the ones that need a test suite. What is still missing is Phase 2 (the tests),
+Phase 3 (CI) and Phase 4 (the developer documentation). Each phase below says
+what was verified, not what was intended.
 
 `bless` is the release gate used by `../pwr-tray`, `../my-snaps` and
 `../vappman` (all three hold the identical file, SHA-256
 `4f756337840b0619fbf6f077b00d4bb3fb9aee95ff18bbeb6a0521d39d52131e`,
-1015 lines). It is copied **verbatim**; every project-specific fact is read out
-of `pyproject.toml` and the package. `../dwipe/bless` is a different file
-(`dead17db…`) and is not the source here.
+1015 lines). It is copied **verbatim** — the same hash is in [`bless`](../bless)
+here — because reuse is "copy verbatim": every project-specific fact is read out
+of [`pyproject.toml`](../pyproject.toml) and the package, so a later upstream
+change is adopted as a new copy rather than as a local edit. `../dwipe/bless` is
+a different file (`dead17db…`) and is not the source here.
 
-Adopting it **supersedes [`deploy`](../deploy)**. That script exists only to run
-`pip install -e .` into whichever interpreter happens to be active, while its own
-`echo` tells you to test with `lt-venv/bin/luks-tray` — so in the common case it
-installs into the wrong interpreter. Nothing else in the tree references it:
-`README.md`, [`runner`](../runner) and
-[`pyproject.toml`](../pyproject.toml) do not mention it, and the only written
-reference is the audit note in [`AUDIT.md`](../tests/AUDIT.md) that this plan
-closes out.
+Adopting it **replaced [`deploy`](../deploy)**, which has been deleted. That
+script ran `pip install -e .` into whichever interpreter happened to be active,
+while its own `echo` told you to test with `lt-venv/bin/luks-tray` — so in the
+common case it installed into the wrong interpreter. Nothing referenced it:
+`README.md`, [`runner`](../runner) and [`pyproject.toml`](../pyproject.toml)
+never mentioned it, and the audit note in [`AUDIT.md`](AUDIT.md) that recorded
+the defect now records the replacement instead. Installing for development is
+one documented command, `lt-venv/bin/python -m pip install -e '.[dev]'`.
 
 ## Why adopt it at all
 
@@ -39,120 +43,116 @@ is on PyPI, and an upload cannot be replaced, so a duplicate check that runs
 ## What `bless` assumes, and where this tree stands
 
 Requirements are taken from the `bless` module docstring ("What a project must
-then provide"). Current state was read from the tree, not assumed.
+then provide"). Status was read from the tree, not assumed.
 
-| `bless` requires | `luks-tray` now | Action |
+| `bless` requires | `luks-tray` | Status |
 | --- | --- | --- |
-| Flat layout: the package directory at the root | [`luks_tray/`](../luks_tray) is at the root | none |
-| `__version__ = "X.Y.Z"` in `<package>/__init__.py` | [`luks_tray/__init__.py`](../luks_tray/__init__.py) is **empty** | add the line |
-| The build backend reads that line | [`pyproject.toml`](../pyproject.toml:8) has a static `version = "2.0.5"` | replace with `dynamic = ["version"]` |
-| The version is not already published | PyPI has `1.5, 1.6, 1.7, 2.0.3, 2.0.4, 2.0.5`; **2.0.5 is the latest** | bump to `2.0.6` |
-| A console script that prints the version for `--version` | `luks-tray = luks_tray.Main:main`, and [`main()`](../luks_tray/Main.py:1002) has no `--version` | add the argparse action |
-| `python -m build` works, from the dev extra | `build` is **not installed** in `lt-venv` (3.13.5) | add `build>=1.2`, install `.[dev]` |
-| Dev extra: ruff, pytest, pytest-cov, build, twine>=7, packaging>=26 | no `[project.optional-dependencies]` at all; `lt-venv` has ruff 0.17.3 only | add the extra |
-| Inspector at `tests/inspect_dist.py`, overridable via `[tool.bless] inspect` | missing — `tests/` holds only `AUDIT.md` | add an adapted copy |
-| Clean working tree | clean; `.ruff_cache/`, `*.whl`, `*.tar.gz`, `.coverage*` are not ignored | extend [`.gitignore`](../.gitignore) |
-| `vX.Y.Z` tag absent | no version tags exist (only `archive/sway`) | none |
-| `main` and `dev` exist locally **and** as `origin/*` | both do; `dev` is 3 commits ahead of `origin/dev` | push `dev` first |
-| Credentials per index, kept out of the tree | none in the tree | use `~/.pypirc` or `TWINE_PASSWORD` / `TWINE_TESTPYPI_PASSWORD` |
-| A `pytest` suite the gate can run | **none** — `pytest` exits 5 (no tests collected), which `bless` reads as a failed gate | the test suite below |
+| Flat layout: the package directory at the root | [`luks_tray/`](../luks_tray) is at the root | ok |
+| `__version__ = "X.Y.Z"` in `<package>/__init__.py` | [`luks_tray/__init__.py`](../luks_tray/__init__.py) is **empty** | **done**: `__version__ = "3.0.0"` |
+| The build backend reads that line | static `version = "2.0.5"` in `[project]` | **done**: `dynamic = ["version"]` |
+| The version is not already published | PyPI has `1.5, 1.6, 1.7, 2.0.3, 2.0.4, 2.0.5` | **done**: the working version is `3.0.0` |
+| A console script that prints the version for `--version` | `luks-tray = luks_tray.Main:main` had no `--version` | **done**: `action='version'` in [`main()`](../luks_tray/Main.py) |
+| `python -m build` works, from the dev extra | `build` was not installed in `lt-venv` (3.13.5) | **done**: `build 1.6.1` |
+| Dev extra: ruff, pytest, pytest-cov, build, twine>=7, packaging>=26 | no `[project.optional-dependencies]` at all | **done**: `pytest 9.2.0`, `pytest-cov 7.1.0`, `build 1.6.1`, `twine 7.0.0`, `packaging 26.3`, `ruff 0.17.3` |
+| Inspector at `tests/inspect_dist.py` | missing — `tests/` held only `AUDIT.md` | **done**: [`tests/inspect_dist.py`](inspect_dist.py) |
+| A `pytest` suite the gates can run | **none** — `pytest` exits 5, which `bless` reads as a failed gate | **Phase 2** |
+| Clean working tree | clean; `.ruff_cache/`, `*.whl`, `*.tar.gz`, `.coverage*` were not ignored | **done**: [`.gitignore`](../.gitignore) covers the gate's output |
+| `vX.Y.Z` tag absent | no version tags exist (only `archive/sway`) | ok |
+| `main` and `dev` exist locally **and** as `origin/*` | both do; `dev` is 4 commits ahead of `origin/dev` | push `dev` before the first `bless` run from `dev` |
+| Credentials per index, kept out of the tree | none in the tree | `~/.pypirc` or `TWINE_PASSWORD` / `TWINE_TESTPYPI_PASSWORD` |
+| A GitHub Actions pipeline | none | **Phase 3** |
 
 Two consequences worth stating plainly:
 
-* `bless` also **refuses** a dirty tree, so the working tree must be committed
-  before it can run at all. That is a property to rely on, not a nuisance: it is
-  what makes "the tag describes what was tested" true.
+* `bless` **refuses** a dirty tree, so the working tree must be committed before
+  it can run at all. That is a property to rely on, not a nuisance: it is what
+  makes "the tag describes what was tested" true.
 * The gates run `sys.executable`, so the interpreter that runs `bless` is the
   interpreter that must have the dev extra and PyQt6. The shebang is
-  `#!/usr/bin/env python3` (system Python here), so the documented invocation is
-  **`lt-venv/bin/python ./bless`**, not `./bless`.
+  `#!/usr/bin/env python3` (system Python here, without PyQt6), so the
+  documented invocation is **`lt-venv/bin/python ./bless`**, not `./bless`.
 
 ## Decisions this plan takes
 
-1. **`2.0.6` is the version in `__init__.py`.** Not a preference: `2.0.5` is on
-   PyPI and the duplicate check refuses it, listing every release. `dev` is three
-   documentation-only commits ahead of `origin/dev`, so nothing published is
-   changed by moving the number forward.
+1. **`3.0.0` is the version.** Owner's call, and the right one twice over:
+   `2.0.5` is on PyPI so the duplicate check refuses it, and the audit
+   remediation plus the packaging work since then is not a patch-release story.
+   Significant features are still to come in the 3.x line.
 2. **`deploy` is deleted**, not repaired. `bless` covers the same intent (build
    it, install it, run it) with checks, and the missing piece `deploy` had —
-   "install into *this* environment" — is `lt-venv/bin/python -m pip install -e
-   '.[dev]'`, which is a one-line README-DEV instruction rather than a script
-   that guesses at the interpreter.
-3. **No `smoke_args`.** `[tool.bless] smoke_args` would add an argv to the smoke
-   run; `--check-deps` is the only non-interactive candidate and it exits 1 when
-   a system program is absent, so on a CI runner without `cryptsetup` it would
+   "install into *this* environment" — is a one-line instruction rather than a
+   script that guesses at the interpreter.
+3. **The ruff selection is pinned in `pyproject.toml`.**
+   `select = ["E4", "E7", "E9", "F"]` — the rule set this code has always been
+   kept clean under — because `bless` runs `python -m ruff check .` with no
+   flags, and ruff 0.17's default set now adds pyupgrade, isort, simplify,
+   blind-except, shebang and `ruff`-specific rules, which report **56 findings**
+   across the package (all pre-existing). Pinning means `bless`, CI and a
+   developer run one rule set, and a ruff upgrade cannot redden the release gate
+   by preferring different style. Widening it stays recorded as medium #11 in
+   [`AUDIT.md`](AUDIT.md) — and when that happens, `tests/*` will need `S101`
+   and `S108` (assertions, `/tmp` paths).
+4. **No `smoke_args`.** `[tool.bless] smoke_args` adds an argv to the smoke run;
+   `--check-deps` is the only non-interactive candidate and it exits 1 when a
+   system program is absent, so on a CI runner without `cryptsetup` it would
    fail the gate for a packaging reason. The version probe is the smoke test.
-4. **The suite imports the real PyQt6**, it does not stub Qt. `pwr-tray` stubs
-   PyQt5 because it is PyQt5-only metadata; here every dependency is on PyPI and
-   the parts worth testing (dialogs, menu construction, window flags) are Qt
-   behaviour. CI installs `libgl1 libegl1 libxkbcommon0` and runs with
-   `QT_QPA_PLATFORM=offscreen`, which is how a tray app gets a real
-   `QApplication` without a display.
-5. **The coverage floor is set after the first measured run** and then only
+5. **The suite imports the real PyQt6**, it does not stub Qt. `pwr-tray` stubs
+   PyQt5; here every dependency is on PyPI and the behaviour worth pinning
+   (window flags, the manual title label, dialog placement, menu rebuilds) is Qt
+   behaviour, which a stub would only pretend to exercise. CI installs
+   `libgl1 libegl1 libxkbcommon0` and runs with `QT_QPA_PLATFORM=offscreen`.
+6. **The coverage floor is set after the first measured run** and then only
    raised (`fail_under`, read by `pytest-cov` itself so CI and a developer
    enforce one number).
+7. **Developer documentation lives under `tests/`**, not beside the user-facing
+   `README.md`: `tests/README-DEV.md`, next to the audit and this plan.
 
-## Phase 1 — the release plumbing
+## Phase 1 — the release plumbing (done)
 
-Ordered, each step verified before the next.
+1. [`luks_tray/__init__.py`](../luks_tray/__init__.py): `__version__ = "3.0.0"`,
+   documented as the single source of truth.
+2. [`pyproject.toml`](../pyproject.toml): `dynamic = ["version"]`; the `dev`
+   extra; `[tool.pytest.ini_options]`, `[tool.coverage.*]` (branch coverage,
+   `show_missing`, no floor yet); `[tool.ruff]` pinned selection; and
+   `[tool.flit.sdist] include = ["tests/"]` so the sdist can run its own gate.
+3. `--version` in [`main()`](../luks_tray/Main.py), handled by argparse so it
+   exits before `IniTool` is built and before stdin is detached from the
+   terminal.
+4. [`tests/inspect_dist.py`](inspect_dist.py): the same shape as `pwr-tray`'s
+   inspector (expectations read from `pyproject.toml` and the package, never
+   from the artifact), asserting `Name`, `Version`, `Summary`,
+   `Requires-Python`, `License-Expression`, `License-File`, keywords, runtime
+   `Requires-Dist` names, the five shipped SVGs, a `LICENSE` inside `.dist-info`,
+   and no `tests/`, virtualenv or bytecode; and for the sdist, the manifest,
+   README, licence, package, inspector, plus the embedded `__version__` equal to
+   the artifact's.
+5. [`.gitignore`](../.gitignore): `build/`, `dist/`, `.ruff_cache/`,
+   `.pytest_cache/`, `.coverage*`, `coverage.xml`, `*.whl`, `*.tar.gz`.
+6. `bless` copied from `../pwr-tray/bless`, `chmod +x`, hash recorded above.
+7. `deploy` deleted; the audit paragraph now describes the replacement.
+8. `lt-venv/bin/python -m pip install -e '.[dev]'`.
 
-1. [`luks_tray/__init__.py`](../luks_tray/__init__.py): `__version__ = "2.0.6"`,
-   with a comment naming it the single source of truth.
-2. [`pyproject.toml`](../pyproject.toml): delete `version = "2.0.5"`, add
-   `dynamic = ["version"]`. flit_core reads the line from step 1 and enforces
-   that no second copy exists.
-3. [`main()`](../luks_tray/Main.py:1002): add
-   `parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')`
-   so the smoke run can read the built wheel's own number back out. It must
-   exit before `IniTool` is built and before stdin is detached, which
-   `action='version'` does by construction.
-4. `[project.optional-dependencies] dev = ["pytest>=8", "pytest-cov>=5",
-   "ruff>=0.6", "build>=1.2", "twine>=7", "packaging>=26"]`, then
-   `lt-venv/bin/python -m pip install -e '.[dev]'`.
-5. `tests/inspect_dist.py`, adapted from
-   `../pwr-tray/tests/inspect_dist.py`: same shape (expectations read from
-   `pyproject.toml` and the package, never from the artifact), with the resource
-   list replaced by the five shipped SVGs in
-   [`luks_tray/resources/`](../luks_tray/resources) and no systemd-unit check.
-   Wheel: `Name`, `Version` (or the rehearsal override), `Summary`,
-   `Requires-Python`, `Keywords`, runtime `Requires-Dist` names, `LICENSE`
-   carried, every resource present, no `tests/`, no `.venv`, no bytecode.
-   sdist: `pyproject.toml`, `README.md`, `LICENSE`, `luks_tray/__init__.py`,
-   `luks_tray/Main.py`, `conftest.py` and the test files present, the embedded
-   `__version__` equal to the artifact version, no venv or bytecode.
-6. `[tool.flit.sdist] include = ["tests/", "conftest.py"]` so the sdist can run
-   its own gate.
-7. `[tool.pytest.ini_options] testpaths = ["tests"]`, `addopts = "-ra"`;
-   `[tool.coverage.run] branch = true`, `source = ["luks_tray"]`;
-   `[tool.coverage.report] show_missing = true`, `fail_under` after measuring.
-8. `[tool.ruff] target-version = "py311"`, `line-length` and
-   `extend-exclude = ["build", "dist", "lt-venv"]`; keep the existing
-   `[tool.ruff.lint] ignore = ["N999"]` and add `per-file-ignores` for `tests/*`
-   (`S101`, `S108`) once the suite exists.
-9. [`.gitignore`](../.gitignore): `build/`, `dist/` (present), plus
-   `.ruff_cache/`, `.pytest_cache/`, `.coverage`, `.coverage.*`, `coverage.xml`,
-   `*.whl`, `*.tar.gz`.
-10. Copy `bless` from `../pwr-tray/bless`, `chmod +x`, and record its SHA-256 in
-    this document. Do not edit it: reuse is "copy verbatim", and a later upstream
-    change is adopted as a new copy.
-11. Delete [`deploy`](../deploy); point the `deploy` paragraph in
-    [`AUDIT.md`](../tests/AUDIT.md) at this document instead of describing a fix
-    that will not happen.
-12. Commit on `dev`, push `dev` (so `origin/dev` exists and is not behind).
+**Verified:** `lt-venv/bin/python -m build` produces
+`luks_tray-3.0.0.tar.gz` and `luks_tray-3.0.0-py3-none-any.whl` with the
+version read from the module; `tests/inspect_dist.py` accepts that pair;
+`lt-venv/bin/luks-tray --version` → `luks-tray 3.0.0` and
+`python -m luks_tray.Main --version` → `Main.py 3.0.0`; `ruff check .` →
+*All checks passed* under the pinned selection; `git ls-files deploy` empty.
 
-## Phase 2 — the test suite (the part that does not exist yet)
+## Phase 2 — the test suite (open)
 
-This is the "whopper": `bless` will not pass without it, and CI has nothing to
+This is the whopper: `bless` will not pass without it, and CI has nothing to
 run. The raw material already exists as the throwaway harnesses in `/tmp`
 (`luks_fix8_check.py`, `luks_fix10_check.py`, `luks_fix11_check.py`,
-`luks_fix16_check.py`, `luks_cleanup_check.py`, `luks_split_check.py`), which
-were written to prove one fix each and then abandoned; they become assertions
-here instead of being rewritten from scratch.
+`luks_fix16_check.py`, `luks_cleanup_check.py`, `luks_split_check.py`), written
+to prove one fix each and then abandoned; they become assertions here instead of
+being rewritten from scratch.
 
 * `conftest.py`: point `HOME`, `XDG_CONFIG_HOME` and the package's config path at
   a temporary directory so no test can write to `~/.config/luks-tray`, and
-  provide the fixtures the suite shares (a fake `IniTool`, a `QtBot`-free
-  `QApplication` fixture guarded by `QT_QPA_PLATFORM=offscreen`).
+  provide the fixtures the suite shares (a fake `IniTool`, a `QApplication`
+  fixture guarded by `QT_QPA_PLATFORM=offscreen`). It joins the sdist include
+  list when it exists.
 * Pure logic, no Qt — the bulk of the coverage:
   [`History`](../luks_tray/History.py) (fernet round trip, salt/iterations,
   atomic write and file mode, `restore()` on missing/corrupt/legacy data,
@@ -166,21 +166,23 @@ here instead of being rewritten from scratch.
   `is_empty_dir`, `generate_auto_mount_folder`, `get_real_user_ids`,
   `get_real_user_home`, `expand_real_user`).
 * Qt behaviour, with `QT_QPA_PLATFORM=offscreen`:
-  [`requires_manual_title()`](../luks_tray/dialogs/Common.py:38) per
-  compositor, [`set_title()`](../luks_tray/dialogs/Common.py:96) inserting the
-  in-dialog label, [`showEvent()`](../luks_tray/dialogs/Common.py:129) placement
-  arithmetic, and [`replace_menu_if_different()`](../luks_tray/Main.py:479)
-  rebuilding only on change (the sway menu regression).
-* Repository hygiene, ported from `../pwr-tray/tests/test_repo_hygiene.py`:
-  no second copy of the version in `pyproject.toml`, `bless` is present and
-  executable with the recorded hash, `.gitignore` keeps gate artifacts out of
-  `git status`, and the sdist include list still names the tests.
+  [`requires_manual_title()`](../luks_tray/dialogs/Common.py#L38) per
+  compositor, [`set_title()`](../luks_tray/dialogs/Common.py#L96) inserting the
+  in-dialog label, [`showEvent()`](../luks_tray/dialogs/Common.py#L129)
+  placement arithmetic, and
+  [`replace_menu_if_different()`](../luks_tray/Main.py#L479) rebuilding only on
+  change (the sway menu regression).
+* Metadata and repository hygiene: `test_metadata.py` (one version location,
+  `dynamic = ["version"]`, the console script, `--version` matching
+  `__version__`), `bless` present and executable with the recorded hash,
+  `.gitignore` keeping gate output out of `git status`, and the sdist include
+  list still naming the tests.
 * The gate's own pure parts, ported from `../pwr-tray/tests/test_bless.py`:
   identity derivation, the exact `test`/`publish`/`quit` prompt handling, the
-  `X.Y.Z.99.N` arithmetic, and `branch_plan`'s refusals. `bless` is
-  loaded by path (`importlib`) because it is a script, not a module.
+  `X.Y.Z.99.N` arithmetic, and `branch_plan`'s refusals. `bless` is loaded by
+  path (`importlib`) because it is a script, not a module.
 
-## Phase 3 — CI
+## Phase 3 — CI (open)
 
 `.github/workflows/ci.yml`, modelled on `../pwr-tray/.github/workflows/tests.yml`,
 three jobs:
@@ -189,11 +191,11 @@ three jobs:
 * **test** — matrix `3.11`, `3.12`, `3.13`; `apt-get install -y libgl1 libegl1
   libxkbcommon0`; `pip install -e '.[dev]'`; `compileall -q luks_tray tests`;
   `pytest -q --cov=luks_tray --cov-report=term-missing` with
-  `QT_QPA_PLATFORM=offscreen`. The coverage floor is not repeated in the command:
-  `pytest-cov` reads `fail_under` from `pyproject.toml`.
+  `QT_QPA_PLATFORM=offscreen`. The coverage floor is not repeated in the
+  command: `pytest-cov` reads `fail_under` from `pyproject.toml`.
 * **package** — `python -m build`, then
-  `python tests/inspect_dist.py dist/*.whl dist/*.tar.gz`, then install the wheel
-  into a scratch venv, import the package, load each resource through
+  `python tests/inspect_dist.py dist/*.whl dist/*.tar.gz`, then install the
+  wheel into a scratch venv, import the package, load each resource through
   `importlib.resources`, and run `luks-tray --version` against the version the
   built package reports. Credential-free: CI is a gate, the upload stays local.
 
@@ -201,29 +203,28 @@ Triggers: `push` on `main` and `dev`, `pull_request`, `workflow_dispatch`;
 `permissions: contents: read`; a `concurrency` group that cancels superseded
 runs.
 
-## Phase 4 — documentation
+## Phase 4 — documentation (open)
 
-* `README-DEV.md`: the one version source, the three gates, the `bless`
+* `tests/README-DEV.md`: the one version source, the three gates, the `bless`
   stages and the `test`/`publish`/`quit` prompt, the TestPyPI rehearsal and its
   install line (`pip cache purge`, `--extra-index-url`), the per-index
-  credentials, the patient index verification, and the release steps
-  (`dev` and `main` aligned, `vX.Y.Z` tagged, both pushed).
-* [`README.md`](../README.md): replace any "run `deploy`" advice with
-  `lt-venv/bin/python -m pip install -e '.[dev]'` and name `./bless` as the
-  release path.
-* [`AUDIT.md`](../tests/AUDIT.md): the `deploy` paragraph becomes a reference to
-  this plan; the missing-tests item (medium #11) is closed by Phase 2/3 once it
-  is real, not before.
+  credentials, the patient index verification, and the release steps (`dev` and
+  `main` aligned, `vX.Y.Z` tagged, both pushed). It lives under `tests/` on
+  purpose: the root belongs to the user-facing `README.md`, and the audit and
+  this plan are already dev documents.
+* [`README.md`](../README.md): the development section names
+  `lt-venv/bin/python -m pip install -e '.[dev]'` and points at
+  `tests/README-DEV.md` for the release path.
 
 ## What is deliberately out of scope
 
 * No CI publish job. The upload is irreversible and the owner runs it from the
   tree, which is why the safety lives in an inspectable local script.
-* No `[tool.bless] inspect = ""` shortcut: the inspector is shared with CI so the
-  two cannot disagree.
-* No PyPI metadata changes beyond what `dynamic = ["version"]` requires. The
-  classifiers, `license-files` and `Homepage`/`Bug Tracker` URLs stay as the
-  PEP 639 pass left them.
+* No `[tool.bless] inspect = ""` shortcut: the inspector is shared with CI so
+  the two cannot disagree.
+* No metadata changes beyond `dynamic = ["version"]`. The classifiers,
+  `license-files` and the `Homepage`/`Bug Tracker` URLs stay as the PEP 639 pass
+  left them.
 * `images/` stays at the root and is not shipped in the sdist; that is the
   existing state of the published package, and changing it is a README/asset
   decision, not a release-gate one.

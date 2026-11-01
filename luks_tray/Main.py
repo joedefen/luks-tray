@@ -43,7 +43,7 @@ from PyQt6.QtCore import QTimer, Qt
 
 from luks_tray.History import HistoryClass
 from luks_tray.Utils import prt, prt_once
-from luks_tray import Utils
+from luks_tray import Utils, __version__
 from luks_tray.IniTool import IniTool
 from luks_tray.DeviceInfo import DeviceInfo
 from luks_tray.dialogs import (CommonDialog, MasterPasswordDialog,
@@ -1002,12 +1002,17 @@ class LuksTray():
 def main():
     """ Entry point: parse the CLI and then run the tray loop.
 
-        The informational options (`--edit-config`, `--follow-log`,
-        `--check-deps`) exec their tool and never return; the normal path
-        builds `IniTool` and `LuksTray` and hands control to
+        The informational options (`--version`, `--edit-config`,
+        `--follow-log`, `--check-deps`) print or exec and never return; the
+        normal path builds `IniTool` and `LuksTray` and hands control to
         `QApplication.exec()`. Anything that fails on the way is logged
         through `prt()` -- stdout may already be the debug log by then -- and
         exits with status 15.
+
+        `--version` is deliberately handled by argparse (`action='version'`):
+        it exits while parsing, before `IniTool` is built and before stdin is
+        detached from the terminal, which is what makes it usable as the
+        smoke check ./bless runs against a wheel installed in a scratch venv.
     """
     import argparse
     signal.signal(signal.SIGINT, signal.SIG_DFL)
@@ -1023,6 +1028,12 @@ def main():
             help='exec ${EDITOR:-vim} on config.ini file')
     parser.add_argument('--check-deps', action='store_true',
             help='check that necessary system programs are installed')
+    # The release gate installs the built wheel in a throwaway venv and runs
+    # this, so the number printed has to come from the installed package --
+    # not from pyproject.toml, and not from the source tree.
+    parser.add_argument('--version', action='version',
+            version=f'%(prog)s {__version__}',
+            help='print the version and exit')
     opts = parser.parse_args()
 
     if opts.edit_config:

@@ -1,3 +1,48 @@
+# luks-tray -- packaging, the release gate and the development loop
+# ================================================================
+#
+# Sources of truth
+# ----------------
+# * Build backend: flit_core.  The version lives in
+#   `luks_tray/__init__.py:__version__` and nowhere else; never add `version =`
+#   to [project].  tests/test_metadata.py enforces this, because a second copy
+#   of the version is how the published metadata drifted from the code before.
+# * Layout: the package is `luks_tray/`; the tray icons it loads at run time
+#   live under `luks_tray/resources/` and ride in the wheel.
+# * `luks-tray` is the console script (`luks_tray.Main:main`), and `--version`
+#   prints that same line, which is what ./bless' smoke install reads back out
+#   of the built wheel.
+#
+# Development
+# -----------
+# `./runner` runs this tree without installing it.  For the install layout, the
+# test inventory and the release checklist in detail, see
+# tests/README-DEV.md; the essentials:
+#
+#   python3 -m venv lt-venv
+#   lt-venv/bin/python -m pip install -e '.[dev]'
+#   lt-venv/bin/python -m ruff check .
+#   lt-venv/bin/python -m compileall -q luks_tray tests
+#   lt-venv/bin/python -m pytest -q --cov=luks_tray --cov-report=term-missing
+#
+# That last line is the test gate CI runs.  It is not only a count of tests: the
+# coverage floor in [tool.coverage.report] is read by pytest-cov itself, so a
+# developer and CI cannot enforce different numbers.
+#
+# Releasing
+# ---------
+# `./bless` is the only path to an upload, and it takes no argument and no flag.
+# Every run refuses a dirty tree, refuses a version that is already published,
+# runs ruff, compileall and pytest, builds into a fresh build/bless-<version>/,
+# inspects the two files with tests/inspect_dist.py -- the same inspector CI
+# uses -- runs `twine check --strict`, installs the wheel in a scratch venv and
+# runs it, and only then asks `====> Enter test or publish or quit:`.  `test`
+# uploads a throwaway X.Y.Z.99.N to TestPyPI from a copy of the tree; `publish`
+# makes main and dev one commit, tags vX.Y.Z, uploads to PyPI and pushes.
+#
+# Run it as `lt-venv/bin/python ./bless`: the gates run sys.executable, and the
+# system python3 has no PyQt6 for the tests to import.
+
 [build-system]
 # 3.12 is the first flit_core that understands the PEP 639 SPDX
 # `license = "MIT"` string and `license-files` below; older 3.x rejects both.
@@ -5,7 +50,9 @@ requires = ["flit_core >=3.12,<4"]
 build-backend = "flit_core.buildapi"
 
 [project]
-version = "2.0.5"
+# flit_core reads `__version__` from `luks_tray/__init__.py` at build time, so
+# the release number is never duplicated here.
+dynamic = ["version"]
 name = "luks-tray"
 description = "A Qt-based tray app for managing LUKS encrypted volumes"
 authors = [
@@ -40,6 +87,22 @@ dependencies = [
     "petname",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    # pytest-cov reads `fail_under` from the coverage configuration below, so
+    # the pytest command CI runs does not carry a second copy of the floor.
+    "pytest-cov>=5",
+    "ruff>=0.6",
+    "build>=1.2",
+    # The validator must be at least as new as the writer: flit_core 3.12 emits
+    # PEP 639 licence metadata, which older packaging/twine releases reject as
+    # malformed.  twine earns its place beside flit because flit publishes
+    # whatever it just rebuilt, while ./bless sends two named, inspected files.
+    "twine>=7",
+    "packaging>=26",
+]
+
 [project.urls]
 Homepage = "https://github.com/joedefen/luks-tray"
 "Bug Tracker" = "https://github.com/joedefen/luks-tray/issues"
@@ -47,7 +110,46 @@ Homepage = "https://github.com/joedefen/luks-tray"
 [project.scripts]
 luks-tray = "luks_tray.Main:main"
 
+[tool.flit.sdist]
+# The tests are part of the contract: an sdist that cannot run its own gate
+# leaves a downstream packager guessing.  conftest.py joins this list once it
+# exists (Phase 2 of tests/BLESS-ADOPTION-PLAN.md).
+include = ["tests/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.coverage.run]
+# Branch coverage: the misses that matter here are the arms of an `if` nobody
+# takes (the container state machine, the mount/unmount error paths), not only
+# statements nobody executes.
+branch = true
+source = ["luks_tray"]
+
+[tool.coverage.report]
+# `fail_under` is set once the suite has been measured, then only raised.
+show_missing = true
+skip_covered = true
+precision = 1
+
+[tool.ruff]
+# Keep the lint gate identical on every machine: no global or user config can
+# change which rules CI enforces.
+target-version = "py311"
+line-length = 100
+extend-exclude = ["build", "dist", "lt-venv"]
+
 [tool.ruff.lint]
+# The selection is pinned rather than inherited.  `ruff check .` with no flags
+# enforces whatever the installed ruff calls its default, and that set has grown
+# across releases: 0.17 adds pyupgrade, isort, simplify, blind-except, shebang
+# and the `ruff`-specific rules, which the audit records as 56 pre-existing
+# findings across the package.  Pinning here means ./bless, CI and a developer
+# run one rule set -- the one the code has always been kept clean under -- and a
+# ruff upgrade cannot turn the release gate red by deciding to prefer different
+# style.  Widening it is tracked in AUDIT.md (medium #11), not smuggled in here.
+select = ["E4", "E7", "E9", "F"]
 # Project style: module files are CamelCase -- `History.py`, `IniTool.py`,
 # `Utils.py`, `DeviceInfo.py`, `LuksOps.py`, `Main.py` and every dialog. That is
 # deliberate and uniform across the package, so pep8-naming's N999 ("invalid

@@ -1,7 +1,27 @@
+# Virtualenvs and build output
 lt-venv/
-# Byte-compiled / optimized / DLL files
-__pycache__/
 build/
 dist/
 *.egg-info/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# Tooling caches.  ./bless refuses a dirty tree before it does anything, so a
+# cache that shows up in `git status` is the difference between a release and a
+# refusal.
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# Built distributions: ./bless builds into build/bless-<version>/ instead, but a
+# stray `python -m build` run should not offer a 2.0.5 wheel for upload.
+*.whl
+*.tar.gz
+
 .vscode/
