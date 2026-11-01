@@ -48,7 +48,7 @@ class OptionsDialog(CommonDialog):
 
     def __init__(self, tray):
         super().__init__(tray)
-        self.set_title('Options [luks-tray]')
+        self.set_title('Options')
 
         ini_tool = tray.ini_tool
         self.add_input_field(

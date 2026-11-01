@@ -27,7 +27,7 @@ class MountDeviceDialog(CommonDialog):
         if container.filesystems:
             mounts = container.filesystems[0].mounts
         if mounts:  # unmount dialog
-            self.set_title('Unmount and Close Device [luks-tray]')
+            self.set_title('Unmount and Close Device')
             self.add_line(f'{container.name}')
             self.add_line(f'Unmount {",".join(mounts)}?')
             self.add_push_button('OK', self.unmount_device, container.uuid)
@@ -35,7 +35,7 @@ class MountDeviceDialog(CommonDialog):
             self.main_layout.addLayout(self.button_layout)
 
         elif container.opened:  # close dialog: unlocked but nothing mounted
-            self.set_title('Close Unmounted Device [luks-tray]')
+            self.set_title('Close Unmounted Device')
             self.add_line(f'{container.name}')
             # `mounts` is empty in this branch by definition (that is what
             # selected it), so joining it rendered a bare "Close ?". Name the
@@ -49,7 +49,7 @@ class MountDeviceDialog(CommonDialog):
             self.main_layout.addLayout(self.button_layout)
 
         else:
-            self.set_title('Mount Device [luks-tray]')
+            self.set_title('Mount Device')
             vital = self.tray.history.get_vital(container.uuid)
             self.add_line(f'{container.name}')
             self.add_input_field('password', "Enter Password", f'{vital.password}',

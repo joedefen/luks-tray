@@ -19,7 +19,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QCheckBox, QLabel, QLineEdit, QProgressBar, QPushButton
 
 from luks_tray.dialogs import Common
-from luks_tray.dialogs.Common import CommonDialog, requires_manual_title
+from luks_tray.dialogs.Common import CommonDialog
 
 
 class FakeIni:
@@ -63,39 +63,6 @@ def dialog(qapp, tray):
     dlg.main_layout.addLayout(dlg.button_layout)
     dlg.setLayout(dlg.main_layout)
     return dlg
-
-
-# --- the compositor probe --------------------------------------------------
-
-
-def test_requires_manual_title_matches_sway(monkeypatch):
-    monkeypatch.setenv('XDG_CURRENT_DESKTOP', 'sway')
-    monkeypatch.delenv('DESKTOP_SESSION', raising=False)
-    assert requires_manual_title() is True
-
-
-def test_requires_manual_title_is_case_insensitive_and_reads_the_session(
-        monkeypatch):
-    monkeypatch.delenv('XDG_CURRENT_DESKTOP', raising=False)
-    monkeypatch.setenv('DESKTOP_SESSION', 'Sway-custom')
-    assert requires_manual_title() is True
-
-
-def test_requires_manual_title_is_false_elsewhere(monkeypatch):
-    # Documented limitation, not an oversight: this is a compositor *name*
-    # test, so niri/Hyprland/river get the missing decoration without the
-    # mitigation.  Widening it to any WAYLAND_DISPLAY would double-decorate
-    # Plasma, which draws server-side decorations.
-    for value in ('niri', 'Hyprland', 'KDE', 'i3'):
-        monkeypatch.setenv('XDG_CURRENT_DESKTOP', value)
-        monkeypatch.delenv('DESKTOP_SESSION', raising=False)
-        assert requires_manual_title() is False
-
-
-def test_requires_manual_title_survives_an_empty_environment(monkeypatch):
-    monkeypatch.delenv('XDG_CURRENT_DESKTOP', raising=False)
-    monkeypatch.delenv('DESKTOP_SESSION', raising=False)
-    assert requires_manual_title() is False
 
 
 # --- construction ----------------------------------------------------------
@@ -146,27 +113,34 @@ def last_widget(layout):
     return item.widget() if item is not None else None
 
 
-def test_set_title_sets_the_window_title(dialog, monkeypatch):
-    monkeypatch.setenv('XDG_CURRENT_DESKTOP', 'i3')
+def test_set_title_sets_the_window_title_and_adds_a_body_heading(dialog):
     before = dialog.main_layout.count()
-    dialog.set_title('Mount Crypt File [luks-tray]')
-    assert dialog.windowTitle() == 'Mount Crypt File [luks-tray]'
-    # Without the Sway workaround nothing extra is added inside the dialog.
-    assert dialog.main_layout.count() == before
-
-
-def test_set_title_adds_an_in_dialog_title_bar_on_sway(dialog, monkeypatch):
-    monkeypatch.setenv('XDG_CURRENT_DESKTOP', 'sway')
-    before = dialog.main_layout.count()
-    dialog.set_title('Mount Crypt File [luks-tray]')
+    dialog.set_title('Mount Crypt File')
     assert dialog.windowTitle() == 'Mount Crypt File [luks-tray]'
     assert dialog.main_layout.count() == before + 1
-    label = last_widget(dialog.main_layout)
-    assert isinstance(label, QLabel)
-    assert label.text() == 'Mount Crypt File [luks-tray]'
-    assert label.alignment() & Qt.AlignmentFlag.AlignCenter
-    # Styled to read as a title bar, since the compositor draws none.
-    assert 'background-color' in label.styleSheet()
+    heading = dialog.main_layout.itemAt(0).widget()
+    assert isinstance(heading, QLabel)
+    assert heading.text() == 'Mount Crypt File'
+    assert heading.alignment() & Qt.AlignmentFlag.AlignCenter
+    assert 'font-weight' in heading.styleSheet()
+
+
+def test_set_title_accepts_a_legacy_suffix_without_duplicating_it(dialog):
+    dialog.set_title('Mount Crypt File [luks-tray]')
+    assert dialog.windowTitle() == 'Mount Crypt File [luks-tray]'
+    assert dialog.main_layout.itemAt(0).widget().text() == 'Mount Crypt File'
+
+
+@pytest.mark.parametrize('desktop', ['sway', 'niri', 'i3', 'KDE'])
+def test_set_title_heading_does_not_depend_on_the_compositor(
+        qapp, tray, monkeypatch, desktop):
+    monkeypatch.setenv('XDG_CURRENT_DESKTOP', desktop)
+    dlg = CommonDialog(tray)
+    dlg.main_layout.addLayout(dlg.button_layout)
+    dlg.setLayout(dlg.main_layout)
+    dlg.set_title('Options')
+    assert dlg.windowTitle() == 'Options [luks-tray]'
+    assert dlg.main_layout.itemAt(0).widget().text() == 'Options'
 
 
 # --- layout helpers --------------------------------------------------------
@@ -358,6 +332,7 @@ def test_alert_errors_shows_one_box_for_the_whole_list(dialog, monkeypatch):
     monkeypatch.setattr(Common, 'QMessageBox', FakeBox)
     dialog.alert_errors(['first', 'second'])
     assert len(FakeBox.instances) == 1
+    assert 'Errors Detected [luks-tray]' in FakeBox.instances[0].texts
     assert 'first\nsecond' in FakeBox.instances[0].texts
     assert 'shown' in FakeBox.instances[0].texts
 

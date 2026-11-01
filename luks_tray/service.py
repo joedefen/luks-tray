@@ -12,10 +12,11 @@
     Why two templates and not pwr-tray's ten: luks-tray has no per-desktop
     behaviour to encode.  What it does need from the session is the *display*
     (`WAYLAND_DISPLAY` or `DISPLAY`, which Qt turns into a platform plugin) and
-    the *desktop name* (`XDG_CURRENT_DESKTOP`/`DESKTOP_SESSION`, which decides
-    whether the dialogs draw their own title bar -- see
-    [`luks_tray.dialogs.Common.requires_manual_title()`](luks_tray/dialogs/Common.py:38)).
-    A user unit cannot inherit either from the compositor, so `render()`
+    the *desktop name* (`XDG_CURRENT_DESKTOP`/`DESKTOP_SESSION`, which the
+    compositor helper uses to report the right window rule and keeps the log
+    banner identifiable).  The dialogs themselves always show a body heading,
+    so they no longer change layout based on the desktop name.  A user unit
+    cannot inherit either from the compositor, so `render()`
     appends what the installing shell exported, after `ExecStart=`, where a
     later `Environment=` line wins.  `XDG_SESSION_TYPE` is *pinned* by each
     template instead: it selects the template, so it must not be re-derived.

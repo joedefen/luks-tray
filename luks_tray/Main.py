@@ -43,6 +43,9 @@ from PyQt6.QtWidgets import QWidgetAction, QWidget, QLabel
 from PyQt6.QtGui import QIcon, QCursor, QAction, QFont, QFontInfo
 from PyQt6.QtCore import QTimer, Qt, QtMsgType, qInstallMessageHandler
 
+from luks_tray.AppInfo import (APP_NAME, APPLICATION_DISPLAY_NAME,
+                               DESKTOP_FILE_NAME)
+from luks_tray import Compositor
 from luks_tray.History import HistoryClass
 from luks_tray.Utils import PyKill, prt, prt_once
 from luks_tray import Utils, __version__
@@ -51,7 +54,7 @@ from luks_tray.IniTool import IniTool
 from luks_tray.DeviceInfo import DeviceInfo
 from luks_tray.dialogs import (CommonDialog, MasterPasswordDialog,
                                MountDeviceDialog, MountFileDialog,
-                               OptionsDialog, requires_manual_title)
+                               OptionsDialog)
 from luks_tray.LuksOps import (generate_uuid_for_file_path,
                                 get_luks_uuid_for_file, run_cmd,
                                 run_cmd_capture, run_unmount, sudo_cmd,
@@ -75,7 +78,6 @@ __all__ = [
     'generate_uuid_for_file_path',
     'get_luks_uuid_for_file',
     'main',
-    'requires_manual_title',
     'run_cmd',
     'run_cmd_capture',
     'run_unmount',
@@ -90,19 +92,33 @@ __all__ = [
 # appears, so start-up never blocks on the bar.
 TRAY_ATTACH_DELAY_MS = 500      # let a new host start serving calls
 
-# The name the log lines, the unit file and the menu all agree on.  The session
-# banner pairs it with `__version__` and the pid, so "which build wrote this
-# line, and which run?" is answered by the log itself.
-APP_NAME = 'luks-tray'
+# `APP_NAME` (imported from AppInfo) is the name the log lines, the unit file
+# and the menu all agree on.  The session banner pairs it with `__version__`
+# and the pid, so "which build wrote this line, and which run?" is answered by
+# the log itself.
 
-# Qt messages that are chatter rather than news.  The Qt6CT platform theme
-# prints its whole palette table through qDebug() every time a widget asks for
-# one, which used to put some forty lines in debug.log between the messages a
-# reader actually wanted.  The markers catch that plugin's output even where it
-# arrives at warning level.
+# Qt messages that are chatter rather than news.  The qt6ct platform theme (and
+# its qt5ct twin, whose class name differs by one digit) prints its whole
+# palette table through qDebug() every time a widget asks for one, which used to
+# put some forty lines in debug.log between the messages a reader actually
+# wanted; the markers catch that output even where it arrives at warning level.
+# The QThreadStorage notice is Qt describing its own teardown, once, at exit --
+# addressed by a hex thread id, so it can only be recognised by its prefix.
+#
+# The portal line is the third kind, and the most predictable one of all: naming
+# a desktop file for the Wayland app_id (see luks_tray/AppInfo.py) claims that an
+# installed `luks-tray.desktop` exists, and this package ships none, so
+# xdg-desktop-portal answers "App info not found for 'luks-tray'" on every
+# start.  Nothing here uses a portal feature -- no portal file chooser, no
+# notifications, no openUrl -- so that registration has nothing to enable and
+# failing it changes nothing the tray does.  It is matched on the registration
+# call rather than on the word "portal", so a portal problem that *would* matter
+# is still logged; ship a desktop entry and this marker can go.
 QT_NOISE = (
-    'Qt6CTPlatformTheme::',
+    'CTPlatformTheme::',
     'QWindowsWindow::',
+    'QThreadStorage:',
+    'Failed to register with host portal',
 )
 _qt_seen = set()
 
@@ -177,17 +193,21 @@ class LuksTray():
         between `cryptsetup open` and `mount` cannot snapshot a half-mounted
         container.
     """
+    # One entry per state the shield can report; the nickname is the `icon_key`
+    # that `replace_menu_if_different()` remembers and `self.icons` is keyed by.
+    # The two lists are positional, so they are edited together.
     svg_info = SimpleNamespace(version='04', bases=[
-                            'white-shield',  # no LUKS partitions unlocked
-                            'alert-shield',  # some partitions unlocked but not mounted
-                            'green-shield',   # some partitions unlocked and mounted
-                            # 'orange-shield',  # some partitions locked
-                            # 'yellow-shield',  # no partitions locked (all locked)
+                            'white-shield',   # nothing unlocked, and the state is known
+                            'alert-shield',   # something unlocked but not mounted
+                            'green-shield',   # something unlocked and mounted
+                            'orange-shield',  # history locked: the state is unknown
+                            # 'yellow-shield',  # unused: no state needs a fifth icon
                         ],
                         nicknames=[
                             'none',
                             'alert',
                             'ok',
+                            'locked',
                         ] )
 
     def __init__(self, ini_tool, opts):
@@ -196,6 +216,17 @@ class LuksTray():
 
         self.ini_tool = ini_tool
         self.app = QApplication([])
+        # A stable Wayland app_id is the trait compositor rules match on: it
+        # is what makes one `window-rule`/`for_window` cover the dialogs, the
+        # error boxes and the file pickers instead of guessing at titles.
+        # Measured on Qt 6.12: only `setDesktopFileName()` yields `luks-tray`
+        # here, dropping it falls back to the executable name (`python3` for
+        # `./runner`).  Setting it also makes Qt register that id with
+        # xdg-desktop-portal, which is refused because no desktop entry ships;
+        # that one line is filtered in QT_NOISE.
+        QApplication.setApplicationName(APP_NAME)
+        QApplication.setApplicationDisplayName(APPLICATION_DISPLAY_NAME)
+        QApplication.setDesktopFileName(DESKTOP_FILE_NAME)
         self.app.setQuitOnLastWindowClosed(False)
         self.mono_font = QFont("Consolas", 10)
         self.mono_font.setStyleHint(QFont.StyleHint.Monospace)
@@ -510,10 +541,17 @@ class LuksTray():
         """
         actions = []
 
+        # The icon key is the state the shield reports: the containers decide it
+        # in the loop below, and the locked-history branch overrides the default.
         icon_key = 'none'
         do_alerts = self.ini_tool.get_current_val('show_anomaly_alerts')
 
         if self.history.status == 'locked':
+            # Orange, not white. White claims every container is locked, and that
+            # is the one claim this state cannot make: an encrypted history that
+            # cannot be opened hides every container, so the state is unknown
+            # rather than safe. The single menu entry asks for the password.
+            icon_key = 'locked'
             action = QAction('✎ Click to enter master password', self.app)
             action.setFont(self.mono_font)
             action.triggered.connect(self.prompt_master_password)
@@ -1471,6 +1509,9 @@ def main():
             help='exec ${EDITOR:-vim} on config.ini file')
     parser.add_argument('--check-deps', action='store_true',
             help='check that necessary system programs are installed')
+    parser.add_argument('--show-window-rules', action='store_true',
+            help='print the niri/sway rule that makes luks-tray dialogs float,'
+                 ' then exit (reports the rule for this session)')
     parser.add_argument('--replace', action='store_true',
             help='if another luks-tray holds the single-instance lock, terminate'
                  ' it and take over (default: refuse to start)')
@@ -1513,6 +1554,14 @@ def main():
             version=f'%(prog)s {__version__}',
             help='print the version and exit')
     opts = parser.parse_args()
+
+    if opts.show_window_rules:
+        if opts.svc:
+            parser.error('--show-window-rules cannot be combined with --svc-*')
+        # Informational only: no IniTool, no Qt, no lock.  The snippet is for
+        # the compositor that started this shell, which is exactly the session
+        # the user is configuring.
+        sys.exit(Compositor.show_rules())
 
     # The --svc-* verbs touch the unit files and systemd, and nothing else --
     # not the configuration, not the lock, not the Qt application object.

@@ -2,20 +2,15 @@
 # -*- coding: utf-8 -*-
 """ Shared dialog scaffolding for LUKS TRAY.
 
-This is not working so well for sway (or wayland):
+    Every dialog uses the same body heading and the same window-title suffix.
+    That is deliberate: a Wayland compositor owns decorations and placement, so
+    a dialog cannot rely on its title bar being drawn.  Sway hides decorations
+    by default, and niri/X11 draw them, but the heading is part of the dialog
+    layout everywhere -- the information never depends on the compositor.
 
-Issue,Target,Summary of Failure
-
-- Floating/Decorations, PyQt6/Wayland CSD
-  - "PyQt's attempts to hint the window as a floating dialog
-    and draw its own Client-Side Decorations (CSD)
-    were either stripped by the Xwayland layer or ignored by Sway.
-    The CSD feature, meant to give apps control, failed to render even the basic title bar."
-- Taskbar Icon, PyQt6/Wayland CSD
-   - "The internal flag to skip the taskbar (WindowType.Tool) failed
-     because the window was treated as a generic,
-     primary application window (app_id: python3) by the Wayland compositor."
-
+    Compositor rules match the stable `app_id` set in
+    [`luks_tray.AppInfo`](luks_tray/AppInfo.py:1), not the title, so one rule
+    covers the dialogs, the error boxes and the file pickers.
 """
 # pylint: disable=unused-import,broad-exception-caught, invalid-name
 # pylint: disable=no-name-in-module,import-outside-toplevel,too-many-instance-attributes
@@ -31,27 +26,9 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog,
 from PyQt6.QtGui import QCursor
 from PyQt6.QtCore import Qt
 
+from luks_tray.AppInfo import heading_text, window_title
 from luks_tray.Utils import note_problem, prt_once
 from luks_tray.DeviceInfo import DeviceInfo
-
-
-def requires_manual_title():
-    """Checks if we are likely in a Wayland/Sway environment where SSD is missing.
-
-        Asked at the point of use ([`set_title()`](luks_tray/dialogs/Common.py))
-        rather than cached in a module-level `IS_SWAY_LIKE_ENV`: it is two
-        environment lookups, and a constant computed at import time froze the
-        answer for the process -- so an environment changed after import (or a
-        test that wants the Sway layout) could never take effect.
-    """
-    # If using Xwayland under a tiling WM, XDG_CURRENT_DESKTOP might be helpful
-    params = ['XDG_CURRENT_DESKTOP', 'DESKTOP_SESSION']
-    for param in params:
-        # .get() returns None when unset (headless, cron, some autostart
-        # contexts), so coerce to '' before calling .lower().
-        if 'sway' in (os.environ.get(param) or '').lower():
-            return True
-    return False
 
 
 class CommonDialog(QDialog):
@@ -60,9 +37,9 @@ class CommonDialog(QDialog):
         A dialog is built from small pieces (`add_line()`, `add_input_field()`,
         `add_push_button()`) and then runs one privileged operation, so this
         class holds the parts they all share: the invisible parent window from
-        the tray, positioning next to the cursor (see `showEvent()`, needed
-        because Sway ignores the CSD hints), password visibility toggling, the
-        error message box and the progress bar.
+        the tray, cursor-relative placement under X11 (see `showEvent()`; a
+        Wayland compositor places the window itself), password visibility
+        toggling, the error message box and the progress bar.
 
         The tray is a constructor argument rather than a singleton lookup: it
         keeps this package independent of `luks_tray.Main` (no circular import)
@@ -94,23 +71,30 @@ class CommonDialog(QDialog):
         self.get_real_user_home_directory() # populate home/vault dir
 
     def set_title(self, title):
-        """ Sets the window title ... if sway, putting it in the dialog box """
-        self.setWindowTitle(title)
-        if requires_manual_title():
-            title_label = QLabel(title)
-            title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            # Apply some styling to make it look like a title bar
-            title_label.setStyleSheet("""
-                QLabel {
-                    background-color: #333;
-                    color: white;
-                    padding: 5px;
-                    font-weight: bold;
-                    border-bottom: 1px solid #555;
-                }
-            """)
-            # Insert the manual title at the very top of the layout
-            self.main_layout.addWidget(title_label)
+        """ Set the window title and add the same purpose as a body heading.
+
+            The heading is added on every compositor, not only where the title
+            bar is missing: Sway hides decorations by default, but even a
+            compositor that draws them can change its mind, and a dialog that
+            carries its own heading is never ambiguous.  Legacy callers that
+            still pass the `[luks-tray]` suffix are accepted; the suffix only
+            belongs in the window title.
+
+            Inserted at position 0 because every dialog calls this before it
+            adds any fields.
+        """
+        self.setWindowTitle(window_title(title))
+        heading = QLabel(heading_text(title))
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.setStyleSheet("""
+            QLabel {
+                font-weight: bold;
+                font-size: 14px;
+                padding: 4px;
+                border-bottom: 1px solid #888;
+            }
+        """)
+        self.main_layout.insertWidget(0, heading)
 
     def showEvent(self, event):
         """
@@ -371,7 +355,7 @@ class CommonDialog(QDialog):
 
             error_dialog = QMessageBox(self)
             error_dialog.setIcon(QMessageBox.Icon.Critical)  # Set the icon to show it's an error
-            error_dialog.setWindowTitle("Errors Detected")
+            error_dialog.setWindowTitle(window_title('Errors Detected'))
             error_dialog.setText("The following errors were encountered:")
             error_dialog.setInformativeText(error_text)
             error_dialog.setStandardButtons(QMessageBox.StandardButton.Ok)  # Add a dismiss button

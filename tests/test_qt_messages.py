@@ -50,6 +50,60 @@ def test_the_theme_plugin_palette_table_is_dropped(capsys, monkeypatch):
     assert capsys.readouterr().out == ''
 
 
+def test_the_qt5_form_of_that_plugin_is_dropped_too(capsys, monkeypatch):
+    # This applet is a Qt6 one, but the same plugin exists for Qt5 (qt5ct) and
+    # a log is often read against both; the marker is the part of the class
+    # name the two spellings share.
+    monkeypatch.setattr(Main, '_qt_seen', set())
+
+    Main.qt_message_handler(
+        QtMsgType.QtWarningMsg, context(),
+        PALETTE.replace('Qt6CTPlatformTheme', 'Qt5CTPlatformTheme'))
+
+    assert capsys.readouterr().out == ''
+
+
+def test_the_shutdown_thread_storage_notice_is_dropped(capsys, monkeypatch):
+    # Printed once, at exit, with a fresh address each run: dropping it by
+    # prefix is the only way a reader stops meeting it in the log.
+    monkeypatch.setattr(Main, '_qt_seen', set())
+
+    Main.qt_message_handler(
+        QtMsgType.QtWarningMsg, context(file=None, line=0),
+        'QThreadStorage: Thread 0x55e6bec0b700 exited after QThreadStorage 8'
+        ' destroyed')
+
+    assert capsys.readouterr().out == ''
+
+
+def test_the_portal_registration_failure_is_dropped(capsys, monkeypatch):
+    # Verbatim from a real start on niri under Qt 6.12.  Naming a desktop file
+    # for the Wayland app_id is what keeps the surface app_id at `luks-tray`,
+    # and an app_id without a matching installed entry is something the portal
+    # rejects; nothing here uses a portal feature, so the line is stable noise.
+    monkeypatch.setattr(Main, '_qt_seen', set())
+
+    Main.qt_message_handler(
+        QtMsgType.QtWarningMsg, context(file=None, line=0),
+        'Failed to register with host portal QDBusError('
+        '"org.freedesktop.portal.Error.Failed", "Could not register app ID: '
+        "App info not found for 'luks-tray'\")")
+
+    assert capsys.readouterr().out == ''
+
+
+def test_a_portal_problem_that_is_not_the_registration_is_kept(
+        capsys, monkeypatch):
+    # The marker is the registration call, not the word "portal": a portal
+    # failure that would matter (a file chooser, say) has to reach the log.
+    monkeypatch.setattr(Main, '_qt_seen', set())
+
+    Main.qt_message_handler(QtMsgType.QtWarningMsg, context(file=None, line=0),
+                            'Failed to open a portal document chooser')
+
+    assert 'portal document chooser' in capsys.readouterr().out
+
+
 def test_a_warning_is_kept_with_the_origin_qt_reported(capsys, monkeypatch):
     monkeypatch.setattr(Main, '_qt_seen', set())
 

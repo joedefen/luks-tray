@@ -12,6 +12,7 @@ constructed before the `QApplication`, and it does so with a core dump rather
 than an exception, so the dependency has to be explicit.
 """
 
+from importlib import resources
 from types import SimpleNamespace
 
 import pytest
@@ -442,3 +443,38 @@ def test_a_new_session_clears_the_marker(qapp):
     Main.Utils.log_session_start('luks-tray', '9.9.9')
 
     assert menu_builder(qapp).log_entry_text() == '≡ Open Log'
+
+
+# --- the tray state icon ---------------------------------------------------
+
+
+def icon_key_for(qapp, status, **overrides):
+    """The icon key `update_menu_items()` asks for in a given history state."""
+    seen = []
+    instance = menu_builder(
+        qapp, status=status,
+        replace_menu_if_different=lambda actions, key: seen.append(key) or actions,
+        **overrides)
+    instance.update_menu_items()
+    return seen[-1]
+
+
+def test_a_locked_history_shows_the_orange_shield(qapp):
+    # White claims every container is locked, and an encrypted history the applet
+    # cannot open hides them all -- the one claim this state cannot make.
+    assert icon_key_for(qapp, 'locked') == 'locked'
+
+
+@pytest.mark.parametrize('status', ['unlocked', 'clear_text'])
+def test_an_open_history_with_nothing_unlocked_stays_white(qapp, status):
+    assert icon_key_for(qapp, status) == 'none'
+
+
+def test_the_icon_table_pairs_every_nickname_with_a_shipped_shield():
+    table = LuksTray.svg_info
+
+    assert len(table.nicknames) == len(table.bases)
+    assert set(table.nicknames) == {'none', 'alert', 'ok', 'locked'}
+    for base in table.bases:
+        name = f'{base}-v{table.version}.svg'
+        assert resources.files('luks_tray.resources').joinpath(name).is_file(), name

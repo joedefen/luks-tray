@@ -25,6 +25,7 @@ import traceback
 
 from PyQt6.QtWidgets import QMessageBox
 
+from luks_tray.AppInfo import window_title
 from luks_tray.ContainerType import CONTAINER_TYPES, LUKS, TCRYPT, salt_identity
 from luks_tray.Utils import prt, CMD_TIMEOUT, PROBE_TIMEOUT, FORMAT_TIMEOUT, TIMEOUT_RC
 
@@ -218,7 +219,7 @@ def run_unmount(mount_point: str, busy_warns: set) -> str | None:
     # of naming the processes holding the mount open.
     msg = QMessageBox()
     msg.setIcon(QMessageBox.Icon.Warning)
-    msg.setWindowTitle("Unmount Failed — Device Busy [luks-tray]")
+    msg.setWindowTitle(window_title('Unmount Failed — Device Busy'))
     msg.setText(f"'{mount_point}' busy by these processes:\n - {info}")
     msg.setStandardButtons(QMessageBox.StandardButton.Ok)
     msg.exec()

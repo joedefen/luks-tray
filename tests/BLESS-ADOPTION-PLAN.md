@@ -193,9 +193,10 @@ being rewritten from scratch.
   `is_empty_dir`, `generate_auto_mount_folder`, `get_real_user_ids`,
   `get_real_user_home`, `expand_real_user`).
 * Qt behaviour, with `QT_QPA_PLATFORM=offscreen`:
-  [`requires_manual_title()`](../luks_tray/dialogs/Common.py#L38) per
-  compositor, [`set_title()`](../luks_tray/dialogs/Common.py#L96) inserting the
-  in-dialog label, [`showEvent()`](../luks_tray/dialogs/Common.py#L129)
+  [`set_title()`](../luks_tray/dialogs/Common.py#L96) inserting the body heading
+  on every compositor, [`Compositor.detect()`](../luks_tray/Compositor.py)
+  reporting the right window rule,
+  [`showEvent()`](../luks_tray/dialogs/Common.py#L115)
   placement arithmetic, and
   [`replace_menu_if_different()`](../luks_tray/Main.py#L479) rebuilding only on
   change (the sway menu regression).

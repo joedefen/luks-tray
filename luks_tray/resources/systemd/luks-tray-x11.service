@@ -10,9 +10,9 @@
 # `--svc-install` renders this file for the session that ran it: the display
 # and desktop variables are appended from that shell, because a user unit
 # cannot inherit them from the X server or the window manager -- and the applet
-# needs them (Qt picks its platform plugin from them, and the dialogs use the
-# desktop name to decide whether an in-dialog title bar is needed).  A unit
-# copied by hand from a shell that exports none of them still starts; see
+# needs them (Qt picks its platform plugin from them, and the desktop name
+# keeps the session identifiable for diagnostics and `--show-window-rules`).
+# A unit copied by hand from a shell that exports none of them still starts; see
 # "Starting at login" in README.md.
 [Unit]
 Description=luks-tray (LUKS disk tray applet)

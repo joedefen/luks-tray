@@ -37,18 +37,18 @@ class MountFileDialog(CommonDialog):
 
         if container and container.opened:  # unmount dialog
             if container.mounts:
-                self.set_title('Unmount/Close Crypt File [luks-tray]')
+                self.set_title('Unmount/Close Crypt File')
                 self.add_line(f'{container.back_file}')
                 self.add_line(f'Unmount {container.upon}')
             else:
-                self.set_title('Close Crypt File [luks-tray]')
+                self.set_title('Close Crypt File')
                 self.add_line(f'{container.back_file}')
             self.add_push_button('OK', self.unmount_file, container.uuid)
             self.add_push_button('Cancel', self.cancel)
             self.main_layout.addLayout(self.button_layout)
 
         elif container:
-            self.set_title('Mount Crypt File [luks-tray]')
+            self.set_title('Mount Crypt File')
             vital = self.tray.history.get_vital(container.uuid)
             self.add_line(f'{container.back_file}')
             self.add_input_field('password', "Enter Password", f'{vital.password}',
@@ -73,7 +73,7 @@ class MountFileDialog(CommonDialog):
             self.main_layout.addLayout(self.button_layout)
 
         elif not create: # no container ... use existing file (not creating)
-            self.set_title('Add Existing Crypt File [luks-tray]')
+            self.set_title('Add Existing Crypt File')
             self.add_input_field('password', "Enter Password", '',
                                 24, add_on='password')
             self.add_input_field('back_file', "Crypt File", '', 48, add_on='file')
@@ -88,7 +88,7 @@ class MountFileDialog(CommonDialog):
             self.main_layout.addLayout(self.button_layout)
 
         else: # no container ... create crypt file
-            self.set_title('Create New Crypt File [luks-tray]')
+            self.set_title('Create New Crypt File')
             self.add_input_field('password', "Enter Password", '',
                                 24, add_on='password')
             self.add_input_field('size_str', "Size (MiB)", '32', 8)

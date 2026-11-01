@@ -42,10 +42,11 @@ Only one copy can run at a time: a second launch reports the running instance an
 
 ## Visual Interface
 
-The tray icon is shaped like a shield changes based on container states:
-- <img src="https://github.com/joedefen/luks-tray/raw/main/luks_tray/resources/white-shield-v04.svg" alt="White Shield Icon" width="24" height="24"> - All containers are locked and unmounted (i.e., all data is secure).
+The tray icon is a shield, and its colour reports the state of the containers:
+- <img src="https://github.com/joedefen/luks-tray/raw/main/luks_tray/resources/white-shield-v04.svg" alt="White Shield Icon" width="24" height="24"> - All containers are locked and unmounted (i.e., all data is secure). This is only shown when the applet can actually see the containers.
 - <img src="https://github.com/joedefen/luks-tray/raw/main/luks_tray/resources/alert-shield-v04.svg" alt="Alert Shield Icon" width="24" height="24"> - Some containers are unlocked but unmounted (i.e., one or more anomalies).
 - <img src="https://github.com/joedefen/luks-tray/raw/main/luks_tray/resources/green-shield-v04.svg" alt="Green Shield Icon" width="24" height="24"> - Some containers are mounted w/o any anomalies (i.e., some of the encrypted data is available)
+- <img src="https://github.com/joedefen/luks-tray/raw/main/luks_tray/resources/orange-shield-v04.svg" alt="Orange Shield Icon" width="24" height="24"> - The history file is encrypted and its master password has not been entered yet, so the containers cannot be inspected at all: the state is *unknown*, not "everything locked". Enter the password with the menu entry `✎ Click to enter master password`.
 
 Here is an sample menu as seen when you right-click the tray shield icon:
 
@@ -76,7 +77,7 @@ Notes:
 Settings and data files are stored in `~/.config/luks-tray/`:
 - **History file** - Stored of passwords and mount preferences; it is encrypted when the master password enabled.
 - **Lock file** - `luks-tray.lock` holds the PID of the running instance; the kernel releases the lock when that process exits, so a crash never blocks the next start.
-- **Log file** - `debug.log` is where the applet writes everything it does (the command it ran, what it refused, with a timestamp and the code location). It is the destination whether a desktop, a systemd unit or a terminal started the applet: started from a terminal the lines are printed *and* mirrored into the file, so `≡ Open Log` shows that session as well; `luks-tray -o` is the opt-out that keeps them on the terminal only (a systemd unit ignores `-o`: there stdout is the unit's own). The file opens with `=== luks-tray v<version> started, pid <pid> ===` and closes with the matching `stopped` line — also after `systemctl --user stop` or `--replace`, which end the process with a signal — so a file holding several runs is still readable. It is created owner-only, since it names container paths and mount points, and at 512 KB it rotates to `debug.log.old` — one generation, which the viewer pages as its second file. Lines Qt itself produces arrive as `qt: …` with Qt's own `[file:line]`, each reported once, while a platform theme's chatter (the Qt6CT palette dump) is dropped. `luks-tray --follow-log` tails the file from a shell.
+- **Log file** - `debug.log` is where the applet writes everything it does (the command it ran, what it refused, with a timestamp and the code location). It is the destination whether a desktop, a systemd unit or a terminal started the applet: started from a terminal the lines are printed *and* mirrored into the file, so `≡ Open Log` shows that session as well; `luks-tray -o` is the opt-out that keeps them on the terminal only (a systemd unit ignores `-o`: there stdout is the unit's own). The file opens with `=== luks-tray v<version> started, pid <pid> ===` and closes with the matching `stopped` line — also after `systemctl --user stop` or `--replace`, which end the process with a signal — so a file holding several runs is still readable. It is created owner-only, since it names container paths and mount points, and at 512 KB it rotates to `debug.log.old` — one generation, which the viewer pages as its second file. Lines Qt itself produces arrive as `qt: …` with Qt's own `[file:line]`, each reported once, while a platform theme's chatter (the qt5ct/qt6ct palette dump) and Qt's `QThreadStorage … destroyed` shutdown notice are dropped. `luks-tray --follow-log` tails the file from a shell.
 - **INI file** - the default .ini file looks like:
 
       [ui]
@@ -134,21 +135,49 @@ It works best with DEs/WMs that offer **first-class tray support**, such as:
 
   - **KDE Plasma** (X11 or Wayland)
   - **i3wm** with **polybar**
-  - **sway** with **waybar** (actually, quite 2nd class ... see "Workarounds for SWAY" below)
+  - **niri** with **waybar**
+  - **sway** with **waybar** (see the compositor rule below for floating dialogs)
 
 > ⚠️ **GNOME**: Requires a third-party extension (such as AppIndicator support) to show tray icons. Results may vary across GNOME versions.<br>
 > ⚠️ **Xfce** and similar lightweight DEs: Tray menus may open off-screen or be partially cut off, depending on panel layout and screen resolution.
 
 
-####  Workarounds for SWAY
-Required Workarounds for ~/.config/sway/config:
-* Environment variables: `sway` must be in `$XDG_CURRENT_DESKTOP` or `$DESKTOP_SESSION`
- 
-* The user must deal with missing titlebars for moving/closing.
-* It is best to add configuration rules to ensure dialogs float:
+#### Wayland tiling compositors (niri, sway)
+
+A Wayland compositor, not the app, decides where a window goes and whether it
+floats. luks-tray therefore sets a stable Wayland `app_id` of `luks-tray` and
+asks you to add the one rule your compositor needs. The same `app_id` covers the
+mount/options dialogs, the error boxes and the file pickers.
+
+Run this in the session you are configuring to print the matching snippet:
+
+```sh
+luks-tray --show-window-rules
 ```
-  for_window title "luks-tray.%" floating enable, center, border normal, no_focus
+
+**niri** -- add to `~/.config/niri/config.kdl`, then run
+`niri msg action load-config-file`:
+
+```kdl
+window-rule {
+    match app-id="luks-tray"
+    open-floating true
+}
 ```
+
+**sway** -- add to `~/.config/sway/config`, then run `swaymsg reload`:
+
+```
+for_window [app_id="luks-tray"] floating enable, move position center, border normal
+```
+
+Do **not** add `no_focus`: the password dialogs need keyboard focus.
+
+Sway hides title bars by default; niri and X11 draw them. Every luks-tray dialog
+also shows the same purpose as a heading inside the dialog, so nothing depends
+on the compositor drawing a title bar. Setting `XDG_CURRENT_DESKTOP` (or
+`DESKTOP_SESSION`) lets `--show-window-rules` detect the compositor and keeps
+the logged session banner identifiable.
 
 ---
 ## Starting at Login

@@ -16,7 +16,7 @@ class MasterPasswordDialog(CommonDialog):
     """
     def __init__(self, tray):
         super().__init__(tray)
-        self.set_title('Master Password Dialog [luks-tray]')
+        self.set_title('Master Password Dialog')
         self.add_input_field('password', "Master Password", '', 24, add_on='password')
         self.add_push_button('OK', self.set_master_password)
         self.add_push_button('Cancel', self.cancel)
