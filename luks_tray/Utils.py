@@ -15,8 +15,6 @@ import inspect
 from datetime import datetime
 from io import StringIO
 
-import importlib.resources as pkg_resources
-
 prt_kb = 512
 prt_path = ''
 prt_to_init = True
@@ -43,12 +41,6 @@ FORMAT_TIMEOUT = 900
 # Status reported when a deadline is hit (the value coreutils `timeout` uses);
 # every caller already treats a non-zero status as failure.
 TIMEOUT_RC = 124
-
-def copy_to_folder(resource_name, dest):
-    """ Get the path of a resource """
-    with pkg_resources.path('luks_tray.resources', resource_name) as file_path:
-        shutil.copy(file_path, os.path.join(dest, resource_name))
-    return file_path
 
 
 def where(above=0):

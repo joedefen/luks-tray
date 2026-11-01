@@ -66,14 +66,6 @@ class HistoryClass:
         # does not shell out to blkid again for unchanged backing files.
         self._back_file_uuid_cache = {}
 
-
-    def _load_initial_state(self):
-        """Initial check for file existence to set up the mtime."""
-        if os.path.exists(self.path):
-            self.last_mtime = os.path.getmtime(self.path)
-            self.file_existed = True
-
-
     @staticmethod
     def make_ns(uuid):
         """

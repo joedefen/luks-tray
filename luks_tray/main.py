@@ -36,7 +36,7 @@ import random
 from contextlib import contextmanager
 from types import SimpleNamespace
 import petname
-from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
+from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PyQt6.QtWidgets import QWidgetAction, QWidget, QLabel
 from PyQt6.QtGui import QIcon, QCursor, QAction, QFont, QFontInfo
 from PyQt6.QtCore import QTimer, Qt
@@ -143,7 +143,7 @@ class LuksTray():
         self.emoji_font = self.get_emoji_font()
         self.app.setFont(self.mono_font)
 
-        _, missing, self.udisks_cmd = self.check_dependencies()
+        _, missing = self.check_dependencies()
 
         if missing:
             # Was a bare `assert`: `python -O` strips it, so the tray carried
@@ -174,7 +174,8 @@ class LuksTray():
                     with importlib.resources.as_file(
                         importlib.resources.files('luks_tray.resources').joinpath(resource_filename)
                     ) as source_path:
-                        # Copy directly instead of using Utils.copy_to_folder()
+                        # as_file() hands back a real path (or a temporary
+                        # copy of it), so a plain copy2 is all that is needed.
                         shutil.copy2(source_path, dest_path)
                 except (FileNotFoundError, AttributeError):
                     prt(f'WARN: cannot find source resource {repr(resource_filename)}')
@@ -220,35 +221,28 @@ class LuksTray():
 
     @staticmethod
     def check_dependencies(verbose=False):
-        """ ensure the system utilities we need are available
-            and discover which udisks command we are using
+        """ Return (found, missing) for the system commands the tray shells out to.
+
+            `__init__` refuses to start when `missing` is non-empty (it used to
+            be a bare `assert`, which `python -O` stripped) and `--check-deps`
+            prints the same two lists. Lookup is `shutil.which()`, so a PATH
+            that lacks /usr/sbin reports `cryptsetup` as missing even though it
+            is installed -- run the tray the way the desktop session would.
         """
         utilities = [
             'lsblk', 'cryptsetup', 'rmdir',
             'mount', 'umount', 'bindfs', 'losetup',
-            'fuser', 'truncate', 'mkfs.ext4', 'bindfs',
-            # 'kill', 'losetup', ['udisksctl', 'udisks', 'udisks2'],
+            'fuser', 'truncate', 'mkfs.ext4',
         ]
-        found, missing, udisks_cmd = [], [], None
-        for entry in utilities:
-            utils = entry if isinstance(entry, list) else [entry]
-            got_one = False
-            for util in utils:
-                if shutil.which(util):
-                    found.append(util)
-                    got_one = True
-                    if util.startswith('udisks'):
-                        udisks_cmd = util
-                    break
-            if not got_one:
-                missing.append(entry)
+        found, missing = [], []
+        for util in utilities:
+            (found if shutil.which(util) else missing).append(util)
         if verbose or missing:
             for util in found:
                 prt(f'✓  {util}')
             for util in missing:
-                prt(f'✗  {util} - please install',
-                    ' one of' if isinstance(util, list) else '')
-        return found, missing, udisks_cmd
+                prt(f'✗  {util} - please install')
+        return found, missing
 
     @staticmethod
     def get_emoji_font(size=10):
@@ -310,19 +304,6 @@ class LuksTray():
         for container in self.containers.values():
             self.history.ensure_container(container)
         self.history.save()
-
-    def show_partition_details(self, name):
-        """ Show a message box with the details of container `name`.
-
-            Not wired into the menu at the moment (it is the hook the old
-            context menu called); an unknown name is ignored.
-        """
-        container = self.containers.get(name, None)
-        if container is None:
-            return
-        details = f'DETAILS for {container.name}:\n'
-        details += 'UUID={container.UUID}\n'
-        QMessageBox.information(None, "Partition Details", details)
 
     def update_menu(self):
         """Refresh device/history state, then rebuild the tray menu.
@@ -930,18 +911,6 @@ class LuksTray():
         return path
 
 
-def rerun_module_as_root(module_name):
-    """ Re-exec `python -m module_name` under sudo unless already root.
-
-        For starting the tray with privileges (e.g. from a desktop autostart
-        entry). `os.execvp()` replaces this process; when the re-exec happens
-        this function never returns.
-    """
-    if os.geteuid() != 0: # Re-run the script with sudo
-        os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        vp = ['sudo', sys.executable, '-m', module_name] + sys.argv[1:]
-        os.execvp('sudo', vp)
-
 def main():
     """ Entry point: parse the CLI and then run the tray loop.
 
@@ -982,7 +951,7 @@ def main():
         sys.exit(1) # just in case ;-)
 
     if opts.check_deps:
-        _, missing, _ = LuksTray.check_dependencies(verbose=True)
+        _, missing = LuksTray.check_dependencies(verbose=True)
         sys.exit(1 if missing else 0) # just in case ;-)
 
     if opts.follow_log:
