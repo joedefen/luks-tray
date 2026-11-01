@@ -10,11 +10,13 @@ from luks_tray.dialogs.Common import CommonDialog, requires_manual_title
 from luks_tray.dialogs.MasterPassword import MasterPasswordDialog
 from luks_tray.dialogs.MountDevice import MountDeviceDialog
 from luks_tray.dialogs.MountFile import MountFileDialog
+from luks_tray.dialogs.Options import OptionsDialog
 
 __all__ = [
     'CommonDialog',
     'MasterPasswordDialog',
     'MountDeviceDialog',
     'MountFileDialog',
+    'OptionsDialog',
     'requires_manual_title',
 ]

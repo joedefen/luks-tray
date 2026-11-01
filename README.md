@@ -6,6 +6,7 @@
 
 - **System tray integration** - Simple click-to-mount/unmount interface for LUKS devices and files
 - **Visual status indicators** - Symbols mounted (▣), mounted read-only (⧈), unmounted (▽), and open-but-unmounted (‼) states
+- **Options dialog** - `⚙ Options…` edits the settings below and reaches the master password; the fixed entries carry a symbol too (`✦` create, `✚` add, `⚙` options, `☓` exit, `↺` restart)
 - **File container support** - Add, create, and manage LUKS file containers from the tray.
 - **Mount point history** - Remembers previous mount locations for convenience and clarity
 - **Background monitoring** - Automatically detects newly inserted devices with LUKS containers
@@ -24,6 +25,7 @@
 4. Right-click the tray icon to see available containers. You may:
     - Insert a disk with LUKS devices to detect them automatically.
     - Add an existing or create a new encrypted file to manage it.
+    - Open `⚙ Options…` to change the settings below, or to set/change/remove a master password.
 5. Left-click a ▽ container to mount it; or a ▣ or ⧈ or ‼ container to unmount it.
 6. When mounting a container, enter its password and choose mount point in the dialog
     - if the app has a mount point in its history, it will fill in that mount point
@@ -53,7 +55,7 @@ Notes:
 
 - click a ▽ entry to unlock and mount a locked LUKS container
 - click a ‼ entry to lock an unmounted, unlocked container (considered an anomaly)
-- or click of the action lines to perform the described action
+- the fixed entries at the bottom carry a symbol: `✦` create a new crypt file, `✚` add an existing one, `⚙` options, `☓` exit, `↺` restart
 - LUKS devices must be created with other tools such as Gnome Disks.
 - LUKS files are only automatically detected in its history; when you add or create new LUKS files, they are added to the history.
 - When creating LUKS files, the default folder is `~/.Vaults`.
@@ -76,6 +78,8 @@ Settings and data files are stored in `~/.config/luks-tray/`:
     - whether passwords are shown by default when being first entered.
     - whether ‼️ entries (i.e., anomalies) cause the tray icon to change to the alert shield.
     - where the automatically generated mount points live
+
+  The same three settings are in the tray menu under `⚙ Options…`, which is also where the master password is set, changed or removed (`Master Password…`). The dialog checks `auto_mount_folder` before saving: a path that is not a dedicated, absolute, user-owned folder is refused with the reason in a message box, instead of being quietly replaced by the default at mount time. Saving rewrites `config.ini` — settings this version does not know are kept, comments are not.
 
 ## Security Notes
 

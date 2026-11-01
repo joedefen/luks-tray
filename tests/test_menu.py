@@ -195,31 +195,41 @@ def test_every_icon_key_in_the_table_is_usable(tray, icon_key):
     assert tray.replace_menu_if_different([text_action('Mount')], icon_key) is True
 
 
-# --- the restart entry -----------------------------------------------------
+# --- the fixed entries -----------------------------------------------------
 
 
-def menu_builder(qapp, restart_self=None):
+def menu_builder(qapp, status='locked', **overrides):
     """A `LuksTray` stand-in carrying only what `update_menu_items()` reads.
 
-    The locked state keeps the list short -- master password, Exit, Restart --
-    so the assertions are about the bottom of the menu, not about containers.
+    The locked state keeps the list short -- master password, Options, Exit,
+    Restart -- so the assertions are about the fixed entries at the bottom of
+    the menu rather than about containers. `overrides` replaces any of the
+    callbacks, so a test can watch what an entry triggers instead.
     """
     instance = LuksTray.__new__(LuksTray)
-    instance.history = SimpleNamespace(status='locked')
+    instance.history = SimpleNamespace(status=status)
     instance.ini_tool = SimpleNamespace(get_current_val=lambda key: True)
+    instance.containers = {}
     instance.app = None
     instance.mono_font = QFont()
     instance.replace_menu_if_different = lambda actions, icon_key: actions
-    if restart_self is not None:
-        instance.restart_self = restart_self
+    instance.exit_app = lambda: None
+    instance.handle_options_click = lambda: None
+    instance.restart_self = lambda *args: None
+    for name, value in overrides.items():
+        setattr(instance, name, value)
     return instance
 
 
-def test_the_restart_entry_carries_the_app_name_and_version(qapp):
-    actions = menu_builder(qapp).update_menu_items()
+def menu_texts(actions):
+    """The action list as text, with `None` kept for the separators."""
+    return [action.text() if action is not None else None for action in actions]
 
-    texts = [action.text() for action in actions]
-    assert texts[-2:] == ['Exit', f'↺ Restart luks-tray v{__version__}']
+
+def test_the_restart_entry_carries_the_app_name_and_version(qapp):
+    texts = menu_texts(menu_builder(qapp).update_menu_items())
+
+    assert texts[-2:] == ['☓ Exit', f'↺ Restart luks-tray v{__version__}']
 
 
 def test_the_restart_entry_restarts_the_applet(qapp):
@@ -228,5 +238,59 @@ def test_the_restart_entry_restarts_the_applet(qapp):
 
     actions = instance.update_menu_items()
     actions[-1].trigger()
+
+    assert called == [True]
+
+
+def test_the_unlocked_menu_lists_create_add_and_the_shared_tail(qapp):
+    texts = menu_texts(menu_builder(qapp, status='unlocked').update_menu_items())
+
+    assert texts == [
+        '✦ Create New Crypt File',
+        '✚ Add Existing Crypt File',
+        None,
+        '⚙ Options…',
+        None,
+        '☓ Exit',
+        f'↺ Restart luks-tray v{__version__}',
+    ]
+
+
+def test_the_locked_menu_offers_the_password_and_options(qapp):
+    texts = menu_texts(menu_builder(qapp, status='locked').update_menu_items())
+
+    assert texts == [
+        '✎ Click to enter master password',
+        None,
+        '⚙ Options…',
+        None,
+        '☓ Exit',
+        f'↺ Restart luks-tray v{__version__}',
+    ]
+
+
+@pytest.mark.parametrize('status', ['locked', 'clear_text', 'unlocked'])
+def test_every_fixed_entry_starts_with_a_symbol(qapp, status):
+    for action in menu_builder(qapp, status=status).update_menu_items():
+        if action is None:
+            continue
+        text = action.text()
+        assert not text[0].isalnum() and not text[0].isspace(), text
+
+
+def test_the_master_password_is_reached_through_options(qapp):
+    texts = menu_texts(menu_builder(qapp, status='unlocked').update_menu_items())
+
+    assert not [text for text in texts if text and 'Master Password' in text]
+
+
+def test_the_options_entry_opens_the_options_dialog(qapp):
+    called = []
+    instance = menu_builder(qapp, handle_options_click=lambda: called.append(True))
+
+    actions = instance.update_menu_items()
+    options = [action for action in actions
+               if action is not None and action.text().startswith('⚙')]
+    options[0].trigger()
 
     assert called == [True]

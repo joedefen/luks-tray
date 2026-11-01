@@ -12,6 +12,11 @@
     refresh can afford to call it and a hand-edited config takes effect without
     a restart.
 
+    `set_values()` is the write side, used by the Options dialog. It validates
+    against the same golden table before writing anything, so the file the tray
+    reads back is always one `update_config()` accepts: an edit made in the
+    dialog and an edit made by hand are parsed by exactly one piece of code.
+
     Constructing this class changes no process-wide state. Every path it
     exposes is absolute, so there is no reason to `os.chdir()` into the config
     folder -- and doing it used to silently redefine what a *relative* path
@@ -24,12 +29,14 @@
 # pylint: disable=too-many-instance-attributes
 # pylint: disable=consider-using-from-import
 
+import contextlib
 import os
 import pwd
 import configparser
-from types import SimpleNamespace
 import copy
 import json
+import tempfile
+from types import SimpleNamespace
 from luks_tray.Utils import prt
 
 class IniTool:
@@ -205,3 +212,83 @@ class IniTool:
         self.params_by_selector = all_params
 
         return True # updated
+
+    @staticmethod
+    def coerce_value(default, value):
+        """ Return `value` converted to the type of `default`.
+
+            Raises ValueError when it cannot be converted. The type is taken
+            from the *golden* default rather than from the caller: a bool field
+            that arrives as the string 'false' (from a config file, or from a
+            future dialog widget that hands over text) is repaired here, and a
+            value that would be thrown away on the next read is refused instead
+            of being written.
+        """
+        if isinstance(default, bool):
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str) and value.strip().lower() in ('true', 'false'):
+                return value.strip().lower() == 'true'
+            raise ValueError(f'{value!r} is not a bool')
+        if isinstance(default, int):
+            try:
+                return int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f'{value!r} is not an int') from exc
+        if isinstance(default, str):
+            if isinstance(value, str):
+                return value
+            raise ValueError(f'{value!r} is not a string')
+        raise ValueError(f'{value!r} has no golden type')
+
+    def set_values(self, values, selector='ui'):
+        """ Persist `values` (key -> value) into config.ini; return error lines.
+
+            Only keys of the golden table are written, each coerced to the type
+            of its default. Nothing at all is written when any value is refused
+            -- an unknown key, or one that would not parse back -- so a
+            hand-edit is never left half-applied. Settings this version does not
+            know about are preserved by re-reading and re-writing the file,
+            which does drop comments (the file this class generates has none).
+
+            The write is atomic (temp file + rename), and `update_config()` runs
+            afterwards so `get_current_val()` reports the new values
+            immediately rather than on the next 3 s tick.
+        """
+        goldens = self.defaults[selector]
+        errors, pending = [], {}
+        for key, value in values.items():
+            if key not in goldens:
+                errors.append(f'{selector}.{key}: unknown setting')
+                continue
+            try:
+                pending[key] = IniTool.coerce_value(goldens[key], value)
+            except ValueError as exc:
+                errors.append(f'{selector}.{key}: {exc}')
+        if errors:
+            return errors
+
+        self.ensure_folder()
+        self.config.read(self.ini_path)      # keep the settings we do not own
+        if not self.config.has_section(selector):
+            self.config.add_section(selector)
+        for key, value in pending.items():
+            self.config.set(selector, key, str(value))
+
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(dir=self.folder, prefix='.config-',
+                                            suffix='.ini')
+            with os.fdopen(fd, 'w', encoding='utf-8') as out:
+                self.config.write(out)
+            os.replace(tmp_path, self.ini_path)
+            tmp_path = None                  # renamed into place: nothing to clean
+        except OSError as exc:
+            if tmp_path:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path)
+            return [f'cannot write {self.ini_path!r}: {exc}']
+
+        self.last_mod_time = None            # the file is new, read it again
+        self.update_config()
+        return []

@@ -50,7 +50,7 @@ from luks_tray.IniTool import IniTool
 from luks_tray.DeviceInfo import DeviceInfo
 from luks_tray.dialogs import (CommonDialog, MasterPasswordDialog,
                                MountDeviceDialog, MountFileDialog,
-                               requires_manual_title)
+                               OptionsDialog, requires_manual_title)
 from luks_tray.LuksOps import (generate_uuid_for_file_path,
                                 get_luks_uuid_for_file, run_cmd,
                                 run_cmd_capture, run_unmount, sudo_cmd,
@@ -69,6 +69,7 @@ __all__ = [
     'MasterPasswordDialog',
     'MountDeviceDialog',
     'MountFileDialog',
+    'OptionsDialog',
     'acquire_lock_or_take_over',
     'generate_uuid_for_file_path',
     'get_luks_uuid_for_file',
@@ -418,6 +419,12 @@ class LuksTray():
             The list is a mix of ready-made `QAction`s and `None` for a
             separator: building actions is cheap and comparing them is what
             decides whether the popup has to be replaced at all.
+
+            Every fixed entry starts with one symbol from the same small set
+            (`✚` add, `✦` create, `⚙` options, `☓` exit, `↺` restart), the way
+            the containers already carry `▣ ⧈ ▽ ‼`: they are basic dingbats that
+            the monospace font itself has, so the list reads at a glance without
+            depending on an emoji font being installed.
         """
         actions = []
 
@@ -425,7 +432,7 @@ class LuksTray():
         do_alerts = self.ini_tool.get_current_val('show_anomaly_alerts')
 
         if self.history.status == 'locked':
-            action = QAction('Click to enter master password', self.app)
+            action = QAction('✎ Click to enter master password', self.app)
             action.setFont(self.mono_font)
             action.triggered.connect(self.prompt_master_password)
             actions.append(action)
@@ -481,26 +488,30 @@ class LuksTray():
             if idx > 0 and not separated:
                 actions.append(None)
 
-            action = QAction('Create New Crypt File', self.app)
+            action = QAction('✦ Create New Crypt File', self.app)
             action.setFont(self.mono_font)
             action.triggered.connect(self.handle_create_file_click)
             actions.append(action)
 
-            action = QAction('Add Existing Crypt File', self.app)
+            action = QAction('✚ Add Existing Crypt File', self.app)
             action.setFont(self.mono_font)
             action.triggered.connect(self.handle_add_file_click)
             actions.append(action)
 
-            actions.append(None)
+        # The tail below is identical in both states, which is why the master
+        # password is no longer a top-level entry: setting, changing and
+        # clearing it are all reachable from the options dialog, and the line
+        # above is the only password action the *locked* state needs.
+        actions.append(None)
 
-            if self.history.status in ('clear_text', 'unlocked'):
-                verb = 'Set' if self.history.status == 'clear_text' else 'Update/Clear'
-                action = QAction(f'{verb} Master Password', self.app)
-                action.setFont(self.mono_font)
-                action.triggered.connect(self.prompt_master_password)
-                actions.append(action)
+        action = QAction('⚙ Options…', self.app)
+        action.setFont(self.mono_font)
+        action.triggered.connect(self.handle_options_click)
+        actions.append(action)
 
-        action = QAction("Exit", self.app)
+        actions.append(None)
+
+        action = QAction('☓ Exit', self.app)
         action.setFont(self.mono_font)
         action.triggered.connect(self.exit_app)
         actions.append(action)
@@ -604,6 +615,11 @@ class LuksTray():
     def handle_create_file_click(self):
         """ Open the "create new crypt file" dialog. """
         dialog = MountFileDialog(self, None, create=True)
+        dialog.exec()
+
+    def handle_options_click(self):
+        """ Open the options dialog: the `[ui]` settings and the master password. """
+        dialog = OptionsDialog(self)
         dialog.exec()
 
     def exit_app(self):
