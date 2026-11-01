@@ -3,7 +3,7 @@
 """ Master-password dialog: set, update or clear the history passphrase. """
 # pylint: disable=broad-exception-caught, invalid-name
 
-from luks_tray.dialogs.common import CommonDialog
+from luks_tray.dialogs.Common import CommonDialog
 
 
 class MasterPasswordDialog(CommonDialog):

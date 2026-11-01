@@ -36,4 +36,15 @@ Homepage = "https://github.com/joedefen/luks-tray"
 "Bug Tracker" = "https://github.com/joedefen/luks-tray/issues"
 
 [project.scripts]
-luks-tray = "luks_tray.main:main"
+luks-tray = "luks_tray.Main:main"
+
+[tool.ruff.lint]
+# Project style: module files are CamelCase -- `History.py`, `IniTool.py`,
+# `Utils.py`, `DeviceInfo.py`, `LuksOps.py`, `Main.py` and every dialog. That is
+# deliberate and uniform across the package, so pep8-naming's N999 ("invalid
+# module name") is switched off for any config-driven selection that includes
+# pep8-naming; the rest of that ruleset stays available. Asking for the rule by
+# name on the command line (`--select N999`) still reports it -- an explicit
+# request wins over `ignore`, which is the documented behaviour and not a
+# problem, because such a run is a question about the rule, not about the code.
+ignore = ["N999"]

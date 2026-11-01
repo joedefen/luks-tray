@@ -32,7 +32,7 @@ from PyQt6.QtGui import QCursor
 from PyQt6.QtCore import Qt
 
 from luks_tray.Utils import prt_once
-from luks_tray.device_info import DeviceInfo
+from luks_tray.DeviceInfo import DeviceInfo
 
 
 def requires_manual_title():
@@ -61,7 +61,7 @@ class CommonDialog(QDialog):
         error message box and the progress bar.
 
         The tray is a constructor argument rather than a singleton lookup: it
-        keeps this package independent of `luks_tray.main` (no circular import)
+        keeps this package independent of `luks_tray.Main` (no circular import)
         and lets tests pass a plain stand-in object.
     """
     home_dir = None

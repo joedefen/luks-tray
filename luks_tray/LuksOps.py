@@ -4,9 +4,9 @@
 
     Two layers live here:
 
-    - process execution: [`run_cmd_capture()`](luks_tray/luks_ops.py:1) and
+    - process execution: [`run_cmd_capture()`](luks_tray/LuksOps.py:1) and
       its ``sudo -n`` variant return real output, while
-      [`run_cmd()`](luks_tray/luks_ops.py:1) / ``sudo_cmd()`` keep the
+      [`run_cmd()`](luks_tray/LuksOps.py:1) / ``sudo_cmd()`` keep the
       ``None``-or-``'FAIL: ...'`` contract every call site tests;
     - LUKS work: unlock, mount (optionally through bindfs), loop setup and the
       single ``mount_luks_container()`` entry point used by both dialogs.

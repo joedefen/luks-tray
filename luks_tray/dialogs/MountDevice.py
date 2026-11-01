@@ -6,8 +6,8 @@
 
 import os
 
-from luks_tray.dialogs.common import CommonDialog
-from luks_tray.luks_ops import mount_luks_container, run_unmount, sudo_cmd
+from luks_tray.dialogs.Common import CommonDialog
+from luks_tray.LuksOps import mount_luks_container, run_unmount, sudo_cmd
 
 
 class MountDeviceDialog(CommonDialog):

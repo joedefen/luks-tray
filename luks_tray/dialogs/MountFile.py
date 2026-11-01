@@ -9,9 +9,9 @@ import os
 from PyQt6.QtWidgets import QCheckBox
 
 from luks_tray.Utils import prt
-from luks_tray.device_info import DeviceInfo
-from luks_tray.dialogs.common import CommonDialog
-from luks_tray.luks_ops import (generate_uuid_for_file_path,
+from luks_tray.DeviceInfo import DeviceInfo
+from luks_tray.dialogs.Common import CommonDialog
+from luks_tray.LuksOps import (generate_uuid_for_file_path,
                                 get_luks_uuid_for_file,
                                 mount_luks_container, run_cmd, run_unmount,
                                 sudo_cmd)

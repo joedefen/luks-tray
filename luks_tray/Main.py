@@ -4,9 +4,9 @@
 
     The code that used to live in this one file is now split by concern:
 
-    - [`luks_tray.device_info`](luks_tray/device_info.py) -- `lsblk` parsing
+    - [`luks_tray.DeviceInfo`](luks_tray/DeviceInfo.py) -- `lsblk` parsing
       and the "banned mount point" policy (device discovery);
-    - [`luks_tray.luks_ops`](luks_tray/luks_ops.py) -- privileged command
+    - [`luks_tray.LuksOps`](luks_tray/LuksOps.py) -- privileged command
       helpers (`sudo -n`, deadlines) and the LUKS primitives (unlock, mount,
       loop setup, format);
     - [`luks_tray.dialogs`](luks_tray/dialogs) -- the Qt dialogs, which take
@@ -16,7 +16,7 @@
     the auto-mount folder policy and `main()`.
 
     The Wayland/Sway caveats that shaped the dialogs are documented in
-    [`luks_tray.dialogs.common`](luks_tray/dialogs/common.py).
+    [`luks_tray.dialogs.Common`](luks_tray/dialogs/Common.py).
 """
 # pylint: disable=unused-import,broad-exception-caught, invalid-name
 # pylint: disable=no-name-in-module,import-outside-toplevel,too-many-instance-attributes
@@ -45,11 +45,11 @@ from luks_tray.History import HistoryClass
 from luks_tray.Utils import prt, prt_once
 from luks_tray import Utils
 from luks_tray.IniTool import IniTool
-from luks_tray.device_info import DeviceInfo
+from luks_tray.DeviceInfo import DeviceInfo
 from luks_tray.dialogs import (IS_SWAY_LIKE_ENV, CommonDialog,
                                MasterPasswordDialog, MountDeviceDialog,
                                MountFileDialog, requires_manual_title)
-from luks_tray.luks_ops import (generate_uuid_for_file_path,
+from luks_tray.LuksOps import (generate_uuid_for_file_path,
                                 get_luks_uuid_for_file, run_cmd,
                                 run_cmd_capture, run_unmount, sudo_cmd,
                                 sudo_run)
@@ -642,7 +642,7 @@ class LuksTray():
     def validate_auto_mount_root(auto_root=None):
         """ Return None if `auto_root` may be cleaned, else an error string.
 
-            [`remove_unused_automounts()`](luks_tray/main.py) deletes (empty)
+            [`remove_unused_automounts()`](luks_tray/Main.py) deletes (empty)
             subdirectories below `auto_mount_folder`, which comes straight from
             config.ini, so a typo (`/`, `/home`) or a shared system path must not
             turn the startup cleanup into an `rmdir` sweep over unrelated paths.
@@ -743,7 +743,7 @@ class LuksTray():
             The `chown` is deliberately *not* `-R`: that would rewrite the
             ownership of whatever filesystem is mounted inside. It is also only
             attempted on a root that [`validate_auto_mount_root()`]
-            (luks_tray/main.py) accepts, so a path read from config.ini cannot
+            (luks_tray/Main.py) accepts, so a path read from config.ini cannot
             turn this into a privileged chown of an arbitrary directory.
 
             Returns None on success, or a 'FAIL: ...' string.
@@ -769,7 +769,7 @@ class LuksTray():
         """ Return a new, unused mount point below the auto-mount root.
 
             Makes the root exist and belong to the user first (see
-            [`ensure_auto_mount_root()`](luks_tray/main.py)), so the mount point
+            [`ensure_auto_mount_root()`](luks_tray/Main.py)), so the mount point
             below it can be created unprivileged and cleaned up again. Then
             offers petname-style names: the short suffix alone at first and the
             full `adjective_name` form after a few tries, skipping anything
@@ -839,7 +839,7 @@ class LuksTray():
             used to remove it do not change them -- `rmdir` itself refuses
             non-empty directories and mount points, and the caller has already
             restricted `path` to below a validated auto-mount root (see
-            [`validate_auto_mount_root()`](luks_tray/main.py)).
+            [`validate_auto_mount_root()`](luks_tray/Main.py)).
 
             The first attempt is unprivileged; EACCES/EPERM is retried with
             `sudo -n`, like the rest of the mount handling. That is what makes
@@ -896,7 +896,7 @@ class LuksTray():
 
             Deletes empty subdirectories of `auto_mount_folder`, which is read
             from config.ini -- so the folder is validated first (see
-            [`validate_auto_mount_root()`](luks_tray/main.py)); when it is not a
+            [`validate_auto_mount_root()`](luks_tray/Main.py)); when it is not a
             dedicated, user-owned directory the whole pass is skipped. Returns
             the number of directories removed.
         """
