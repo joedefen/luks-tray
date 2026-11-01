@@ -81,9 +81,56 @@ def test_the_lint_selection_is_pinned():
 def test_no_test_writes_into_the_repository():
     # The suite is run from the repository root; anything it creates there would
     # show up in `git status` and stop the next bless run.
-    known = {'.git', '.gitignore', '.pytest_cache', '.ruff_cache', '.coverage',
-             'LICENSE', 'README.md', 'bless', 'conftest.py', 'images',
-             'luks_tray', 'lt-venv', 'pyproject.toml', 'runner', 'tests',
-             '__pycache__', 'build', 'dist'}
+    known = {'.git', '.gitignore', '.github', '.pytest_cache', '.ruff_cache',
+             '.coverage', 'LICENSE', 'README.md', 'bless', 'conftest.py',
+             'images', 'luks_tray', 'lt-venv', 'pyproject.toml', 'runner',
+             'tests', '__pycache__', 'build', 'dist'}
     surprise = sorted(name for name in os.listdir(ROOT) if name not in known)
     assert surprise == [], f'unexpected files at the repository root: {surprise}'
+
+
+# --- the CI workflow -------------------------------------------------------
+
+
+def workflow():
+    path = ROOT / '.github' / 'workflows' / 'ci.yml'
+    assert path.is_file(), 'the CI workflow is missing'
+    return path.read_text(encoding='utf-8')
+
+
+def test_ci_runs_the_same_gates_as_bless():
+    text = workflow()
+    # The release gate and CI must not be able to disagree about what a valid
+    # tree or a valid artifact is, so both name the same commands.
+    assert 'ruff check' in text
+    assert 'compileall' in text
+    assert 'pytest' in text
+    assert '--cov=luks_tray' in text
+    assert 'tests/inspect_dist.py' in text
+    assert 'python -m build' in text
+
+
+def test_ci_runs_the_supported_python_versions():
+    text = workflow()
+    for version in ('3.11', '3.12', '3.13'):
+        assert f'"{version}"' in text
+
+
+def test_ci_sets_the_offscreen_qt_platform():
+    # A runner has no display; without this the Qt tests cannot start.
+    assert 'QT_QPA_PLATFORM: offscreen' in workflow()
+
+
+def test_ci_cannot_publish():
+    # CI is a gate. The upload is irreversible and belongs to a deliberate
+    # local action, so no credential may reach the workflow.
+    text = workflow()
+    for forbidden in ('secrets.', 'TWINE_', 'twine upload', 'password'):
+        assert forbidden not in text, f'the CI workflow must not contain {forbidden!r}'
+
+
+def test_ci_runs_on_the_release_branches():
+    text = workflow()
+    assert 'branches: [main, dev]' in text
+    assert 'pull_request:' in text
+    assert 'permissions:' in text and 'contents: read' in text
