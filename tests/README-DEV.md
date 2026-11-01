@@ -4,10 +4,9 @@ How to set up a tree, what the gates are, what the tests pin, and how a release
 leaves this repository.
 
 This file lives under `tests/` on purpose: the root belongs to
-[`README.md`](../README.md), which is for people who *use* the tray.  The rest of
-the development material — this file and
-[`BLESS-ADOPTION-PLAN.md`](BLESS-ADOPTION-PLAN.md) — sits next to the tests it
-describes.  Open items are listed in the `TODOs` section at the end of
+[`README.md`](../README.md), which is for people who *use* the tray.  The
+development material — this file, plus the tests it describes — sits next to
+them, and open items are listed in the `TODOs` section at the end of
 [`README.md`](../README.md).
 
 Every command below is run from the repository root.
@@ -89,7 +88,7 @@ lt-venv/bin/python -m pytest -q --cov=luks_tray --cov-report=term-missing
   the misses that matter here are the arms of an `if` nobody takes — the
   container state machine and the mount/unmount error paths.
 
-The suite is **548 tests**.  It needs no network, no `sudo`, and writes nothing
+The suite is **601 tests**.  It needs no network, no `sudo`, and writes nothing
 outside `tmp_path` (the `isolated_home` fixture in
 [`conftest.py`](../conftest.py) points `HOME` and `XDG_CONFIG_HOME` at a
 temporary directory for every test).  Any behaviour that would need root is
@@ -122,6 +121,12 @@ from that table, so a developer and CI cannot enforce different floors.
 | [`test_metadata.py`](test_metadata.py) | One version location, one console script, and a `--version` that agrees with both. |
 | [`test_repo_hygiene.py`](test_repo_hygiene.py) | Repository invariants the gate relies on: the sdist manifest, the inspector, the workflow's gates matrix, `QT_QPA_PLATFORM`, branch triggers, `permissions`, and that CI holds no credential and cannot publish. |
 | [`test_bless.py`](test_bless.py) | The gate's own decisions: identity read from `pyproject.toml`, version-line rewrite inside the rehearsal copy, the duplicate check, `branch_plan`, the prompt, `_artifacts()`, `~/.pypirc` lookup, index-lag messages. |
+
+The suite imports the **real PyQt6**; it does not stub Qt.  Everything it needs
+is on PyPI, and the behaviour worth pinning — window flags, the manual title
+label, dialog placement, menu rebuilds — *is* Qt behaviour, which a stub would
+only pretend to exercise.  That is why the gate installs the Qt libraries and
+runs under `QT_QPA_PLATFORM=offscreen` instead of replacing the toolkit.
 
 Two product bugs were found by this suite and fixed: `LuksOps.run_unmount()`
 called `QMessageBox.set_title()` (the method is `setWindowTitle`), so the
@@ -162,6 +167,33 @@ The stages run in this order, and each one refuses rather than warns:
 | smoke | installs the wheel into `build/bless-<version>/smoke-venv` and requires `luks-tray --version` to print the number that was built |
 | branch plan | a `main`/`dev` pair that has diverged, a missing `origin/<branch>`, or a push that would not be a fast-forward |
 | checklist | prints everything in hand, then asks |
+
+`bless` is copied **verbatim** from `../pwr-tray`, where it is byte-identical to
+the copy in `../my-snaps` and `../vappman`: 1015 lines, SHA-256
+`4f756337840b0619fbf6f077b00d4bb3fb9aee95ff18bbeb6a0521d39d52131e`.
+[`test_repo_hygiene.py`](test_repo_hygiene.py) pins that hash.  Every
+project-specific fact is read out of [`pyproject.toml`](../pyproject.toml) and
+the package, so nothing here is edited per project: adopting a newer upstream
+means a new copy and a new hash, never a local patch.  (`../dwipe/bless` is a
+different file and is not the source.)  It replaced `deploy`, which has been
+deleted — a second, unchecked install path that guessed at the interpreter.
+
+Three things are deliberately *not* wired up:
+
+* **no publish job in CI.**  The upload is irreversible and belongs to a
+  deliberate, inspectable action on the owner's machine (§10);
+* **no `[tool.bless] inspect = ""` shortcut.**  The inspector is shared with the
+  CI packaging job, so the two cannot disagree about what a good distribution
+  looks like;
+* **no `smoke_args`.**  `[tool.bless] smoke_args` appends an argv to the smoke
+  run, and the only non-interactive candidate, `--check-deps`, exits 1 when a
+  system program is missing — on a runner without `cryptsetup` that would fail
+  the gate for a packaging reason.  `luks-tray --version` in the throwaway venv
+  is the smoke test.
+
+`images/` stays at the repository root and is not shipped in the sdist; that is
+the existing shape of the published package, and moving it would be a
+README/asset decision rather than a release-gate one.
 
 ---
 
@@ -302,12 +334,14 @@ grows a credential, drifts from the gates above, or loses the offscreen setting.
 
 * **The coverage floor is not set yet.**  `[tool.coverage.report]` deliberately
   has no `fail_under`: the number should be the one the suite actually achieves,
-  set once and then only raised.  Still uncovered: `DeviceInfo`'s
-  `lsblk`/`/sys` parsing, the menu/refresh half of
-  [`Main.py`](../luks_tray/Main.py) (`update_menu`, `update_menu_items`,
-  `update_history`, `busy_operation`), and the three dialog subclasses
-  (`MasterPasswordDialog`, `MountDeviceDialog`, `MountFileDialog`).  Tracked in
-  [`BLESS-ADOPTION-PLAN.md`](BLESS-ADOPTION-PLAN.md) Phase 5a.
+  set once and then only raised.  A full run measures **73.3% of 3172
+  statements** with `branch = true`, which is the figure the floor has to start
+  from.  Still uncovered: `DeviceInfo`'s `lsblk`/`/sys` parsing, the
+  menu/refresh half of [`Main.py`](../luks_tray/Main.py) (`update_menu`,
+  `update_menu_items`, `update_history`, `busy_operation`), and the three dialog
+  subclasses (`MasterPasswordDialog`, `MountDeviceDialog`,
+  `MountFileDialog`).  Those three are the work left before the floor is worth
+  setting.
 * **The ruff selection is narrow on purpose** — `E4`, `E7`, `E9`, `F`, the set the
   package has always been clean under.  Widening it (about 50 pre-existing
   findings) is a TODO in [`README.md`](../README.md).
@@ -527,7 +561,7 @@ of the above.
 
 What remains is listed in the `TODOs` section at the end of
 [`README.md`](../README.md).  Why the release works this way, and what `bless`
-assumes about a tree, is [`BLESS-ADOPTION-PLAN.md`](BLESS-ADOPTION-PLAN.md).
+assumes about a tree, is §5 above.
 
 ---
 
@@ -537,15 +571,22 @@ assumes about a tree, is [`BLESS-ADOPTION-PLAN.md`](BLESS-ADOPTION-PLAN.md).
 It was removed once every item had been either fixed or carried over to the
 `TODOs` section of [`README.md`](../README.md); keeping a 466-line incident log
 next to the tests made every later edit re-check prose that no longer matched
-the code.  It is still in the history — retrieve it from the commit that
-deleted it:
+the code.
+
+`tests/BLESS-ADOPTION-PLAN.md` was the record of moving the release to
+[`bless`](../bless): the requirements table, the phases, and the decisions this
+file now states in full (§5).  It went for the same reason, once its one open
+item — the coverage floor in §11 — was the only part still describing the tree.
+
+Both are still in the history.  Retrieve one from the commit that deleted it:
 
 ```sh
-commit=$(git log -1 --format=%H --diff-filter=D -- tests/AUDIT.md)
-git show "$commit^:tests/AUDIT.md" > /tmp/AUDIT.md
+path=tests/AUDIT.md            # or tests/BLESS-ADOPTION-PLAN.md
+commit=$(git log -1 --format=%H --diff-filter=D -- "$path")
+git show "$commit^:$path" > "/tmp/$(basename "$path")"
 ```
 
 `"$commit^"` is the tree just before the deletion, so the file comes back
 exactly as it was last reviewed, stale line numbers and all.  Run
-`git log --all -- tests/AUDIT.md` to list the commits that edited it, if an
-earlier version is wanted.
+`git log --all -- <path>` to list the commits that edited it, if an earlier
+version is wanted.

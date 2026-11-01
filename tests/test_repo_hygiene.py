@@ -41,7 +41,7 @@ def test_bless_is_the_verbatim_copy():
     digest = hashlib.sha256((ROOT / 'bless').read_bytes()).hexdigest()
     assert digest == BLESS_SHA256, (
         'bless has been edited; adopt a new upstream copy and update '
-        'BLESS_SHA256 and tests/BLESS-ADOPTION-PLAN.md instead')
+        'BLESS_SHA256 (and the provenance note in tests/README-DEV.md §5)')
 
 
 def test_the_shared_inspector_exists_where_bless_expects_it():
