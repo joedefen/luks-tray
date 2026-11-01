@@ -2,18 +2,21 @@
 
 **luks-tray** is a QT-based tray utility for managing ad hoc LUKS-encrypted files: mount and unmount with ease from your Linux desktop environment.
 
+Version 3.0.0 (v3) added and enhanced features and improved quality.
+
 ## Features
 
 - **System tray integration** - Simple click-to-mount/unmount interface for LUKS devices and files
 - **Visual status indicators** - Symbols mounted (▣), mounted read-only (⧈), unmounted (▽), and open-but-unmounted (‼) states
-- **Options dialog** - `⚙ Options…` edits the settings below and reaches the master password; the fixed entries carry a symbol too (`✦` create, `✚` add, `⚙` options, `☓` exit, `↺` restart)
+- **Options dialog** (added in v3) - `⚙ Options…` edits the settings below and reaches the master password; the fixed entries carry a symbol too (`✦` create, `✚` add, `⚙` options, `☓` exit, `↺` restart)
 - **File container support** - Add, create, and manage LUKS file containers from the tray.
 - **Mount point history** - Remembers previous mount locations for convenience and clarity
 - **Background monitoring** - Automatically detects newly inserted devices with LUKS containers
 - **Password management** - Optional master password to encrypt stored credentials
-- **Single instance** - A second copy refuses to start (exit status 3) instead of racing the running one; `--replace` terminates the holder and takes over.
-- **Restart from the menu** - The bottom menu entry reads `↺ Restart luks-tray v<version>`, so the running build is visible without leaving the menu.
-- **Late or restarting panels** - If the bar starts after the applet, or restarts later, the tray icon registers itself with it instead of staying invisible until the applet is restarted.
+- **Single instance** (added in v3) - A second copy refuses to start (exit status 3) instead of racing the running one; `--replace` terminates the holder and takes over.
+- **Restart from the menu** (added in v3) - The bottom menu entry reads `↺ Restart luks-tray v<version>`, so the running build is visible without leaving the menu.
+- **Late or restarting panels** (improved in v3) - If the bar starts after the applet, or restarts later, the tray icon registers itself with it instead of staying invisible until the applet is restarted.
+- **Start at login** (added in v3) - The `--svc-*` verbs write, render, enable and manage a `systemd --user` unit for the session. See [Starting at Login](#starting-at-login).
 
 ## Quick Start
 
@@ -230,26 +233,5 @@ Test Notes:
 
 ---
 
-## Development
-
-Run from the source tree without installing: `./runner`.
-
-To install the development toolchain (ruff, pytest, pytest-cov, build, twine, packaging) alongside the runtime dependencies:
-
-```
-python3 -m venv lt-venv
-lt-venv/bin/python -m pip install -e '.[dev]'
-```
-
-The gate is three commands — `lt-venv/bin/python -m ruff check .`,
-`lt-venv/bin/python -m compileall -q luks_tray conftest.py tests`, and
-`lt-venv/bin/python -m pytest -q --cov=luks_tray --cov-report=term-missing` —
-and the only path to an upload is `lt-venv/bin/python ./bless`, which runs them
-all and then asks whether to rehearse on TestPyPI, publish, or stop.
-
-The version lives in one place, `luks_tray/__init__.py`; do not add a second
-copy to `pyproject.toml`.
-
-Release procedure, the `bless` stages, credentials and the CI pipeline are
-documented in [tests/README-DEV.md](tests/README-DEV.md).  Known defects and the
-items still open are in [tests/AUDIT.md](tests/AUDIT.md).
+For developing `luks-tray`, see [tests/README-DEV.md](tests/README-DEV.md); known
+defects and the items still open are in [tests/AUDIT.md](tests/AUDIT.md).
