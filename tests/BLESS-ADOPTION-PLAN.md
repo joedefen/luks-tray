@@ -1,12 +1,13 @@
 # Adopting `bless` in `luks-tray`
 
-**Status: Phases 1–3 done, Phase 4 open, coverage floor outstanding.** [`bless`](../bless)
+**Status: Phases 1–4 done, coverage floor outstanding.** [`bless`](../bless)
 is present, executable and copied verbatim and the full pipeline runs end to end
 (transcript in Phase 2); the tree has **279 tests** across ten modules; CI runs
-the same three gates on 3.11, 3.12 and 3.13. What is left is Phase 4 (the
-developer documentation, under `tests/` as agreed) and the `fail_under` floor,
-which waits for the three remaining coverage targets. Each phase below says what
-was verified, not what was intended.
+the same three gates on 3.11, 3.12 and 3.13; the developer guide is
+[`tests/README-DEV.md`](README-DEV.md), with the user-facing
+[`README.md`](../README.md) pointing at it. What is left is the `fail_under`
+floor, which waits for the three remaining coverage targets. Each phase below
+says what was verified, not what was intended.
 
 `bless` is the release gate used by `../pwr-tray`, `../my-snaps` and
 `../vappman` (all three hold the identical file, SHA-256
@@ -290,18 +291,31 @@ for real: a throwaway `python3.11 -m venv` with `-e '.[dev]'` runs the same
 in [`AUDIT.md`](../tests/AUDIT.md) #6, where 3.11 support rested on ruff's
 `py311` parser because no 3.11 interpreter was installed.
 
-## Phase 4 — documentation (open)
+## Phase 4 — documentation (done)
 
-* `tests/README-DEV.md`: the one version source, the three gates, the `bless`
-  stages and the `test`/`publish`/`quit` prompt, the TestPyPI rehearsal and its
-  install line (`pip cache purge`, `--extra-index-url`), the per-index
-  credentials, the patient index verification, and the release steps (`dev` and
-  `main` aligned, `vX.Y.Z` tagged, both pushed). It lives under `tests/` on
-  purpose: the root belongs to the user-facing `README.md`, and the audit and
-  this plan are already dev documents.
-* [`README.md`](../README.md): the development section names
-  `lt-venv/bin/python -m pip install -e '.[dev]'` and points at
-  `tests/README-DEV.md` for the release path.
+[`tests/README-DEV.md`](README-DEV.md) is the developer guide: the one version
+source and why a second copy is a defect, the setup with the `[dev]` extra, the
+three gates (including why `ruff check .` runs with no flags), what each test
+module pins, the `bless` stages with what each one refuses, the
+`test`/`publish`/`quit` prompt, the per-index credentials and their two
+`~/.pypirc` repository URLs, the rehearsal install line with its cache purge and
+`--extra-index-url`, the ~14-minute index wait and why a timed-out verification
+is not a failed release, the release steps, the CI jobs, and the known gaps.
+
+It lives under `tests/` on purpose: the root belongs to the user-facing
+[`README.md`](../README.md), which carries only a short "Development" section --
+how to run from the tree, the `.[dev]` install line, the three commands,
+`./bless` as the only upload path, the one-version-source warning, and two links,
+to [`README-DEV.md`](README-DEV.md) for the release procedure and to
+[`AUDIT.md`](AUDIT.md) for what is still open.
+
+**Verified:** every number in the guide is one the tree produces, not an
+estimate -- 279 tests, the dev extra's package list, the 853 s verification
+budget (`sum(VERIFY_SCHEDULE)`), the floors `twine>=7` / `packaging>=26`, and the
+two token names and two `pypirc` URLs taken from `bless`'s own `PYPI` and
+`TESTPYPI` tables. The link checker reports **329 links in 29 files, all
+resolving**. Writing it also caught two of my own mistakes before the commit: a
+duplicated section number (two "10"s) and the cross-reference that pointed at it.
 
 ## What is deliberately out of scope
 

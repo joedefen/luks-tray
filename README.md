@@ -140,3 +140,29 @@ Test Notes:
     - sudo lvcreate -L 20M -n lv2 test_vg
     - sudo mkfs.ext4 /dev/test_vg/lv1
     - sudo mkfs.ext4 /dev/test_vg/lv2
+
+---
+
+## Development
+
+Run from the source tree without installing: `./runner`.
+
+To install the development toolchain (ruff, pytest, pytest-cov, build, twine, packaging) alongside the runtime dependencies:
+
+```
+python3 -m venv lt-venv
+lt-venv/bin/python -m pip install -e '.[dev]'
+```
+
+The gate is three commands — `lt-venv/bin/python -m ruff check .`,
+`lt-venv/bin/python -m compileall -q luks_tray conftest.py tests`, and
+`lt-venv/bin/python -m pytest -q --cov=luks_tray --cov-report=term-missing` —
+and the only path to an upload is `lt-venv/bin/python ./bless`, which runs them
+all and then asks whether to rehearse on TestPyPI, publish, or stop.
+
+The version lives in one place, `luks_tray/__init__.py`; do not add a second
+copy to `pyproject.toml`.
+
+Release procedure, the `bless` stages, credentials and the CI pipeline are
+documented in [tests/README-DEV.md](tests/README-DEV.md).  Known defects and the
+items still open are in [tests/AUDIT.md](tests/AUDIT.md).
