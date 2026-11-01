@@ -156,10 +156,12 @@ def ensure_dir(path):
     if os.path.isdir(path):
         return None
     try:
-        os.makedirs(path, exist_ok=True)
+        # The mount point is owner-only on purpose: the umask a desktop hands us
+        # must not decide who can see (or create entries in) the mount area.
+        os.makedirs(path, mode=0o700, exist_ok=True)
         return None
     except PermissionError:
-        return sudo_cmd(['mkdir', '-p', path])
+        return sudo_cmd(['mkdir', '-p', '-m', '0700', path])
     except OSError as exc:
         # Existing non-directory, read-only parent, bad path component, ...
         return f'FAIL: cannot create {path!r}: {exc}'

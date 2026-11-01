@@ -138,11 +138,21 @@ def test_a_directory_owned_by_someone_else_is_refused(vault_root, monkeypatch):
     assert 'is owned by uid 4242' in problem
 
 
-def test_a_shared_writable_directory_is_refused(vault_root):
+def test_a_world_writable_directory_is_refused(vault_root):
     os.chmod(vault_root, 0o777)
     try:
-        assert 'writable by group/other' in (
+        assert 'writable by other' in (
             LuksTray.validate_auto_mount_root(vault_root))
+    finally:
+        os.chmod(vault_root, 0o700)
+
+
+def test_a_group_writable_directory_is_accepted(vault_root):
+    # `umask 0002` (user-private groups) makes `mkdir` create 0775; refusing
+    # that would refuse the app's own directory. The caller tightens it.
+    os.chmod(vault_root, 0o775)
+    try:
+        assert LuksTray.validate_auto_mount_root(vault_root) is None
     finally:
         os.chmod(vault_root, 0o700)
 
@@ -173,11 +183,43 @@ def test_ensure_creates_a_missing_root(monkeypatch, vault_root):
                         lambda args, *a, **k: seen.append(args) or None)
     target = vault_root + '/new'
     assert LuksTray.ensure_auto_mount_root(target) is None
-    assert seen == [['mkdir', '-p', target]]
+    # The mode is stated, not inherited from the umask.
+    assert seen == [['mkdir', '-p', '-m', '0700', target]]
+
+
+def test_ensure_creates_the_root_owner_only(vault_root):
+    target = os.path.join(vault_root, 'new')
+    old_umask = os.umask(0o002)
+    try:
+        assert LuksTray.ensure_auto_mount_root(target) is None
+    finally:
+        os.umask(old_umask)
+    assert stat_module.S_IMODE(os.stat(target).st_mode) == 0o700
 
 
 def test_ensure_leaves_a_user_owned_root_alone(vault_root):
     assert LuksTray.ensure_auto_mount_root(vault_root) is None
+
+
+def test_ensure_tightens_a_group_writable_user_owned_root(vault_root, capsys):
+    os.chmod(vault_root, 0o775)
+    try:
+        assert LuksTray.ensure_auto_mount_root(vault_root) is None
+        assert stat_module.S_IMODE(os.stat(vault_root).st_mode) == 0o700
+        assert 'owner-only' in capsys.readouterr().out
+    finally:
+        os.chmod(vault_root, 0o700)
+
+
+def test_repair_leaves_a_world_writable_root_alone(vault_root):
+    # World-writable is refused by the policy, so it must not be "repaired"
+    # into acceptance either: the caller has to hear about it.
+    os.chmod(vault_root, 0o777)
+    try:
+        assert LuksTray.repair_auto_mount_root(vault_root) is False
+        assert stat_module.S_IMODE(os.stat(vault_root).st_mode) == 0o777
+    finally:
+        os.chmod(vault_root, 0o700)
 
 
 def test_ensure_chowns_a_root_owned_by_someone_else(monkeypatch, vault_root):
@@ -395,6 +437,19 @@ def test_cleanup_skips_an_invalid_root(vault_root, monkeypatch, capsys):
 def test_cleanup_does_nothing_when_the_root_does_not_exist(vault_root):
     tray = make_tray(auto_root=vault_root + '/not-yet')
     assert tray.remove_unused_automounts() == 0
+
+
+def test_cleanup_tightens_a_group_writable_root(vault_root):
+    os.chmod(vault_root, 0o775)
+    empty = os.path.join(vault_root, 'empty')
+    os.mkdir(empty)
+    try:
+        tray = make_tray(auto_root=vault_root)
+        assert tray.remove_unused_automounts() == 1
+        assert not os.path.exists(empty)
+        assert stat_module.S_IMODE(os.stat(vault_root).st_mode) == 0o700
+    finally:
+        os.chmod(vault_root, 0o700)
 
 
 def test_cleanup_removes_only_the_empty_plain_vaults(vault_root, capsys):

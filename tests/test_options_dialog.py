@@ -227,6 +227,27 @@ def test_a_folder_the_policy_refuses_is_reported(dialog):
     assert instance.result() != QDialog.DialogCode.Accepted
 
 
+def test_an_unchanged_folder_is_not_revalidated(dialog):
+    # The app may have created the folder itself under the ambient umask, so a
+    # policy complaint about the *stored* value must not block an unrelated
+    # save; only a newly typed path is checked here.
+    problem = ("auto_mount_folder '/home/joe/Vaults' is writable by other "
+               "(shared directory)")
+    instance = dialog(folder_error=problem)
+    instance.inputs['show_anomaly_alerts'].setChecked(False)
+
+    instance.save()
+
+    assert instance.tray.ini_tool.written == [{
+        'auto_mount_folder': '~/Vaults',
+        'log_viewer': '',
+        'show_passwords_by_default': True,
+        'show_anomaly_alerts': False,
+    }]
+    assert instance.errors == []
+    assert instance.result() == QDialog.DialogCode.Accepted
+
+
 def test_a_refused_write_keeps_the_dialog_open(dialog):
     instance = dialog(refuse=['cannot write config.ini'])
 

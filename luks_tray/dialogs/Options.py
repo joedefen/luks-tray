@@ -118,23 +118,31 @@ class OptionsDialog(CommonDialog):
             the policy checks, because that is the path the cleanup will use;
             the unexpanded text is what gets saved.
 
+            Only a *changed* folder is re-checked. The stored one has already
+            been accepted, and re-validating it blocked unrelated saves (a
+            checkbox, the log viewer) because of a directory the app itself had
+            created under the ambient umask; the cleanup and mount paths
+            validate it where it is used, and tighten a group-writable root in
+            place. A newly typed value is still refused here, where the reason
+            can be shown before it is written.
+
             `log_viewer` is split with `shlex` when the menu builds the command,
             so a value that does not parse there would silently disable the
             "Open Log" entry: refuse it here, where the reason can be shown.
         """
         errors = []
         configured = values['auto_mount_folder']
-        if not configured:
-            errors.append('auto-mount folder may not be empty')
-            return errors
-        expanded = self.tray.expand_real_user(configured)
-        if not os.path.isabs(expanded):
-            errors.append(f'auto-mount folder {configured!r} must be an absolute '
-                          f'path, or start with ~/')
-            return errors
-        problem = self.tray.validate_auto_mount_root(expanded)
-        if problem:
-            errors.append(problem)
+        stored = self.tray.ini_tool.get_current_val('auto_mount_folder')
+        if configured != (stored.strip() if isinstance(stored, str) else stored):
+            if not configured:
+                return ['auto-mount folder may not be empty']
+            expanded = self.tray.expand_real_user(configured)
+            if not os.path.isabs(expanded):
+                return [f'auto-mount folder {configured!r} must be an absolute '
+                        f'path, or start with ~/']
+            problem = self.tray.validate_auto_mount_root(expanded)
+            if problem:
+                errors.append(problem)
         viewer = values['log_viewer']
         try:
             shlex.split(viewer)

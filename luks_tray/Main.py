@@ -1120,7 +1120,10 @@ class LuksTray():
               real user or by root (an install whose mount points were created
               with `sudo mkdir` has a root-owned root; the cleanup still works
               there because it retries `rmdir` via `sudo -n`), and not writable
-              by group/other.
+              by *other*. A group-writable root is accepted: on a user-private-
+              group system (`umask 0002`) that is simply the mode `mkdir`
+              makes, and the caller tightens it with
+              [`repair_auto_mount_root()`](luks_tray/Main.py).
 
             The checks are deliberately conservative: when in doubt, skip the
             cleanup and log why (`remove_unused_automounts` treats any returned
@@ -1185,10 +1188,50 @@ class LuksTray():
             return (f'auto_mount_folder {path!r} is owned by uid '
                     f'{stat_info.st_uid}, not by the real user (uid {real_uid}) '
                     f'or root')
-        if stat_info.st_mode & 0o022:
-            return (f'auto_mount_folder {path!r} is writable by group/other '
+        if stat_info.st_mode & 0o002:
+            return (f'auto_mount_folder {path!r} is writable by other '
                     f'(shared directory)')
         return None
+
+    @staticmethod
+    def repair_auto_mount_root(auto_root):
+        """ Make an existing, accepted, user-owned vault root owner-only.
+
+            The root is created with `mkdir -p -m 0700`, but one made by an
+            older release -- or by the user's own `mkdir` -- inherits the
+            process umask: on a user-private-group system (`umask 0002`, the
+            common desktop default) that is 0775. The policy does not refuse
+            such a root (only *other*-writable is fatal), but the app should not
+            leave the area it cleans up group-writable. Tightening it here, with
+            a note in the log, fixes it without a popup.
+
+            The path is validated first, so a config typo (`/home`, a symlink,
+            another user's home, a mount point) is never chmod'd. A root this
+            user does not own is skipped too: the `chown` in
+            [`ensure_auto_mount_root()`](luks_tray/Main.py) handles that case.
+
+            Returns True when the mode was changed.
+        """
+        if LuksTray.validate_auto_mount_root(auto_root):
+            return False
+        try:
+            stat_info = os.stat(auto_root)
+        except OSError:
+            return False
+        if not stat_info.st_mode & 0o020:
+            return False                # Not group-writable: nothing to do
+        real_uid, _real_gid = LuksTray.get_real_user_ids()
+        if stat_info.st_uid not in (real_uid, os.geteuid()):
+            return False                # Not ours to tighten
+        try:
+            os.chmod(auto_root, 0o700)
+        except OSError as exc:
+            prt_once(f'chmod {auto_root}',
+                     f'note: cannot make {auto_root!r} owner-only: {exc}')
+            return False
+        prt(f'note: made auto_mount_folder {auto_root!r} owner-only '
+            f'(it was group-writable)')
+        return True
 
     @staticmethod
     def ensure_auto_mount_root(auto_root):
@@ -1211,14 +1254,22 @@ class LuksTray():
             Returns None on success, or a 'FAIL: ...' string.
         """
         if not os.path.isdir(auto_root):
-            return run_cmd(['mkdir', '-p', auto_root])
+            # The mode is part of the policy this folder has to pass: leaving it
+            # to the umask made `mkdir -p` create a 0775 root on the common
+            # `umask 0002` desktop, which the cleanup then refused to work on.
+            # `-m` modes the leaf directory, which is the root being created.
+            return run_cmd(['mkdir', '-p', '-m', '0700', auto_root])
         real_uid, real_gid = LuksTray.get_real_user_ids()
         try:
             owner_uid = os.stat(auto_root).st_uid
         except OSError as exc:
             return f'FAIL: cannot inspect {auto_root!r}: {exc}'
         if owner_uid == real_uid:
-            return None                      # Already the user's: nothing to do
+            # Being the user's is enough to use it; a group-writable mode left
+            # by an older `mkdir` is tightened in place (and logged) instead of
+            # being reported as a save-time error.
+            LuksTray.repair_auto_mount_root(auto_root)
+            return None
         problem = LuksTray.validate_auto_mount_root(auto_root)
         if problem:
             return f'FAIL: not repairing ownership of {auto_root!r}: {problem}'
@@ -1362,6 +1413,11 @@ class LuksTray():
             the number of directories removed.
         """
         parent_dir = self.get_auto_mount_root()
+        # A root created by an older release inherits the umask (0775 on a
+        # user-private-group system). Tighten it first, so the validation below
+        # does not skip the cleanup forever; the repair validates the path
+        # itself before touching its mode.
+        LuksTray.repair_auto_mount_root(parent_dir)
         problem = LuksTray.validate_auto_mount_root(parent_dir)
         if problem:
             prt(f'WARN: skipping auto-mount cleanup: {problem}')

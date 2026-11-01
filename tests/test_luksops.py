@@ -15,6 +15,7 @@ running `cryptsetup` on the test machine.
 """
 
 import os
+import stat as stat_module
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -177,6 +178,18 @@ def test_ensure_dir_creates_the_whole_tree(tmp_path):
     assert target.is_dir()
 
 
+def test_ensure_dir_creates_the_leaf_owner_only(tmp_path):
+    # The umask a desktop hands the tray must not decide who can see the mount
+    # area; the leaf is the mount point that is checked.
+    target = tmp_path / 'mnt'
+    old_umask = os.umask(0o002)
+    try:
+        assert ensure_dir(str(target)) is None
+    finally:
+        os.umask(old_umask)
+    assert stat_module.S_IMODE(target.stat().st_mode) == 0o700
+
+
 def test_ensure_dir_falls_back_to_sudo_when_the_user_cannot_create_it(
         tmp_path, monkeypatch):
     def denied(*_args, **_kwargs):
@@ -184,7 +197,8 @@ def test_ensure_dir_falls_back_to_sudo_when_the_user_cannot_create_it(
 
     monkeypatch.setattr(os, 'makedirs', denied)
     monkeypatch.setattr(LuksOps, 'sudo_cmd', lambda args: f'sudo {" ".join(args)}')
-    assert ensure_dir(str(tmp_path / 'below')) == 'sudo mkdir -p ' + str(tmp_path / 'below')
+    assert ensure_dir(str(tmp_path / 'below')) == (
+        'sudo mkdir -p -m 0700 ' + str(tmp_path / 'below'))
 
 
 def test_ensure_dir_reports_any_other_os_error(tmp_path, monkeypatch):
