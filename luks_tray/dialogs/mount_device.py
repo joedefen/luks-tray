@@ -11,17 +11,23 @@ from luks_tray.luks_ops import mount_luks_container, run_unmount, sudo_cmd
 
 
 class MountDeviceDialog(CommonDialog):
-    """ TBD """
+    """ One dialog for a LUKS *device* container, in whichever state it is.
+
+        The layout follows the container, not the caller: mounted filesystems
+        give the unmount/close prompt, an opened-but-unmounted container gives
+        the close prompt (the anomaly case that used to render "Close ?"), and
+        anything else gives the mount form. `tray.containers[uuid]` stays the
+        source of truth during the operation, so the dialog itself keeps no
+        copy of the container state.
+    """
     def __init__(self, tray, container):
         super().__init__(tray)
 
         mounts = []
         if container.filesystems:
             mounts = container.filesystems[0].mounts
-        # mounts if there are
         if mounts:  # unmount dialog
             self.set_title('Unmount and Close Device [luks-tray]')
-            # self.setFixedSize(300, 200)
             self.add_line(f'{container.name}')
             self.add_line(f'Unmount {",".join(mounts)}?')
             self.add_push_button('OK', self.unmount_device, container.uuid)
@@ -30,7 +36,6 @@ class MountDeviceDialog(CommonDialog):
 
         elif container.opened:  # close dialog: unlocked but nothing mounted
             self.set_title('Close Unmounted Device [luks-tray]')
-            # self.setFixedSize(300, 200)
             self.add_line(f'{container.name}')
             # `mounts` is empty in this branch by definition (that is what
             # selected it), so joining it rendered a bare "Close ?". Name the
@@ -63,13 +68,19 @@ class MountDeviceDialog(CommonDialog):
 
             self.add_push_button('OK', self.mount_device, container.uuid)
             self.add_push_button('Cancel', self.cancel)
-            # self.add_push_button('Hide', self.hide_partition, container.uuid)
             self.main_layout.addLayout(self.button_layout)
 
         self.setLayout(self.main_layout)
 
     def mount_device(self, uuid):
-        """Attempt to mount the partition."""
+        """ Validate the form, unlock+mount the container, then record it.
+
+            Nothing is executed unless every field validates (`errs` stays
+            empty), and the whole privileged part runs inside
+            `tray.busy_operation()` so the poller cannot rebuild the menu
+            between `cryptsetup open` and `mount`. On success the mount point
+            and password go into the history and the menu is refreshed.
+        """
 
         tray, container = self.tray, None
         errs, values = [], {}
@@ -120,7 +131,8 @@ class MountDeviceDialog(CommonDialog):
         if not errs:
             mount_point = values['upon']
             if mount_point and not os.path.exists(mount_point):
-                # os.makedirs(mount_point, exist_ok=True)
+                # Through sudo, so the folder has the owner `mount` expects
+                # and survives the close (os.makedirs would run as the user).
                 sudo_cmd(['mkdir', '-p', mount_point])
 
             self.hide_password()
@@ -150,7 +162,13 @@ class MountDeviceDialog(CommonDialog):
         self.accept()
 
     def unmount_device(self, uuid):
-        """Attempt to unmount the partition."""
+        """ Unmount every filesystem of the container, then close the mapper.
+
+            `cryptsetup close` is skipped when an unmount failed, so nothing is
+            closed while files are still open. The unmounted mount points are
+            pruned through `tray.remove_if_auto()`, which only touches empty
+            directories below the validated auto-mount root.
+        """
 
         errs, container = [], None
         tray = self.tray
@@ -170,7 +188,6 @@ class MountDeviceDialog(CommonDialog):
                                    if getattr(fs, 'name', '')]
                     for fs in filesystems:
                         for mount in fs.mounts:
-                            ### self.kill_bindfs_on_mount(mount)
                             if tray.is_mounted(mount):
                                 err = run_unmount(mount, busy_warns)
                                 if err:

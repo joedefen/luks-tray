@@ -101,7 +101,21 @@ FORBIDDEN_AUTO_MOUNT_PREFIXES = tuple(os.path.normpath(path) for path in (
 
 
 class LuksTray():
-    """ TBD """
+    """ The tray icon, the menu it shows, and the refresh/mount policy.
+
+        `main()` creates exactly one instance and leaves it in
+        `LuksTray.singleton`; the static helpers below and the dialogs reach
+        the configuration through it. Besides the `QSystemTrayIcon` this owns
+        the single `QMenu`, rebuilt only when its contents actually change
+        (see `replace_menu_if_different()`), and the 3 s `QTimer` that drives
+        `update_menu()`.
+
+        The poller is synchronous but self-guarded: `update_menu()` returns
+        immediately while a refresh or a privileged dialog operation is in
+        flight, and `busy_operation()` marks the latter, so a tick that lands
+        between `cryptsetup open` and `mount` cannot snapshot a half-mounted
+        container.
+    """
     singleton = None
     svg_info = SimpleNamespace(version='04', bases=[
                             'white-shield',  # no LUKS partitions unlocked
@@ -127,12 +141,7 @@ class LuksTray():
         self.mono_font = QFont("Consolas", 10)
         self.mono_font.setStyleHint(QFont.StyleHint.Monospace)
         self.emoji_font = self.get_emoji_font()
-        # self.mono_font = QFont("DejaVu Sans Mono", 10)
         self.app.setFont(self.mono_font)
-
-        # self.has_emoji_font = bool("Noto Color Emoji" in QFontDatabase.families())
-        # self.emoji_font = (QFont("Noto Color Emoji") if self.has_emoji_font
-                           # else QFont("DejaVu Sans"))
 
         _, missing, self.udisks_cmd = self.check_dependencies()
 
@@ -185,8 +194,6 @@ class LuksTray():
             raise RuntimeError(f'missing tray icon(s): {missing_icons}')
 
 
-        # ??? Load JSON data
-        # ??? self.load_data()
         self.lsblk = DeviceInfo(opts=opts, tray=self)
         self.mount_infos = {}
         self.upons = set()
@@ -265,7 +272,13 @@ class LuksTray():
         return QFont()  # system default
 
     def update_mounts(self):
-        """ TBD """
+        """ Re-read /proc/mounts into `mount_infos` and `upons`.
+
+            Returns the set of *device* keys (`mount_infos.keys()`), which is
+            what the old caller passed around as "mount points". Callers that
+            need mount points must use `self.upons` -- `check_upon()` documents
+            the difference.
+        """
         self.mount_infos = {}
         self.upons = set()
         with open('/proc/mounts', 'r', encoding='utf-8') as f:
@@ -282,18 +295,28 @@ class LuksTray():
         return set(self.mount_infos.keys())
 
     def is_mounted(self, thing):
-        """ TBD """
+        """ True if `thing` is a mounted device or a mount point. """
         return thing in self.mount_infos or thing in self.upons
 
     def merge_containers_history(self):
-        """ TBD """
+        """ Make the history agree with the containers just discovered.
+
+            The history is restored from disk first (another process may have
+            written it), then every container without an entry is registered
+            and the result is saved once -- so a device or file seen for the
+            first time is remembered before the menu is built from it.
+        """
         self.history.restore()
         for container in self.containers.values():
             self.history.ensure_container(container)
         self.history.save()
 
     def show_partition_details(self, name):
-        """ TBD """
+        """ Show a message box with the details of container `name`.
+
+            Not wired into the menu at the moment (it is the hook the old
+            context menu called); an unknown name is ignored.
+        """
         container = self.containers.get(name, None)
         if container is None:
             return
@@ -360,10 +383,13 @@ class LuksTray():
             self.operation = previous
 
     def update_menu_items(self):
-        """Update context menu with LUKS partitions."""
-        # menu = QMenu()
+        """ Build the menu entries and hand them to `replace_menu_if_different()`.
+
+            The list is a mix of ready-made `QAction`s and `None` for a
+            separator: building actions is cheap and comparing them is what
+            decides whether the popup has to be replaced at all.
+        """
         actions = []
-        # menu.setFont(self.emoji_font)
 
         icon_key = 'none'
         do_alerts = self.ini_tool.get_current_val('show_anomaly_alerts')
@@ -382,7 +408,6 @@ class LuksTray():
                     mountpoint = f'[{container.vital.upon}]'
 
                 if idx > 0 and not separated and container.type == 'crypt':
-                    # menu.addSeparator()
                     actions.append(None)
                     separated = True
 
@@ -392,7 +417,7 @@ class LuksTray():
                     if name.startswith('/home/'):
                         name = '~' + name[6:]
 
-#               # Determine which emoji/symbol to show
+                # Determine which emoji/symbol to show
                 if mountpoint.startswith('/'):
                     emoji = '⧈' if container.readonly else '▣'
                     icon_key = 'ok' if icon_key != 'alert' else icon_key
@@ -410,40 +435,32 @@ class LuksTray():
                     text = f'{name} {mountpoint}'
 
 
-                # Add the emoji-enhanced item
-                # self.add_emoji_item(menu, emoji, text, callback)
-                # prt(f'{emoji} {text}')
+                # Add the emoji-enhanced item; the left click opens the
+                # mount/close dialog for this container.
                 action = QAction(f'{emoji} {text}', self.app)
                 action.setFont(self.mono_font)  # applies to non-HTML paths
-                                # Connect the left-click action
                 if container.back_file:
                     action.triggered.connect(lambda checked,
                                  x=container.uuid: self.handle_file_click(x))
                 else:
                     action.triggered.connect(lambda checked,
                                  x=container.uuid: self.handle_device_click(x))
-                # menu.addAction(action)
                 actions.append(action)
-
 
             # Other fixed menu entries
             if idx > 0 and not separated:
-                # menu.addSeparator()
                 actions.append(None)
 
             action = QAction('Create New Crypt File', self.app)
             action.setFont(self.mono_font)
             action.triggered.connect(self.handle_create_file_click)
-            # menu.addAction(action)
             actions.append(action)
 
             action = QAction('Add Existing Crypt File', self.app)
             action.setFont(self.mono_font)
             action.triggered.connect(self.handle_add_file_click)
-            # menu.addAction(action)
             actions.append(action)
 
-            # menu.addSeparator()
             actions.append(None)
 
             if self.history.status in ('clear_text', 'unlocked'):
@@ -451,25 +468,33 @@ class LuksTray():
                 action = QAction(f'{verb} Master Password', self.app)
                 action.setFont(self.mono_font)
                 action.triggered.connect(self.prompt_master_password)
-                # menu.addAction(action)
                 actions.append(action)
 
         action = QAction("Exit", self.app)
         action.setFont(self.mono_font)
         action.triggered.connect(self.exit_app)
-        # menu.addAction(action)
         actions.append(action)
 
         return self.replace_menu_if_different(actions, icon_key)
 
 
     def replace_menu_if_different(self, actions, icon_key):
-        """ TBD """
+        """ Install `actions` on the tray menu, but only if they changed.
+
+            Rebuilding the `QMenu` on every 3 s tick would close a popup under
+            the user's cursor, so the new list is compared first -- by length,
+            by rendered text and by icon key. Returns True when the menu was
+            replaced.
+
+            `replace_menu()` reopens a popup that was visible, at the cursor
+            position, and keeps the list in `self.actions` for the next
+            comparison.
+        """
         def replace_menu():
+            """ Install `actions` on the menu and refresh the tray icon. """
             nonlocal actions
             was_visible = self.menu and self.menu.isVisible()
 
-            # self.menu = menu
             self.menu.clear()
             for action in actions:
                 if action:
@@ -491,6 +516,7 @@ class LuksTray():
             return True
 
         def get_action_text(action):
+            """ Comparable text for an action, a widget action or a separator. """
             if action is None:
                 return '<None>'
             if isinstance(action, QWidgetAction):
@@ -500,7 +526,7 @@ class LuksTray():
                 return '<widget>'
             return action.text()
 
-        if not self.actions: # or menu.actions() != self.menu.actions():
+        if not self.actions:
             return replace_menu()
         if self.prev_icon_key != icon_key:
             self.prev_icon_key = icon_key
@@ -532,13 +558,12 @@ class LuksTray():
             dialog.exec()
 
     def handle_add_file_click(self):
-        """ TBD """
+        """ Open the "add existing crypt file" dialog. """
         dialog = MountFileDialog(self, None)
-        # prt('about to exec AddFileClick...')
         dialog.exec()
 
     def handle_create_file_click(self):
-        """ TBD """
+        """ Open the "create new crypt file" dialog. """
         dialog = MountFileDialog(self, None, create=True)
         dialog.exec()
 
@@ -600,6 +625,7 @@ class LuksTray():
             numeric st_uid reported by os.stat().
         """
         def as_int(value, fallback):
+            """ Coerce an environment id to int, warning on garbage. """
             try:
                 return int(value)
             except (TypeError, ValueError):
@@ -721,9 +747,18 @@ class LuksTray():
 
     @staticmethod
     def generate_auto_mount_folder():
-        """ Generate auto mount folder"""
+        """ Return a new, unused mount point below the auto-mount root.
+
+            Creates the root with `sudo mkdir` first when it does not exist,
+            then offers petname-style names: the short suffix alone at first
+            and the full `adjective_name` form after a few tries, skipping
+            anything currently mounted or known to the history. If those run
+            out, a numeric `vaultNNNN` fallback is used; RuntimeError is raised
+            when even that is exhausted.
+        """
 
         def available(basename):
+            """ Full path for `basename`, or None if it is already taken. """
             nonlocal auto_root, tray
             fullpath = os.path.join(auto_root, basename)
             if fullpath in tray.upons or fullpath in tray.history.upons:
@@ -739,7 +774,6 @@ class LuksTray():
                 raise RuntimeError(
                     f'auto_mount_folder ({auto_root!r}) exists but is not a directory')
         else:
-            # os.makedirs(auto_root)
             run_cmd(['mkdir', auto_root])
 
         for loop in range(30):
@@ -827,6 +861,19 @@ class LuksTray():
             return 0
         if not os.path.isdir(parent_dir):
             return 0  # Nothing to clean yet
+        if not os.access(parent_dir, os.W_OK | os.X_OK):
+            # `rmdir` needs write+execute on the *folder*, not ownership of the
+            # child, so when the folder itself is not writable by this process
+            # nothing below it can be removed. That is the normal state of an
+            # unprivileged run: mount points are created with `sudo mkdir -p`,
+            # so `~/Vaults` is root-owned 0755 and every `os.rmdir` below would
+            # fail with EACCES. Say it once and leave the tidying to a run that
+            # has the privileges, instead of logging a permission error per
+            # directory (the old behaviour looked like a bug in the cleanup).
+            prt_once(f'automount root not writable {parent_dir}',
+                     f'note: skipping auto-mount cleanup: {parent_dir!r} is not '
+                     f'writable by this process (euid {os.geteuid()})')
+            return 0
 
         try:
             names = os.listdir(parent_dir)
@@ -884,17 +931,29 @@ class LuksTray():
 
 
 def rerun_module_as_root(module_name):
-    """ rerun using the module name """
+    """ Re-exec `python -m module_name` under sudo unless already root.
+
+        For starting the tray with privileges (e.g. from a desktop autostart
+        entry). `os.execvp()` replaces this process; when the re-exec happens
+        this function never returns.
+    """
     if os.geteuid() != 0: # Re-run the script with sudo
         os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         vp = ['sudo', sys.executable, '-m', module_name] + sys.argv[1:]
         os.execvp('sudo', vp)
 
 def main():
-    """ TBD """
+    """ Entry point: parse the CLI and then run the tray loop.
+
+        The informational options (`--edit-config`, `--follow-log`,
+        `--check-deps`) exec their tool and never return; the normal path
+        builds `IniTool` and `LuksTray` and hands control to
+        `QApplication.exec()`. Anything that fails on the way is logged
+        through `prt()` -- stdout may already be the debug log by then -- and
+        exits with status 15.
+    """
     import argparse
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    # os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
     parser = argparse.ArgumentParser()
     parser.add_argument('-D', '--debug', action='store_true',
@@ -966,5 +1025,4 @@ def main():
         sys.exit(15)
 
 if __name__ == "__main__":
-    # mainBasic()
     main()

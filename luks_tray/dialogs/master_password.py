@@ -7,7 +7,13 @@ from luks_tray.dialogs.common import CommonDialog
 
 
 class MasterPasswordDialog(CommonDialog):
-    """ TBD """
+    """ Set, change or remove the passphrase that encrypts the history file.
+
+        The history lives in one of three states ('clear_text', 'unlocked',
+        'locked'); this dialog is the only place that moves between them, and
+        it re-saves the file with `force=True` so the state change is on disk
+        before the menu is rebuilt.
+    """
     def __init__(self, tray):
         super().__init__(tray)
         self.set_title('Master Password Dialog [luks-tray]')
@@ -20,11 +26,18 @@ class MasterPasswordDialog(CommonDialog):
 
 
     def clear_master_password(self, _):
-        """ TBD """
+        """ Drop the master password (save the history in clear text). """
         self.set_master_password(_, force_clear=True)
 
     def set_master_password(self, _, force_clear=False):
-        """ TBD """
+        """ Apply the password field to the history and close on success.
+
+            In the 'locked' state a non-empty password unlocks the history
+            (`restore()`), while an empty one saves it in clear text. In the
+            'unlocked'/'clear_text' states the new password is saved first, so
+            a failed write leaves the old state intact. Errors are reported in
+            a message box and the dialog stays open.
+        """
         tray = self.tray
         field = self.inputs.get('password', None)
         errs = []

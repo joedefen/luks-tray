@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-""" TBD """
+""" The persisted container history for LUKS TRAY.
+
+    One "vital" per container: its UUID, mount point, backing file and the
+    password that unlocks it. It is stored as JSON at the path `IniTool`
+    computes, either in clear text, encrypted with Fernet/PBKDF2 under a
+    master password, or unreadable until that password is supplied -- which is
+    what `status` reports ('clear_text', 'unlocked', 'locked').
+
+    Writes are atomic (temp file + rename) and 0600. On restore the entries are
+    re-checked against the system: a file container whose LUKS UUID no longer
+    matches the file on disk is dropped, so a replaced or deleted crypt file
+    cannot silently inherit another volume's saved password.
+"""
 # pylint: disable=invalid-name,broad-exception-caught
 # pylint: disable=line-too-long,too-many-instance-attributes
 # pylint: disable=too-many-return-statements
@@ -53,7 +65,6 @@ class HistoryClass:
         # survives _json_data_to_namespaces() so that re-parsing the history
         # does not shell out to blkid again for unchanged backing files.
         self._back_file_uuid_cache = {}
-        # self._load_initial_state()
 
 
     def _load_initial_state(self):
@@ -138,9 +149,7 @@ class HistoryClass:
         Args:
             container (SimpleNamespace): The container object to check and add.
         """
-        # do not save auto-mounts by file managers or gnome-disks
         upon = container.upon
-        # upon = '' if upon.startswith(('/run/', '/media/')) else upon
         if upon:
             self.upons.add(upon)
         uuid = container.uuid

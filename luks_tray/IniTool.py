@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-TBD
+""" Configuration and path discovery for LUKS TRAY.
+
+    `IniTool` owns the `~/.config/luks-tray` folder: it creates the folder and
+    `config.ini` on first use, parses the file against the `defaults` "golden"
+    values -- an unknown key or a value of the wrong type is skipped with a
+    message instead of breaking startup -- and exposes the paths the rest of
+    the program needs (the history file and the debug log).
+
+    `update_config()` re-reads the file only when its mtime changed, so the 3 s
+    refresh can afford to call it and a hand-edited config takes effect without
+    a restart.
 """
 # pylint: disable=invalid-name, broad-exception-caught
 # pylint: disable=too-many-branches,too-many-statements
 # pylint: disable=too-many-instance-attributes
 # pylint: disable=consider-using-from-import
-# pylint: disable=
-# pylint: disable=
 
 import os
 import pwd
@@ -88,7 +95,12 @@ class IniTool:
     def update_config(self):
         """ Check if the file has been modified since the last read """
         def to_array(val_str):
-            # Expecting string of form: "[1,2,...]" or just "20"
+            """ Parse "[1,2,...]" or "20" into a list of positive ints.
+
+                Returns None for anything that does not hold at least one
+                positive int; a single value is repeated, because the callers
+                (window geometry) always want two.
+            """
             try:
                 vals = json.loads(val_str)
             except (TypeError, ValueError) as exc:   # JSONDecodeError is a ValueError
@@ -123,7 +135,6 @@ class IniTool:
         all_params = {}
 
         # Access the configuration values in order
-        # prt('parsing config.ini...')
         for selector in self.get_selectors():
             all_params[selector] = params = copy.deepcopy(running)
             if selector not in self.config:
@@ -184,7 +195,5 @@ class IniTool:
             all_params[selector] = SimpleNamespace(**params)
 
         self.params_by_selector = all_params
-
-        # prt(f'DONE parsing config.ini... {all_params=}')
 
         return True # updated

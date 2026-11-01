@@ -64,9 +64,7 @@ def where(above=0):
     if frameNo < 0 or len(stack) < frameNo + 2:
         return '[n/a]'
     filename, line_number = stack[frameNo][1:3]
-        # lg.db(f'YES {os.path.basename(filename)}:{line_number}')
     return f'[{filename.split("/")[-1]}:{line_number}]'
-    # return f'[:{line_number}]'
 
 
 def prt(*args, **kwargs):
@@ -76,23 +74,27 @@ def prt(*args, **kwargs):
      - if we create a log file, its size is limited to 512K and then it is truncated
      """
     def check_stdout(use_stdout=None):
+        """ Make sure stdout points at a terminal or at the debug log. """
         global prt_to_init
         # The two probes below deliberately stay silent: they run *inside*
         # prt(), so logging a failure here would call prt() again and recurse
         # until the stack runs out. "Not a tty" / "not a regular file" is also
         # the normal answer for a tray started by a desktop session.
         def is_tty():
+            """ True if stdout is a terminal. """
             try:
                 os.ttyname(sys.stdout.fileno())
                 return True
             except Exception:                       # pylint: disable=broad-except
                 return False
         def is_reg():
+            """ True if stdout is already an open regular file (the log). """
             try:
                 return stat.S_ISREG(os.fstat(sys.stdout.fileno()).st_mode)
             except Exception:                       # pylint: disable=broad-except
                 return False
         def reopen():
+            """ Point stdout and stderr at the debug log in append mode. """
             global prt_to_init
             sys.stdout = open(prt_path, "a+", encoding='utf-8')
             sys.stderr = sys.stdout

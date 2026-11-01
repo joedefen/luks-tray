@@ -51,7 +51,19 @@ IS_SWAY_LIKE_ENV = requires_manual_title()
 
 
 class CommonDialog(QDialog):
-    """ TBD """
+    """ Base class for every dialog: layout helpers, paths and progress UI.
+
+        A dialog is built from small pieces (`add_line()`, `add_input_field()`,
+        `add_push_button()`) and then runs one privileged operation, so this
+        class holds the parts they all share: the invisible parent window from
+        the tray, positioning next to the cursor (see `showEvent()`, needed
+        because Sway ignores the CSD hints), password visibility toggling, the
+        error message box and the progress bar.
+
+        The tray is a constructor argument rather than a singleton lookup: it
+        keeps this package independent of `luks_tray.main` (no circular import)
+        and lets tests pass a plain stand-in object.
+    """
     home_dir = None
     dot_vault_dir = None # ~/.Vaults (default crypts)
     vault_dir = None # ~/Vaults (default mount area)
@@ -154,12 +166,17 @@ class CommonDialog(QDialog):
 
 
     def add_line(self, text):
-        """ TBD """
+        """ Append a read-only text line to the main layout. """
         label = QLabel(text)
         self.main_layout.addWidget(label)
 
     def add_push_button(self, label, method, arg=None):
-        """ TBD """
+        """ Add a button to the button row that calls `method(arg)`.
+
+            `arg` keeps the callbacks one-argument (`self.mount_device(uuid)`,
+            `self.cancel(_)`), which is also the signature Qt's `clicked`
+            hands over when a button is connected directly.
+        """
         button = QPushButton(label)
         button.clicked.connect(lambda: method(arg))
         self.button_layout.addWidget(button)

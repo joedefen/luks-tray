@@ -34,7 +34,13 @@ class DeviceInfo:
 
     @staticmethod
     def make_partition_namespace(name, size_str):
-        """ TBD """
+        """ Return the blank per-device record the tray and dialogs expect.
+
+            `parse_lsblk()` fills these in from `lsblk -J`; the dialogs also
+            build one for a file container that no block device represents
+            yet. Every field is present up front so callers never need
+            `getattr(..., default)` just because a device was not parsed.
+        """
         return SimpleNamespace(name=name,       # /proc/partitions
             opened=None,    # or True or False
             upon='',        # primary mount point
@@ -54,11 +60,15 @@ class DeviceInfo:
 
     @staticmethod
     def get_device_vendor_model(device_name):
-        """ Gets the vendor and model for a given device from the /sys/class/block directory.
-        - Args: - device_name: The device name, such as 'sda', 'sdb', etc.
--       - Returns: A string containing the vendor and model information.
+        """ Return the hardware model of `device_name` from /sys ('' if none).
+
+            Reads `/sys/class/block/<name>/device/model`, which is what
+            distinguishes real disks in the menu ('Samsung SSD 980 ...'). Loop
+            and device-mapper nodes have no such attribute, so an empty string
+            is the normal answer there and is logged only once.
         """
         def get_str(device_name, suffix):
+            """ Read one /sys attribute; '' when the node does not exist. """
             try:
                 rv = ''
                 fullpath = f'/sys/class/block/{device_name}/device/{suffix}'
@@ -74,7 +84,8 @@ class DeviceInfo:
                          f'note: cannot read {fullpath}: {e}')
             return rv
 
-        # rv = f'{get_str(device_name, "vendor")}' #vendor seems useless/confusing
+        # Only the model: the vendor string adds nothing the user recognises
+        # ("Generic", "ATA", ...) and made the menu line too long.
         rv = f'{get_str(device_name, "model")}'
         return rv.strip()
 
@@ -91,8 +102,21 @@ class DeviceInfo:
         return False
 
     def parse_lsblk(self):
-        """ Parse ls_blk for all the goodies we need """
+        """ Rebuild `self.entries` from one `lsblk -J` snapshot.
+
+            Walks the tree top-down: a top-level entry is a disk or a loop
+            device (a file container), its children are partitions or crypt
+            mappers, and the grandchildren are the filesystems inside them.
+            Containers are keyed by UUID -- device containers and file
+            containers are kept separately and merged at the end.
+
+            Entries are split by `type`/`fstype`: anything that is not a LUKS
+            child is skipped, mount points that are banned by `is_banned()` are
+            dropped whole, and `opened` records whether a mapper exists at all.
+            On a `lsblk` timeout the previous snapshot is returned unchanged.
+        """
         def get_backing_file(loop_device):
+            """ File behind a loop device, or '' when it is not a file loop. """
             node = f'/sys/block/{loop_device}/loop/backing_file'
             try:
                 with open(node, 'r', encoding='utf-8') as f:
@@ -109,6 +133,7 @@ class DeviceInfo:
                 return ''
 
         def eat_one(device):
+            """ Turn one `lsblk -J` node into a populated namespace. """
             entry = self.make_partition_namespace('', '')
             entry.name=device.get('name', '')
             entry.type = device.get('type', '')
@@ -131,7 +156,8 @@ class DeviceInfo:
                 entry.back_file = get_backing_file(entry.name)
             return entry
 
-               # Run the `lsblk` command and get its output in JSON format with additional columns
+        # Run the `lsblk` command and get its output in JSON format with
+        # additional columns
         try:
             result = subprocess.run(['lsblk', '-J', '-o',
                         'NAME,MAJ:MIN,TYPE,RO,FSTYPE,LABEL,PARTLABEL,FSUSE%,SIZE,UUID,MOUNTPOINTS', ],
@@ -153,7 +179,6 @@ class DeviceInfo:
             parent.fstype = self.get_device_vendor_model(parent.name)
             for child in device.get('children', []):
                 entry = eat_one(child)
-                # entry.parent = parent.name
                 entry.parent = parent
                 if not parent.fstype:
                     parent.fstype = 'DISK'
@@ -164,8 +189,6 @@ class DeviceInfo:
                     entry.back_file = parent.back_file
                 elif 'luks' not in entry.fstype.lower():
                     continue
-                # if parent.name not in entries:
-                    # entries[parent.name] = parent
                 if entry.type == 'crypt':
                     file_cons[entry.uuid] = entry
                 else:
@@ -185,44 +208,38 @@ class DeviceInfo:
                     subentry = eat_one(grandchild)
                     subentry.parent = entry.name
                     entry.filesystems.append(subentry)
-                    # entries[subentry.name] = subentry
                     if len(grandchildren) == 1 and len(subentry.mounts) == 1:
                         entry.upon = subentry.mounts[0]
                         # The device name in /proc/mounts is the subentry's name (e.g., /dev/mapper/luks_vol)
                         ns = self.tray.mount_infos.get(f'/dev/mapper/{subentry.name}',
                                               self.tray.mount_infos.get(subentry.name, None))
                         if ns:
+                            # /proc/mounts is authoritative for the `ro` flag;
+                            # lsblk's RO column describes the block device, not
+                            # the way it happens to be mounted.
                             entry.readonly = ns.readonly
-                            # Optionally, you can also set entry.upon here if needed,
-                            # but it's often better to rely on lsblk's MOUNTPOINTS data first.
                             if self.is_banned(entry.mounts):
                                 continue # skip whole disk entries
 
         self.entries = dev_cons | file_cons
         if self.DB:
-            #s = StringIO()
             temps = []
             for entry in self.entries.values():
                 tmp_row = {}
                 row = vars(entry)
                 for key, value in row.items():
-                #   if isinstance(value, SimpleNamespace):
-                #       tmp_row[key] = str(vars(value))
-                #   else:
                     tmp_row[key] = str(value)
                 temps.append(tmp_row)
-                #print(vars(entry), file=s)
             entries_str = json.dumps(temps, indent=4)
             if entries_str != self.prev_entries_str:
                 dt = datetime.now().strftime('%m-%d^%H:%M:%S')
                 print(f'\n\nDB: {dt} --->>> after parse_lsblk:')
                 print(entries_str)
                 self.prev_entries_str = entries_str
-#               print(f'{back_files=}')
 
         return self.entries
 
 
     def get_relative(self, name):
-        """ TBD """
+        """ Return the parsed entry called `name`, or None if unknown. """
         return self.entries.get(name, None)

@@ -18,11 +18,24 @@ from luks_tray.luks_ops import (generate_uuid_for_file_path,
 
 
 class MountFileDialog(CommonDialog):
-    """ TBD """
+    """ One dialog for a LUKS *file* container, in any of its four states.
+
+        `container` is the parsed file container, or None for a file the tray
+        does not know yet; `create=True` then means "make a new crypt file"
+        instead of "add an existing one". The four layouts differ only in
+        their fields, and `mount_file()` handles all of them:
+
+        - mounted/opened container -> unmount and detach (`unmount_file()`);
+        - known container -> mount form (password, mount point, read-only);
+        - no container, `create=False` -> add form (plus the crypt file path);
+        - no container, `create=True` -> create form (size, overwrite check).
+
+        A file container is its own loop device and mapper, which is why the
+        unmount path closes it by name and detaches the loop afterwards.
+    """
     def __init__(self, tray, container, create=False):
         super().__init__(tray)
 
-        # mounts if there are
         if container and container.opened:  # unmount dialog
             if container.mounts:
                 self.set_title('Unmount/Close Crypt File [luks-tray]')
@@ -52,7 +65,6 @@ class MountFileDialog(CommonDialog):
 
             self.add_push_button('OK', self.mount_file, container.uuid)
             self.add_push_button('Cancel', self.cancel)
-            # self.add_push_button('Hide', self.hide_partition, container.uuid)
             self.main_layout.addLayout(self.button_layout)
 
         elif not create: # no container ... use existing file (not creating)
@@ -60,15 +72,14 @@ class MountFileDialog(CommonDialog):
             self.add_input_field('password', "Enter Password", '',
                                 24, add_on='password')
             self.add_input_field('back_file', "Crypt File", '', 48, add_on='file')
-            # where = LuksTray.generate_auto_mount_folder()
-            # self.add_input_field('upon', "Mount At", where, 36, add_on='folder')
+            # Prefilled with the vault area: `mount_file()` turns that back
+            # into `<vault_dir>/<file name without .luks>` when it validates.
             self.add_input_field('upon', "Mount At", self.vault_dir, 36, add_on='folder')
             self.add_input_field('readonly', "Read-only",
                                  '', 48, field_type='checkbox')
 
             self.add_push_button('OK', self.mount_file, None)
             self.add_push_button('Cancel', self.cancel)
-            # self.add_push_button('Hide', self.hide_partition, container.uuid)
             self.main_layout.addLayout(self.button_layout)
 
         else: # no container ... create crypt file
@@ -79,19 +90,24 @@ class MountFileDialog(CommonDialog):
             self.add_input_field('back_file', "Crypt File", self.dot_vault_dir, 48, add_on='new_file')
             self.add_input_field('overwrite_ok', "Enable Overwrite of Existing File",
                                  '', 48, field_type='checkbox')
-            # where = LuksTray.generate_auto_mount_folder()
             self.add_input_field('upon', "Mount At", self.vault_dir, 36, add_on='folder')
 
             self.add_push_button('OK', self.mount_file, None)
             self.add_push_button('Cancel', self.cancel)
-            # self.add_push_button('Hide', self.hide_partition, container.uuid)
             self.main_layout.addLayout(self.button_layout)
 
         self.setLayout(self.main_layout)
 
     def unmount_file(self, uuid):
-        """Attempt to unmount the partition."""
-        # Here you would implement the unmount logic.
+        """ Unmount the file container, close the mapper and detach the loop.
+
+            The unmount loop runs twice because a crypt file can be mounted
+            twice -- the plain mount plus the bindfs overlay used for
+            read-only access -- and the second pass picks up the layer the
+            first one leaves behind. A busy mount stops the retry early and
+            skips the `cryptsetup close`, so nothing is closed underneath the
+            process still using it.
+        """
         errs, container = [], None
         tray = self.tray
         container = tray.containers.get(uuid, None)
@@ -135,7 +151,19 @@ class MountFileDialog(CommonDialog):
             self.accept()
 
     def mount_file(self, uuid):
-        """ TBD """
+        """ Validate the form, then create/add/mount the crypt file.
+
+            `uuid` is None when the dialog was opened from "Add Existing" or
+            "Create New", in which case a blank container record stands in for
+            the one lsblk would have produced. Validation covers the password,
+            the crypt file (its directory has to exist), the mount point
+            (`check_upon()` against `tray.upons`) and the size in MiB; the
+            overwrite checkbox is only consulted when it is present.
+
+            After a successful mount the history entry is keyed by the LUKS
+            UUID *inside* the file, because that is what `restore()` verifies
+            on every load.
+        """
 
         tray, container = self.tray, None
         errs, values = [], {}
@@ -241,7 +269,6 @@ class MountFileDialog(CommonDialog):
                     # point the mkdir branch below is skipped.
                     err = None
                     if mount_point and not os.path.exists(mount_point):
-                        # os.makedirs(mount_point, exist_ok=True)
                         err = run_cmd(['mkdir', '-p', mount_point])
                     if not err:
                         # The "create new crypt file" layout has no Read-only
@@ -260,7 +287,6 @@ class MountFileDialog(CommonDialog):
                 errs.append(err)
         if errs:
             self.alert_errors([f'{context}'] + errs)
-            # self.accept()
             return
 
         # update history with new values if mount worked
