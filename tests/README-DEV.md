@@ -5,9 +5,10 @@ leaves this repository.
 
 This file lives under `tests/` on purpose: the root belongs to
 [`README.md`](../README.md), which is for people who *use* the tray.  The rest of
-the development material — this file, [`AUDIT.md`](AUDIT.md) and
+the development material — this file and
 [`BLESS-ADOPTION-PLAN.md`](BLESS-ADOPTION-PLAN.md) — sits next to the tests it
-describes.
+describes.  Open items are listed in the `TODOs` section at the end of
+[`README.md`](../README.md).
 
 Every command below is run from the repository root.
 
@@ -78,9 +79,9 @@ lt-venv/bin/python -m pytest -q --cov=luks_tray --cov-report=term-missing
 * `ruff check .` takes **no flags** in the gate.  The rule selection is pinned in
   [`pyproject.toml`](../pyproject.toml) under `[tool.ruff.lint] select` instead of
   being inherited from whatever the installed ruff calls its default — ruff 0.17
-  widened that default set and reports 56 pre-existing findings in this package.
-  The reasoning is in the comment there; widening the selection is
-  [`AUDIT.md`](AUDIT.md) medium #11, not something to smuggle into a release.
+  widened that default set and reports about 50 pre-existing findings in this
+  package.  The reasoning is in the comment there; widening the selection is a
+  TODO in [`README.md`](../README.md), not something to smuggle into a release.
 * `compileall` parses every file *including* the tests, so a syntax error cannot
   hide behind pytest's collection order.
 * `pytest` reads `[tool.pytest.ini_options]` and `[tool.coverage.run]` /
@@ -127,8 +128,8 @@ called `QMessageBox.set_title()` (the method is `setWindowTitle`), so the
 busy-device dialog raised instead of appearing; and
 `CommonDialog.hide_progress()` tested `hasattr(self, 'progress_label')`, which is
 always true, so the dialogs' `finally:` paths hit `AttributeError` whenever the
-progress widgets had never been shown.  Both are recorded in
-[`AUDIT.md`](AUDIT.md) medium #12.
+progress widgets had never been shown.  Both are pinned by
+[`test_luksops.py`](test_luksops.py) and [`test_dialogs.py`](test_dialogs.py).
 
 [`inspect_dist.py`](inspect_dist.py) is not a test module: it is the shared
 inspector that both the CI packaging job and `bless` run against the built wheel
@@ -308,11 +309,11 @@ grows a credential, drifts from the gates above, or loses the offscreen setting.
   (`MasterPasswordDialog`, `MountDeviceDialog`, `MountFileDialog`).  Tracked in
   [`BLESS-ADOPTION-PLAN.md`](BLESS-ADOPTION-PLAN.md) Phase 5a.
 * **The ruff selection is narrow on purpose** — `E4`, `E7`, `E9`, `F`, the set the
-  package has always been clean under.  Widening it (56 pre-existing findings) is
-  [`AUDIT.md`](AUDIT.md) medium #11.
-* **Sway/Wayland support is open**, with four items in
-  [`AUDIT.md`](AUDIT.md); the `archive/sway` tag is where the abandoned attempt
-  lives.
+  package has always been clean under.  Widening it (about 50 pre-existing
+  findings) is a TODO in [`README.md`](../README.md).
+* **Sway/Wayland support is open** — the remaining items are in the `TODOs`
+  section of [`README.md`](../README.md); the `archive/sway` tag is where the
+  abandoned attempt lives.
 * **TrueCrypt/VeraCrypt support is deliberately one-sided.**  Adding and
   unmounting a file container is implemented and exercised against a container
   made with `tcplay`; discovery, creation, non-default PIMs and hidden/system
@@ -524,6 +525,27 @@ of the above.
 
 ---
 
-The audit itself — what was broken, what was fixed, and what remains — is
-[`AUDIT.md`](AUDIT.md).  Why the release works this way, and what `bless` assumes
-about a tree, is [`BLESS-ADOPTION-PLAN.md`](BLESS-ADOPTION-PLAN.md).
+What remains is listed in the `TODOs` section at the end of
+[`README.md`](../README.md).  Why the release works this way, and what `bless`
+assumes about a tree, is [`BLESS-ADOPTION-PLAN.md`](BLESS-ADOPTION-PLAN.md).
+
+---
+
+## 13. Removed documents
+
+`tests/AUDIT.md` was the audit of v2.0.5 that produced the v3.0.0 remediation.
+It was removed once every item had been either fixed or carried over to the
+`TODOs` section of [`README.md`](../README.md); keeping a 466-line incident log
+next to the tests made every later edit re-check prose that no longer matched
+the code.  It is still in the history — retrieve it from the commit that
+deleted it:
+
+```sh
+commit=$(git log -1 --format=%H --diff-filter=D -- tests/AUDIT.md)
+git show "$commit^:tests/AUDIT.md" > /tmp/AUDIT.md
+```
+
+`"$commit^"` is the tree just before the deletion, so the file comes back
+exactly as it was last reviewed, stale line numbers and all.  Run
+`git log --all -- tests/AUDIT.md` to list the commits that edited it, if an
+earlier version is wanted.

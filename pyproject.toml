@@ -144,11 +144,11 @@ extend-exclude = ["build", "dist", "lt-venv"]
 # The selection is pinned rather than inherited.  `ruff check .` with no flags
 # enforces whatever the installed ruff calls its default, and that set has grown
 # across releases: 0.17 adds pyupgrade, isort, simplify, blind-except, shebang
-# and the `ruff`-specific rules, which the audit records as 56 pre-existing
-# findings across the package.  Pinning here means ./bless, CI and a developer
+# and the `ruff`-specific rules, which report about 50 pre-existing findings
+# across the package.  Pinning here means ./bless, CI and a developer
 # run one rule set -- the one the code has always been kept clean under -- and a
 # ruff upgrade cannot turn the release gate red by deciding to prefer different
-# style.  Widening it is tracked in AUDIT.md (medium #11), not smuggled in here.
+# style.  Widening it is a TODO in README.md, not smuggled in here.
 select = ["E4", "E7", "E9", "F"]
 # Project style: module files are CamelCase -- `History.py`, `IniTool.py`,
 # `Utils.py`, `DeviceInfo.py`, `LuksOps.py`, `Main.py` and every dialog. That is

@@ -80,8 +80,8 @@ def test_the_dialog_is_parented_to_the_trays_hidden_widget(qapp, tray):
 def test_the_dialog_sets_exactly_the_flags_it_means_to(dialog):
     # `setWindowFlags()` *replaces*, so this is the whole set: a dialog frame
     # with a title and a close button, and deliberately no `Tool` -- that hint
-    # was ignored anyway (see the Sway section of tests/AUDIT.md).  Asserted as
-    # one value so a change in either direction has to be deliberate.
+    # was ignored anyway.  Asserted as one value so a change in either direction
+    # has to be deliberate.
     # (`Tool` is a composite value, so `flags & Tool` says nothing.)
     assert dialog.windowFlags() == (
         Qt.WindowType.Window

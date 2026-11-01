@@ -334,5 +334,38 @@ Test Notes:
 
 ---
 
-For developing `luks-tray`, see [tests/README-DEV.md](tests/README-DEV.md); known
-defects and the items still open are in [tests/AUDIT.md](tests/AUDIT.md).
+For developing `luks-tray`, see [tests/README-DEV.md](tests/README-DEV.md).
+
+---
+
+## TODOs
+
+Known, deliberate gaps rather than defects. None blocks normal use.
+
+- **Ruff selection.** The gate pins `select = ["E4", "E7", "E9", "F"]` in
+  [`pyproject.toml`](pyproject.toml) because the wider default reports roughly
+  50 pre-existing findings (blind `except`, import order, `UP009`, `RUF010`,
+  `EXE001`). Widening it is a cleanup first, then a one-line config change.
+- **Coverage floor.** `[tool.coverage.report] fail_under` is unset until the
+  number has been measured and agreed. The largest uncovered areas are
+  `DeviceInfo`'s `lsblk`/`/sys` parsing, the menu/refresh half of
+  [`Main.py`](luks_tray/Main.py) and the three dialog subclasses. Details are in
+  [`tests/README-DEV.md`](tests/README-DEV.md) §11.
+- **Polling is synchronous.** The 3 s `QTimer` runs `update_menu()` on the UI
+  thread. Every command it runs has a deadline and the re-entrancy guard is in
+  place, so this is a latency refactor (move the poll to a worker thread), not a
+  correctness fix.
+- **X11 dialog placement.** [`showEvent()`](luks_tray/dialogs/Common.py) picks
+  the screen with `self.screen()`, which has no window handle before the first
+  show, so a dialog opened from a secondary output can be clamped to the
+  primary. `QApplication.screenAt()` is the candidate fix. Wayland compositors
+  place the window themselves, so this is X11-only.
+- **Wayland session surface.** The hidden `dialog_parent` has no surface, so no
+  taskbar entry can be suppressed. Making it a real hidden surface needs testing
+  on both i3 and sway. The abandoned sway attempt survives as the `archive/sway`
+  tag.
+- **Config folder mode.** `~/.config/luks-tray` is still created with the ambient
+  umask (`0755` under `umask 022`), while `history.json` and `debug.log`
+  themselves are owner-only. Tightening the folder to `0700` would cover
+  `config.ini` and the log together; it is deliberately left separate from the
+  vault-folder fix.

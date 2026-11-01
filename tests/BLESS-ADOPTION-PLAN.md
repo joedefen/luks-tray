@@ -23,9 +23,9 @@ script ran `pip install -e .` into whichever interpreter happened to be active,
 while its own `echo` told you to test with `lt-venv/bin/luks-tray` — so in the
 common case it installed into the wrong interpreter. Nothing referenced it:
 `README.md`, [`runner`](../runner) and [`pyproject.toml`](../pyproject.toml)
-never mentioned it, and the audit note in [`AUDIT.md`](AUDIT.md) that recorded
-the defect now records the replacement instead. Installing for development is
-one documented command, `lt-venv/bin/python -m pip install -e '.[dev]'`.
+never mentioned it, and the release gate now covers the job it was trying to do.
+Installing for development is one documented command,
+`lt-venv/bin/python -m pip install -e '.[dev]'`.
 
 ## Why adopt it at all
 
@@ -57,7 +57,7 @@ then provide"). Status was read from the tree, not assumed.
 | A console script that prints the version for `--version` | `luks-tray = luks_tray.Main:main` had no `--version` | **done**: `action='version'` in [`main()`](../luks_tray/Main.py) |
 | `python -m build` works, from the dev extra | `build` was not installed in `lt-venv` (3.13.5) | **done**: `build 1.6.1` |
 | Dev extra: ruff, pytest, pytest-cov, build, twine>=7, packaging>=26 | no `[project.optional-dependencies]` at all | **done**: `pytest 9.2.0`, `pytest-cov 7.1.0`, `build 1.6.1`, `twine 7.0.0`, `packaging 26.3`, `ruff 0.17.3` |
-| Inspector at `tests/inspect_dist.py` | missing — `tests/` held only `AUDIT.md` | **done**: [`tests/inspect_dist.py`](inspect_dist.py) |
+| Inspector at `tests/inspect_dist.py` | missing — `tests/` had no suite | **done**: [`tests/inspect_dist.py`](inspect_dist.py) |
 | A `pytest` suite the gates can run | `pytest` exited 5, which `bless` reads as a failed gate | **done**: 279 tests, 54.1% of 1893 statements |
 | Clean working tree | clean; `.ruff_cache/`, `*.whl`, `*.tar.gz`, `.coverage*` were not ignored | **done**: [`.gitignore`](../.gitignore) covers the gate's output |
 | `vX.Y.Z` tag absent | no version tags exist (only `archive/sway`) | ok |
@@ -78,8 +78,8 @@ Two consequences worth stating plainly:
 ## Decisions this plan takes
 
 1. **`3.0.0` is the version.** Owner's call, and the right one twice over:
-   `2.0.5` is on PyPI so the duplicate check refuses it, and the audit
-   remediation plus the packaging work since then is not a patch-release story.
+   `2.0.5` is on PyPI so the duplicate check refuses it, and the remediation
+   plus the packaging work since then is not a patch-release story.
    Significant features are still to come in the 3.x line.
 2. **`deploy` is deleted**, not repaired. `bless` covers the same intent (build
    it, install it, run it) with checks, and the missing piece `deploy` had —
@@ -92,9 +92,9 @@ Two consequences worth stating plainly:
    blind-except, shebang and `ruff`-specific rules, which report **56 findings**
    across the package (all pre-existing). Pinning means `bless`, CI and a
    developer run one rule set, and a ruff upgrade cannot redden the release gate
-   by preferring different style. Widening it stays recorded as medium #11 in
-   [`AUDIT.md`](AUDIT.md) — and when that happens, `tests/*` will need `S101`
-   and `S108` (assertions, `/tmp` paths).
+   by preferring different style. Widening it is a TODO in
+   [`README.md`](../README.md) — and when that happens, `tests/*` will need
+   `S101` and `S108` (assertions, `/tmp` paths).
 4. **No `smoke_args`.** `[tool.bless] smoke_args` adds an argv to the smoke run;
    `--check-deps` is the only non-interactive candidate and it exits 1 when a
    system program is absent, so on a CI runner without `cryptsetup` it would
@@ -108,7 +108,7 @@ Two consequences worth stating plainly:
    raised (`fail_under`, read by `pytest-cov` itself so CI and a developer
    enforce one number).
 7. **Developer documentation lives under `tests/`**, not beside the user-facing
-   `README.md`: `tests/README-DEV.md`, next to the audit and this plan.
+   `README.md`: `tests/README-DEV.md`, next to this plan.
 
 ## Phase 1 — the release plumbing (done)
 
@@ -132,7 +132,7 @@ Two consequences worth stating plainly:
 5. [`.gitignore`](../.gitignore): `build/`, `dist/`, `.ruff_cache/`,
    `.pytest_cache/`, `.coverage*`, `coverage.xml`, `*.whl`, `*.tar.gz`.
 6. `bless` copied from `../pwr-tray/bless`, `chmod +x`, hash recorded above.
-7. `deploy` deleted; the audit paragraph now describes the replacement.
+7. `deploy` deleted; the developer guide describes the replacement.
 8. `lt-venv/bin/python -m pip install -e '.[dev]'`.
 
 **Verified:** `lt-venv/bin/python -m build` produces
@@ -217,12 +217,12 @@ being rewritten from scratch.
 `Utils` 57.9%, `IniTool` 62.8%, `History` 93.8%, `LuksOps` 96.9%,
 `dialogs/Common.py` 85.5%, `DeviceInfo` 14.5%, `Main.py` 44.6%.
 
-Two real defects fell out of writing them (medium #12 in
-[`AUDIT.md`](../tests/AUDIT.md)), both on error paths: `run_unmount()` called
-`QMessageBox.set_title`, which does not exist, so the "device busy" dialog
-raised `AttributeError` instead of appearing; and `hide_progress()` tested
-`hasattr()` on an attribute that `__init__` always sets, so the `finally:` calls
-in the dialogs' unmount handlers hit `'NoneType' has no attribute 'hide'`.
+Two real defects fell out of writing them, both on error paths:
+`run_unmount()` called `QMessageBox.set_title`, which does not exist, so the
+"device busy" dialog raised `AttributeError` instead of appearing; and
+`hide_progress()` tested `hasattr()` on an attribute that `__init__` always sets,
+so the `finally:` calls in the dialogs' unmount handlers hit `'NoneType' has no
+attribute 'hide'`.
 
 **Still uncovered, and why the floor waits.** `DeviceInfo`'s `lsblk`/`/sys`
 parsing, the menu-building and refresh half of `Main.py` (`update_menu()`,
@@ -288,9 +288,9 @@ its structure asserted (three jobs, every step has a `run` or a `uses`, the job
 names and the environment); the workflow's commands were run locally one by one,
 which is what `./bless` does anyway. The matrix's lowest version was executed
 for real: a throwaway `python3.11 -m venv` with `-e '.[dev]'` runs the same
-**279 tests** at the same 54.1% coverage as 3.13. That also settles the caveat
-in [`AUDIT.md`](../tests/AUDIT.md) #6, where 3.11 support rested on ruff's
-`py311` parser because no 3.11 interpreter was installed.
+**279 tests** at the same 54.1% coverage as 3.13. That also settles the earlier
+caveat that 3.11 support rested on ruff's `py311` parser because no 3.11
+interpreter was installed.
 
 ## Phase 4 — documentation (done)
 
@@ -307,8 +307,8 @@ It lives under `tests/` on purpose: the root belongs to the user-facing
 [`README.md`](../README.md), which carries only a short "Development" section --
 how to run from the tree, the `.[dev]` install line, the three commands,
 `./bless` as the only upload path, the one-version-source warning, and two links,
-to [`README-DEV.md`](README-DEV.md) for the release procedure and to
-[`AUDIT.md`](AUDIT.md) for what is still open.
+to [`README-DEV.md`](README-DEV.md) for the release procedure and to the
+`TODOs` section of [`README.md`](../README.md) for what is still open.
 
 **Verified:** every number in the guide is one the tree produces, not an
 estimate -- 279 tests, the dev extra's package list, the 853 s verification
