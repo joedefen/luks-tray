@@ -37,7 +37,7 @@ import copy
 import json
 import tempfile
 from types import SimpleNamespace
-from luks_tray.Utils import prt
+from luks_tray.Utils import LOG_OLD_SUFFIX, prt
 
 class IniTool:
     """ Configured Params for this class"""
@@ -58,11 +58,19 @@ class IniTool:
                 'show_passwords_by_default': True,
                 'show_anomaly_alerts': True,
                 'auto_mount_folder': '~/Vaults',
+                # A command prefix ('foot -e', 'xterm -maximized -e') for the
+                # menu's "Open Log" entry. Empty means "pick an installed
+                # terminal", which is the right answer on a full desktop but
+                # not necessarily on a bare window manager.
+                'log_viewer': '',
             }
         }
         self.folder = os.path.join(get_user_home(), ".config/luks-tray")
         self.ini_path =  os.path.join(self.folder, "config.ini")
         self.log_path =  os.path.join(self.folder, "debug.log")
+        # The one rotation generation prt() keeps; the menu's viewer pages it
+        # too, so the name lives next to the log it belongs to.
+        self.log_old_path =  self.log_path + LOG_OLD_SUFFIX
         self.history_path =  os.path.join(self.folder, "history.json")
         # The single-instance lock main() holds for the life of the process.
         self.lock_path =  os.path.join(self.folder, "luks-tray.lock")

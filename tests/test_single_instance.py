@@ -323,7 +323,8 @@ def test_main_exits_3_without_touching_processes_when_lock_is_held(monkeypatch):
     reported = []
     fake_utils = types.SimpleNamespace(
         capture_console=lambda: None,
-        configure_log=lambda path: None,
+        configure_log=lambda path, keep_stdout=False: None,
+        in_systemd_service=lambda: False,
         error_print=reported.append,
         SingleInstance=RefusingLock)
 

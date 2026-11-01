@@ -1,4 +1,4 @@
-"""`OptionsDialog`: the three `[ui]` settings, and the way to the master password.
+"""`OptionsDialog`: the `[ui]` settings, and the way to the master password.
 
 The dialog is a typing aid for `config.ini`, so the tests are about the two
 directions: what it shows (the values the tray is actually using) and what it
@@ -33,12 +33,15 @@ class FakeIniTool:
             'show_passwords_by_default': True,
             'show_anomaly_alerts': True,
             'auto_mount_folder': '~/Vaults',
+            'log_viewer': '',
         })
         self.written = []
         self.refuse = list(refuse)
 
     def get_current_val(self, key, selector='ui'):
-        return self.values[key]
+        # Unset settings fall back like IniTool's golden table does, so a test
+        # can name only the value it cares about.
+        return self.values.get(key, '')
 
     def set_values(self, values, selector='ui'):
         if self.refuse:
@@ -112,6 +115,14 @@ def test_the_folder_field_shows_the_configured_value(dialog):
     assert instance.inputs['auto_mount_folder'].text() == '/mnt/vaults'
 
 
+def test_the_log_viewer_field_shows_the_configured_prefix(dialog):
+    # The prefix is shown verbatim: it is a command line, and expanding or
+    # normalizing it here would change what the menu will run.
+    instance = dialog(values={'log_viewer': 'xterm -maximized -e'})
+
+    assert instance.inputs['log_viewer'].text() == 'xterm -maximized -e'
+
+
 @pytest.mark.parametrize('status, words', [
     ('clear_text', 'clear text'),
     ('unlocked', 'unlocked'),
@@ -133,11 +144,13 @@ def test_save_writes_every_setting_and_closes(dialog):
     instance = dialog()
     instance.inputs['show_anomaly_alerts'].setChecked(False)
     instance.inputs['auto_mount_folder'].setText('/mnt/vaults')
+    instance.inputs['log_viewer'].setText('foot -e')
 
     instance.save()
 
     assert instance.tray.ini_tool.written == [{
         'auto_mount_folder': '/mnt/vaults',
+        'log_viewer': 'foot -e',
         'show_passwords_by_default': True,
         'show_anomaly_alerts': False,
     }]
@@ -169,6 +182,37 @@ def test_a_folder_that_is_not_absolute_is_refused(dialog, typed, expected):
     assert instance.tray.ini_tool.written == []
     assert any(expected in line for line in instance.errors)
     assert instance.result() != QDialog.DialogCode.Accepted
+
+
+def test_a_log_viewer_command_that_cannot_be_parsed_is_refused(dialog):
+    # The menu splits this string with shlex; an unbalanced quote there would
+    # silently disable "Open Log", so it is caught while the user can still see
+    # what they typed.
+    instance = dialog()
+    instance.inputs['log_viewer'].setText('"unclosed -e')
+
+    instance.save()
+
+    assert instance.tray.ini_tool.written == []
+    assert any('cannot be parsed' in line for line in instance.errors)
+    assert instance.result() != QDialog.DialogCode.Accepted
+
+
+def test_an_empty_log_viewer_means_auto_detect(dialog):
+    instance = dialog(values={'log_viewer': 'foot -e',
+                              'auto_mount_folder': '~/Vaults',
+                              'show_passwords_by_default': True,
+                              'show_anomaly_alerts': True})
+    instance.inputs['log_viewer'].setText('')
+
+    instance.save()
+
+    assert instance.tray.ini_tool.written == [{
+        'auto_mount_folder': '~/Vaults',
+        'log_viewer': '',
+        'show_passwords_by_default': True,
+        'show_anomaly_alerts': True,
+    }]
 
 
 def test_a_folder_the_policy_refuses_is_reported(dialog):

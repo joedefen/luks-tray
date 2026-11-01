@@ -11,6 +11,7 @@ import contextlib
 import os
 import sys
 import stat
+import shlex
 import shutil
 import subprocess
 import inspect
@@ -34,12 +35,21 @@ except ImportError:     # non-POSIX: SingleInstance degrades to a no-op
 # `opened_path` is the file *this process* redirected fd 1 onto ('' = never), so
 # a later `configure_log()` may take the stream over again -- while a stdout the
 # caller redirected themselves (a regular file we did not open) stays untouched.
-_log = SimpleNamespace(path='', opened_path='', max_kb=512)
+# `keep_stdout` is the `-o/--stdout` request: the path is still recorded (the
+# menu and the service verbs point at it) but nothing is redirected, so a
+# hand-run `luks-tray -o` logs to the terminal it was started from.
+_log = SimpleNamespace(path='', opened_path='', max_kb=512, keep_stdout=False)
 # Keys already emitted through prt_once(). Bounded, because the tray runs for
 # weeks: when the set fills up it is cleared wholesale, which at worst repeats
 # a warning the user has already seen.
 _prt_seen = set()
 PRT_ONCE_MAX = 256
+
+# One generation of history: `debug.log` becomes `debug.log.old`, and the .old
+# that was there before is discarded. Two files are all we keep, and the log
+# viewer pages both of them (`:n` in less), so the suffix is a constant rather
+# than a literal spelled out at each of the places that name the file.
+LOG_OLD_SUFFIX = '.old'
 
 # Deadline, in seconds, for external commands that change system state
 # (cryptsetup, mount, umount, mkfs, losetup). They all run on the Qt main
@@ -69,7 +79,10 @@ def where(above=0):
     Returns:
         [file:line]
     """
-    stack, frameNo = inspect.stack(), 2 + above
+    # context=0: only the filename and line number are wanted, and asking for
+    # source text makes every stack frame read a file. prt() runs on the 3 s
+    # refresh path, so that cost is paid constantly for an unread answer.
+    stack, frameNo = inspect.stack(context=0), 2 + above
     if frameNo < 0 or len(stack) < frameNo + 2:
         return '[n/a]'
     filename, line_number = stack[frameNo][1:3]
@@ -94,18 +107,57 @@ def _is_reg():
 
 
 def _reopen_log():
-    """ Point stdout and stderr at the configured log, in append mode. """
+    """ Point stdout and stderr at the configured log, in append mode.
+
+        The file is created owner-only (`0o600`) and an older, wider one is
+        tightened in place. The log names container paths, loop devices and
+        mount points -- the same facts `history.json` keeps behind a password --
+        and a desktop that starts the tray decides the umask we inherit, so
+        leaving the mode to `open()` is not a decision at all.
+    """
     try:
-        sys.stdout = open(_log.path, "a+", encoding='utf-8')
+        fd = os.open(_log.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     except OSError:
         return              # Cannot log there; keep whatever stdout already is.
+    with contextlib.suppress(OSError):
+        os.fchmod(fd, 0o600)    # an already existing file keeps its old mode
+    try:
+        sys.stdout = os.fdopen(fd, 'a', encoding='utf-8')
+    except OSError:
+        os.close(fd)
+        return
     sys.stderr = sys.stdout
     os.dup2(sys.stdout.fileno(), 1)
     os.dup2(sys.stderr.fileno(), 2)
     _log.opened_path = _log.path
 
 
-def configure_log(path, max_kb=512):
+def rotate_log(path=None, max_bytes=None):
+    """ Move the live log to `<path>.old`; True when a rotation happened.
+
+        `os.replace()` gives the wanted order -- the previous .old is discarded,
+        the current log becomes .old -- in a single atomic rename, so there is
+        never a moment in which no log file exists; the caller's reopen then
+        creates the fresh current file.
+
+        The size measured is the size of *the log*, not of whatever stdout
+        happens to be: a terminal (or a `-o/--stdout` run) must not rotate a
+        file we are not writing.
+    """
+    path = _log.path if path is None else path
+    if not path:
+        return False
+    limit = (_log.max_kb * 1024) if max_bytes is None else max_bytes
+    try:
+        if os.path.getsize(path) <= limit:
+            return False
+        os.replace(path, f'{path}{LOG_OLD_SUFFIX}')
+        return True
+    except OSError:
+        return False
+
+
+def configure_log(path, max_kb=512, keep_stdout=False):
     """ Point prt() at `path` and redirect stdout/stderr onto it.
 
         Called from `main()` in place of assigning `Utils.prt_path` directly.
@@ -120,11 +172,19 @@ def configure_log(path, max_kb=512):
         terminal is left alone (prt() keeps printing to it), and so is a stdout
         the caller redirected to a file of their own. `max_kb <= 0` disables the
         redirection and the size cap, so prt() just prints.
+
+        `keep_stdout` is `-o/--stdout`: the path is recorded but the streams are
+        not taken over, so the messages go where the shell pointed them. The
+        caller decides whether that request applies -- under systemd stdout is
+        the unit's own redirect, not a request from a person.
     """
     _log.path = path or ''
     _log.max_kb = max_kb
+    _log.keep_stdout = bool(keep_stdout)
     if not _log.path or _log.max_kb <= 0:
         return
+    if _log.keep_stdout:
+        return              # Asked to keep stdout (see main()'s -o handling).
     if _is_tty():
         return
     if _is_reg() and not _log.opened_path:
@@ -136,7 +196,12 @@ def prt(*args, **kwargs):
     """ Our custom print routine ...
      - use instead of print() to get time stamps.
      - unless stdout is a tty, say for debugging, ~/.config/luks-tray/debug.log is used for stdout
-     - if we create a log file, its size is limited to 512K and then it is truncated
+     - if we create a log file, its size is capped at `_log.max_kb` and then it
+       rotates: debug.log becomes debug.log.old (one generation, see
+       `rotate_log()`), so the log the menu shows never grows without bound
+     - `to_stdout=True` keeps whatever stdout is, `to_stdout=False` insists on
+       the log file (`configure_log(..., keep_stdout=True)` is the same request
+       made once, for the whole run)
     """
     def check_stdout(use_stdout=None):
         """ Make sure stdout points at a terminal or at the debug log.
@@ -148,15 +213,17 @@ def prt(*args, **kwargs):
             desktop session.
         """
         if _log.max_kb > 0 and _log.path: # non-positive disables stdout "tuning"
-            if use_stdout is False:
+            if use_stdout is False:       # explicit "write the log file"
+                _log.keep_stdout = False
+            if _log.keep_stdout:
+                return      # -o: whatever stdout already is, the log stays there.
+            if not _log.opened_path and (sys.stdout.closed # stdout is closed
+                    or (not _is_tty() and not _is_reg())):
                 _reopen_log()
-            elif not _log.opened_path and sys.stdout.closed: # stdout is closed
-                _reopen_log()
-            elif not _log.opened_path and not _is_tty() and not _is_reg():
-                _reopen_log()
-            if os.fstat(sys.stdout.fileno()).st_size > _log.max_kb*1024:
-                shutil.move(_log.path, f'{_log.path}1')
-                _reopen_log()
+            # Only a stream we opened ourselves can be rotated: a terminal, or
+            # a file the caller redirected, is not ours to move.
+            if _log.opened_path and rotate_log():
+                _reopen_log()   # the file we were appending to is now the .old
 
     to_stdout = None
     if 'to_stdout' in kwargs:
@@ -272,6 +339,95 @@ def spawn_detached(command, spawn=None, env=None):
         command = [runner, '--user', '--scope', '--quiet', '--', *command]
     spawn = subprocess.Popen if spawn is None else spawn
     return spawn(command, start_new_session=True)
+
+
+# Terminals that can be asked to run a command, with the flag each one takes.
+# 'string' means the flag takes the whole command line as one shell-quoted
+# argument (the GLib terminals), 'argv' means it takes it as separate arguments.
+_TERMINALS = (
+    ('x-terminal-emulator', '-e', 'argv'),
+    ('gnome-terminal', '--', 'argv'),
+    ('konsole', '-e', 'argv'),
+    ('kitty', '-e', 'argv'),
+    ('alacritty', '-e', 'argv'),
+    ('foot', '-e', 'argv'),
+    ('xterm', '-e', 'argv'),
+    ('xfce4-terminal', '-e', 'string'),
+    ('mate-terminal', '-e', 'string'),
+    ('lxterminal', '-e', 'string'),
+)
+
+_less_follow_name = None
+
+
+def terminal_argv(command, preferred=''):
+    """ Wrap `command` so it runs in a terminal window; [] if none can be found.
+
+        The applet normally has no tty -- prt() has redirected fds 1 and 2 into
+        debug.log -- so a full-screen program such as less cannot draw on what
+        it inherits. It has to be started inside a terminal emulator.
+
+        `preferred` is the `log_viewer` setting: a command prefix such as
+        'xterm -maximized -e' or 'gnome-terminal --'. When it is empty (or
+        cannot be parsed, which only a hand-edited config.ini can produce) the
+        first installed terminal from `_TERMINALS` is used, with the flag it
+        expects.
+
+        Called with an empty `command` it answers "can a viewer be started at
+        all?", which is what the menu asks before offering the entry.
+    """
+    command = [str(part) for part in command]
+    if preferred and preferred.strip():
+        try:
+            return shlex.split(preferred) + command
+        except ValueError:
+            prt_once(f'log_viewer {preferred!r}',
+                     'ERROR: cannot parse log_viewer; auto-detecting a terminal')
+    for name, flag, style in _TERMINALS:
+        exe = shutil.which(name)
+        if not exe:
+            continue
+        if style == 'string':
+            return [exe, flag, shlex.join(command)] if command else [exe, flag]
+        return [exe, flag, *command]
+    return []
+
+
+def less_follow_name_supported():
+    """ True when the installed less knows --follow-name (less >= 451).
+
+        With it, less reopens the log by name after a rotation instead of
+        holding the renamed inode, which is what makes following debug.log
+        survive our debug.log -> debug.log.old rename.
+    """
+    global _less_follow_name
+    if _less_follow_name is None:
+        _less_follow_name = False
+        try:
+            result = subprocess.run(['less', '--help'], capture_output=True,
+                                    timeout=5, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return _less_follow_name
+        text = (result.stdout + result.stderr).decode('utf-8', 'replace')
+        _less_follow_name = '--follow-name' in text
+    return _less_follow_name
+
+
+def log_viewer_argv(log_path, old_path=None, preferred=''):
+    """ argv that pages the applet log in a terminal window; [] if impossible.
+
+        The current log is named first, so `less +F` starts following the live
+        file; the rotated file (when it exists) follows and is reachable with
+        `:n`.
+    """
+    command = ['less']
+    if less_follow_name_supported():
+        command.append('--follow-name')
+    command.append('+F')
+    command.append(str(log_path))
+    if old_path and os.path.exists(old_path):
+        command.append(str(old_path))
+    return terminal_argv(command, preferred)
 
 
 _PYTHON_RE = re.compile(r'^python[0-9.]*$')

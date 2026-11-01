@@ -60,7 +60,8 @@ Notes:
 
 - click a ▽ entry to unlock and mount a locked LUKS container
 - click a ‼ entry to lock an unmounted, unlocked container (considered an anomaly)
-- the fixed entries at the bottom carry a symbol: `✦` create a new crypt file, `✚` add an existing one, `⚙` options, `☓` exit, `↺` restart
+- the fixed entries at the bottom carry a symbol: `✦` create a new crypt file, `✚` add an existing one, `⚙` options, `≡` open the log, `☓` exit, `↺` restart
+- `≡ Open Log` only appears when it can work: the applet's own output *is* the log file, so `less` needs a terminal emulator to be started in. If none is found, set `log_viewer` in `config.ini` (see below).
 - LUKS devices must be created with other tools such as Gnome Disks.
 - LUKS files are only automatically detected in its history; when you add or create new LUKS files, they are added to the history.
 - A TrueCrypt/VeraCrypt file is managed like a LUKS file once added, except that it can never be *discovered*: its header is encrypted, so nothing can tell it apart from random data without the password. Add it once with `✚`, and the history carries it from then on.
@@ -73,24 +74,28 @@ Notes:
 Settings and data files are stored in `~/.config/luks-tray/`:
 - **History file** - Stored of passwords and mount preferences; it is encrypted when the master password enabled.
 - **Lock file** - `luks-tray.lock` holds the PID of the running instance; the kernel releases the lock when that process exits, so a crash never blocks the next start.
+- **Log file** - `debug.log` is where the applet writes everything it does (the command it ran, what it refused, with a timestamp and the code location). It is created owner-only, since it names container paths and mount points, and at 512 KB it rotates to `debug.log.old` — one generation, which the viewer pages as its second file. `≡ Open Log` shows it live, `luks-tray --follow-log` tails it from a shell, and `luks-tray -o` keeps the output on the terminal it was started from instead (a systemd unit ignores `-o`: there stdout is the unit's own).
 - **INI file** - the default .ini file looks like:
 
       [ui]
       show_passwords_by_default = True
       show_anomaly_alerts = True
       auto_mount_folder = ~/Vaults
+      log_viewer =
 
   You can thus change
     - whether passwords are shown by default when being first entered.
     - whether ‼️ entries (i.e., anomalies) cause the tray icon to change to the alert shield.
     - where the automatically generated mount points live
+    - which terminal to show the log in: `log_viewer` is a command prefix such as `foot -e` or `xterm -maximized -e`. Empty means "use the first terminal emulator found".
 
-  The same three settings are in the tray menu under `⚙ Options…`, which is also where the master password is set, changed or removed (`Master Password…`). The dialog checks `auto_mount_folder` before saving: a path that is not a dedicated, absolute, user-owned folder is refused with the reason in a message box, instead of being quietly replaced by the default at mount time. Saving rewrites `config.ini` — settings this version does not know are kept, comments are not.
+  The same four settings are in the tray menu under `⚙ Options…`, which is also where the master password is set, changed or removed (`Master Password…`). The dialog checks `auto_mount_folder` before saving: a path that is not a dedicated, absolute, user-owned folder is refused with the reason in a message box, instead of being quietly replaced by the default at mount time. `log_viewer` is checked too — a command line that cannot be parsed would otherwise silently leave the menu without its `≡ Open Log` entry. Saving rewrites `config.ini` — settings this version does not know are kept, comments are not.
 
 ## Security Notes
 
 - Passwords are only stored when master password feature is enabled
 - History file is encrypted using the master password
+- The log file is owner-readable only, and never contains passwords or passphrases; it does record container paths and mount points
 - System mount points are excluded by default to prevent interference with disk encryption
 - When creating LUKS file containers, password strength is not enforced; use due care.
 

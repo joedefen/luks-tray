@@ -448,10 +448,15 @@ class LuksTray():
             decides whether the popup has to be replaced at all.
 
             Every fixed entry starts with one symbol from the same small set
-            (`✚` add, `✦` create, `⚙` options, `☓` exit, `↺` restart), the way
-            the containers already carry `▣ ⧈ ▽ ‼`: they are basic dingbats that
-            the monospace font itself has, so the list reads at a glance without
-            depending on an emoji font being installed.
+            (`✚` add, `✦` create, `⚙` options, `≡` log, `☓` exit, `↺` restart),
+            the way the containers already carry `▣ ⧈ ▽ ‼`: they are basic
+            dingbats that the monospace font itself has, so the list reads at a
+            glance without depending on an emoji font being installed.
+
+            "Open Log" is offered only when something can actually show it --
+            a terminal emulator, or the `log_viewer` prefix from `config.ini` --
+            because the applet's own stdout is the log file, so `less` has no
+            tty to draw on without one.
         """
         actions = []
 
@@ -535,6 +540,12 @@ class LuksTray():
         action.setFont(self.mono_font)
         action.triggered.connect(self.handle_options_click)
         actions.append(action)
+
+        if self.log_viewer_available():
+            action = QAction('≡ Open Log', self.app)
+            action.setFont(self.mono_font)
+            action.triggered.connect(self.open_log)
+            actions.append(action)
 
         actions.append(None)
 
@@ -648,6 +659,38 @@ class LuksTray():
         """ Open the options dialog: the `[ui]` settings and the master password. """
         dialog = OptionsDialog(self)
         dialog.exec()
+
+    def log_viewer_available(self):
+        """ True when the log can be shown: a terminal, or the configured one. """
+        return bool(Utils.terminal_argv(
+            [], self.ini_tool.get_current_val('log_viewer') or ''))
+
+    def open_log(self):
+        """ Page debug.log -- and its one rotated generation -- in a terminal.
+
+            `less +F` follows the live file, so the check for "did my click do
+            anything?" is answered by the log itself; `:n` reaches debug.log.old.
+
+            Started with `spawn_detached()` rather than `run()`: the viewer
+            stays open for as long as the user keeps it open, and blocking the
+            Qt event loop that long would freeze the tray and the 3 s refresh.
+            That call also puts the viewer in its own session -- and, under
+            systemd, in a transient scope outside our cgroup -- so restarting or
+            stopping the applet does not take the log window down with it.
+        """
+        preferred = self.ini_tool.get_current_val('log_viewer') or ''
+        arguments = Utils.log_viewer_argv(self.ini_tool.log_path,
+                                          self.ini_tool.log_old_path,
+                                          preferred)
+        if not arguments:
+            prt('ERROR: no terminal emulator found; set ui.log_viewer in'
+                ' config.ini (for example "foot -e") or install one')
+            return
+        prt('+', 'running:', arguments)
+        try:
+            Utils.spawn_detached(arguments)
+        except (OSError, subprocess.SubprocessError) as exce:
+            prt(f'ERROR: cannot open the log: {exce}')
 
     def exit_app(self):
         """Exit the application."""
@@ -1351,7 +1394,8 @@ def main():
     parser.add_argument('-D', '--debug', action='store_true',
             help='enable debug_mode')
     parser.add_argument('-o', '--stdout', action='store_true',
-            help='log to stdout (if a tty)')
+            help='keep logging on stdout instead of debug.log (ignored when a'
+                 ' systemd unit started us: there stdout is the unit\'s)')
     parser.add_argument('-f', '--follow-log', action='store_true',
             help='exec tail -n50 -F on log file')
     parser.add_argument('-e', '--edit-config', action='store_true',
@@ -1451,7 +1495,12 @@ def main():
         # the console the user started us from, or "already running" would
         # only ever appear in the log a desktop launch points nowhere.
         Utils.capture_console()
-        Utils.configure_log(configure_ini.log_path)
+        # `-o` is a request from a person with a terminal, so a unit ignores it:
+        # there stdout is the unit's own redirect, and honouring it would put
+        # the log somewhere the menu never looks.
+        Utils.configure_log(configure_ini.log_path,
+                            keep_stdout=opts.stdout
+                            and not Utils.in_systemd_service())
 
         ini_tool = IniTool(paths_only=False)
 

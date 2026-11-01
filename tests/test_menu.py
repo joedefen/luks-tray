@@ -18,7 +18,7 @@ import pytest
 from PyQt6.QtGui import QAction, QFont
 from PyQt6.QtWidgets import QLabel, QMenu, QWidget, QWidgetAction
 
-from luks_tray import __version__
+from luks_tray import Main, __version__
 from luks_tray.Main import LuksTray
 
 # Qt takes ownership of some of these; keeping a Python reference prevents the
@@ -198,24 +198,46 @@ def test_every_icon_key_in_the_table_is_usable(tray, icon_key):
 # --- the fixed entries -----------------------------------------------------
 
 
-def menu_builder(qapp, status='locked', **overrides):
+class FakeIniTool:
+    """The two settings `update_menu_items()` and `open_log()` read."""
+
+    def __init__(self, log_viewer=''):
+        self.values = {'show_anomaly_alerts': True, 'log_viewer': log_viewer}
+        self.log_path = '/home/joe/.config/luks-tray/debug.log'
+        self.log_old_path = '/home/joe/.config/luks-tray/debug.log.old'
+
+    def get_current_val(self, key, selector='ui'):
+        return self.values[key]
+
+
+def menu_builder(qapp, status='locked', log_viewer='', bind=(), **overrides):
     """A `LuksTray` stand-in carrying only what `update_menu_items()` reads.
 
     The locked state keeps the list short -- master password, Options, Exit,
     Restart -- so the assertions are about the fixed entries at the bottom of
     the menu rather than about containers. `overrides` replaces any of the
     callbacks, so a test can watch what an entry triggers instead.
+
+    `log_viewer_available` is inert by default: the answer depends on which
+    terminal emulators are installed, so a menu test that changed with the
+    machine would prove nothing. `bind` names the real `LuksTray` methods a test
+    wants to exercise (`open_log`, `log_viewer_available`); everything else is
+    an inert stand-in, which is also what keeps a test from opening a window.
     """
     instance = LuksTray.__new__(LuksTray)
     instance.history = SimpleNamespace(status=status)
-    instance.ini_tool = SimpleNamespace(get_current_val=lambda key: True)
+    instance.ini_tool = FakeIniTool(log_viewer)
     instance.containers = {}
     instance.app = None
     instance.mono_font = QFont()
     instance.replace_menu_if_different = lambda actions, icon_key: actions
     instance.exit_app = lambda: None
     instance.handle_options_click = lambda: None
+    instance.open_log = lambda: None
+    instance.log_viewer_available = lambda: False
     instance.restart_self = lambda *args: None
+    for name in bind:
+        setattr(instance, name, getattr(LuksTray, name).__get__(instance))
     for name, value in overrides.items():
         setattr(instance, name, value)
     return instance
@@ -294,3 +316,97 @@ def test_the_options_entry_opens_the_options_dialog(qapp):
     options[0].trigger()
 
     assert called == [True]
+
+
+# --- the log entry ---------------------------------------------------------
+
+
+def test_the_log_entry_is_offered_only_when_something_can_show_it(qapp):
+    # The applet's stdout *is* the log file, so less needs a terminal window.
+    # Offering the entry without one would produce a menu item that does
+    # nothing, which is worse than the entry not being there.
+    assert '≡ Open Log' in menu_texts(
+        menu_builder(qapp, log_viewer_available=lambda: True).update_menu_items())
+    assert '≡ Open Log' not in menu_texts(
+        menu_builder(qapp, log_viewer_available=lambda: False).update_menu_items())
+
+
+def test_the_log_entry_sits_below_options_and_above_the_separator(qapp):
+    texts = menu_texts(
+        menu_builder(qapp, log_viewer_available=lambda: True).update_menu_items())
+
+    assert texts[-5:] == ['⚙ Options…', '≡ Open Log', None, '☓ Exit',
+                          f'↺ Restart luks-tray v{__version__}']
+
+
+def test_the_log_entry_opens_the_log(qapp):
+    called = []
+    instance = menu_builder(qapp, log_viewer_available=lambda: True,
+                            open_log=lambda: called.append(True))
+
+    actions = instance.update_menu_items()
+    entry = [action for action in actions
+             if action is not None and action.text().startswith('≡')]
+    entry[0].trigger()
+
+    assert called == [True]
+
+
+def test_the_viewer_availability_uses_the_configured_prefix(qapp, monkeypatch):
+    asked = []
+
+    def fake_terminal_argv(command, preferred=''):
+        asked.append((list(command), preferred))
+        return ['foot', '-e', *command]
+
+    monkeypatch.setattr(Main.Utils, 'terminal_argv', fake_terminal_argv)
+    instance = menu_builder(qapp, log_viewer='foot -e',
+                            bind=('log_viewer_available',))
+
+    assert instance.log_viewer_available() is True
+    # The probe asks "can anything start?", so it passes no command at all.
+    assert asked == [([], 'foot -e')]
+
+
+def test_opening_the_log_spawns_the_viewer_outside_our_process(qapp, monkeypatch):
+    spawned, asked = [], []
+    monkeypatch.setattr(
+        Main.Utils, 'log_viewer_argv',
+        lambda log, old, preferred: asked.append((log, old, preferred))
+        or ['foot', '-e', 'less', '+F', log])
+    monkeypatch.setattr(Main.Utils, 'spawn_detached', spawned.append)
+    instance = menu_builder(qapp, log_viewer='foot -e', bind=('open_log',))
+
+    instance.open_log()
+
+    assert asked == [(instance.ini_tool.log_path,
+                      instance.ini_tool.log_old_path, 'foot -e')]
+    assert spawned == [['foot', '-e', 'less', '+F',
+                        instance.ini_tool.log_path]]
+
+
+def test_opening_the_log_without_a_viewer_only_complains(qapp, monkeypatch,
+                                                        capsys):
+    spawned = []
+    monkeypatch.setattr(Main.Utils, 'log_viewer_argv',
+                        lambda log, old, preferred: [])
+    monkeypatch.setattr(Main.Utils, 'spawn_detached', spawned.append)
+    instance = menu_builder(qapp, bind=('open_log',))
+
+    instance.open_log()
+
+    assert spawned == []
+    assert 'ui.log_viewer' in capsys.readouterr().out
+
+
+def test_a_viewer_that_cannot_start_is_reported_not_raised(qapp, monkeypatch,
+                                                           capsys):
+    monkeypatch.setattr(Main.Utils, 'log_viewer_argv',
+                        lambda log, old, preferred: ['foot', '-e', 'less'])
+    monkeypatch.setattr(Main.Utils, 'spawn_detached', lambda command:
+                        (_ for _ in ()).throw(OSError('no such file')))
+    instance = menu_builder(qapp, bind=('open_log',))
+
+    instance.open_log()
+
+    assert 'cannot open the log' in capsys.readouterr().out

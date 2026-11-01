@@ -9,6 +9,7 @@ import os
 
 import pytest
 
+from luks_tray import Utils
 from luks_tray.IniTool import IniTool
 
 
@@ -26,8 +27,16 @@ def test_paths_only_creates_nothing(isolated_home):
     assert not os.path.exists(tool.folder)
     assert tool.ini_path.endswith('config.ini')
     assert tool.log_path.endswith('debug.log')
+    assert tool.log_old_path.endswith('debug.log.old')
     assert tool.history_path.endswith('history.json')
     assert tool.lock_path.endswith('luks-tray.lock')
+
+
+def test_the_rotated_log_is_the_one_generation_prt_keeps():
+    # The name is not a second convention: it is `log_path` plus the suffix
+    # Utils.rotate_log() appends, which is why both come from the same constant.
+    tool = IniTool(paths_only=True)
+    assert tool.log_old_path == f'{tool.log_path}{Utils.LOG_OLD_SUFFIX}'
 
 
 def test_ensure_folder_does_not_write_a_config():
@@ -45,6 +54,7 @@ def test_ensure_ini_file_writes_every_default():
     assert 'auto_mount_folder = ~/Vaults' in text
     assert 'show_passwords_by_default = True' in text
     assert 'show_anomaly_alerts = True' in text
+    assert 'log_viewer = ' in text
 
 
 def test_constructing_without_paths_only_creates_the_file():
@@ -56,6 +66,8 @@ def test_get_current_val_falls_back_to_the_default_before_a_read():
     tool = IniTool(paths_only=True)
     assert tool.get_current_val('auto_mount_folder') == '~/Vaults'
     assert tool.get_current_val('show_anomaly_alerts') is True
+    # An empty log_viewer is not a missing setting: it means "auto-detect".
+    assert tool.get_current_val('log_viewer') == ''
 
 
 def test_update_config_reads_once_and_then_reports_no_change():

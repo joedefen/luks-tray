@@ -66,7 +66,8 @@ def clean_utils_state(monkeypatch):
     from luks_tray import Utils
 
     monkeypatch.setattr(
-        Utils, '_log', SimpleNamespace(path='', opened_path='', max_kb=0))
+        Utils, '_log',
+        SimpleNamespace(path='', opened_path='', max_kb=0, keep_stdout=False))
     Utils._prt_seen.clear()
     yield
     Utils._prt_seen.clear()
@@ -83,7 +84,8 @@ def quiet_prt(monkeypatch):
     from luks_tray import Utils
 
     monkeypatch.setattr(
-        Utils, '_log', SimpleNamespace(path='', opened_path='', max_kb=0))
+        Utils, '_log',
+        SimpleNamespace(path='', opened_path='', max_kb=0, keep_stdout=False))
     return Utils
 
 

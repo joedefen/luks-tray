@@ -21,6 +21,7 @@
 # pylint: disable=broad-exception-caught, invalid-name
 
 import os
+import shlex
 
 from PyQt6.QtWidgets import QLabel
 
@@ -31,10 +32,11 @@ from luks_tray.dialogs.MasterPassword import MasterPasswordDialog
 class OptionsDialog(CommonDialog):
     """ Edit the `[ui]` settings; reach the master-password dialog.
 
-        The three settings are the whole of `config.ini`. Two are checkboxes and
-        one is a path, so `add_input_field()` covers both shapes and the dialog
-        stays a thin layer over the file: `read_settings()` is the form as a
-        dict, and the same dict is what `IniTool.set_values()` writes back.
+        The four settings are the whole of `config.ini`. Two are checkboxes, one
+        is a path and one is a command prefix, so `add_input_field()` covers
+        every shape and the dialog stays a thin layer over the file:
+        `read_settings()` is the form as a dict, and the same dict is what
+        `IniTool.set_values()` writes back.
     """
     #: `HistoryClass.status` in the words of this dialog. Anything else (a
     #: future state, or a stub in a test) is shown verbatim rather than hidden.
@@ -63,6 +65,14 @@ class OptionsDialog(CommonDialog):
         auto_root = ini_tool.get_current_val('auto_mount_folder')
         self.add_input_field('auto_mount_folder', 'Auto-mount folder', auto_root,
                              char_width=32, add_on='folder')
+
+        # Same idea: the prefix is stored and shown verbatim (`foot -e`), and an
+        # empty field means "find an installed terminal".  The whole command
+        # line matters -- a bare `foot` would start a shell instead of the
+        # viewer -- so the field is a command prefix, not a program name.
+        log_viewer = ini_tool.get_current_val('log_viewer')
+        self.add_input_field('log_viewer', 'Log viewer command', log_viewer,
+                             char_width=32)
 
         self.history_label = QLabel(self.history_state_text())
         self.main_layout.addWidget(self.history_label)
@@ -93,6 +103,7 @@ class OptionsDialog(CommonDialog):
         """ The form as `{key: value}`, in the shape `set_values()` expects. """
         return {
             'auto_mount_folder': self.inputs['auto_mount_folder'].text().strip(),
+            'log_viewer': self.inputs['log_viewer'].text().strip(),
             'show_passwords_by_default':
                 self.inputs['show_passwords_by_default'].isChecked(),
             'show_anomaly_alerts': self.inputs['show_anomaly_alerts'].isChecked(),
@@ -106,6 +117,10 @@ class OptionsDialog(CommonDialog):
             be a dedicated, absolute, user-owned area. The expanded path is what
             the policy checks, because that is the path the cleanup will use;
             the unexpanded text is what gets saved.
+
+            `log_viewer` is split with `shlex` when the menu builds the command,
+            so a value that does not parse there would silently disable the
+            "Open Log" entry: refuse it here, where the reason can be shown.
         """
         errors = []
         configured = values['auto_mount_folder']
@@ -120,6 +135,11 @@ class OptionsDialog(CommonDialog):
         problem = self.tray.validate_auto_mount_root(expanded)
         if problem:
             errors.append(problem)
+        viewer = values['log_viewer']
+        try:
+            shlex.split(viewer)
+        except ValueError as exc:
+            errors.append(f'log viewer command {viewer!r} cannot be parsed: {exc}')
         return errors
 
     def save(self, _=None):
