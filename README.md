@@ -30,7 +30,8 @@
 6. When mounting a container, enter its password and choose mount point in the dialog
     - if the app has a mount point in its history, it will fill in that mount point
     - otherwise, the app will generate a mount point in `~/Vaults`
-7. Finally, for convenience when working, add `luks-tray` to your "auto-start" apps.
+7. Finally, start it automatically at login -- `luks-tray --svc-install` on a
+   systemd system, or your DE's autostart entry.  See [Starting at Login](#starting-at-login).
 
 Only one copy can run at a time: a second launch reports the running instance and exits with status 3. Use `luks-tray --replace` to terminate it and take over, or the `↺ Restart luks-tray` entry at the bottom of the menu to restart it in place.
 
@@ -135,6 +136,82 @@ Required Workarounds for ~/.config/sway/config:
 ```
   for_window title "luks-tray.%" floating enable, center, border normal, no_focus
 ```
+
+---
+## Starting at Login
+
+luks-tray is a tray applet: something has to start it once your desktop session
+exists. Pick the mechanism your session already uses, and use only one of them
+-- two starts fight over the single-instance lock and the loser exits 3.
+
+### A `systemd --user` unit (recommended on systemd distros)
+
+Two units ship with the package, one per display server, and one command
+installs the right one for the session it runs in:
+
+```
+luks-tray --svc-install     # write ~/.config/systemd/user/luks-tray.service and enable it
+luks-tray --svc-status      # 0 = running, 1 = installed but not running, 2 = not installed
+```
+
+`--svc-install` renders the unit, reloads systemd and enables it -- it does
+**not** start the applet, because you may already be running one from a desktop
+autostart; the unit takes over at your next login. Use `--svc-start` to start it
+now.
+
+| Verb | What it does |
+| --- | --- |
+| `--svc` / `--svc-status` | Report the unit's state. Exit code 0 active, 1 installed but not running, 2 not installed, so it is usable from `if`. |
+| `--svc-install` | Render the unit for this session, write it, reload, enable. The only verb that writes the unit file. |
+| `--svc-start` | Start the installed unit now, and enable it if it was disabled. Never writes the unit. |
+| `--svc-restart` | Restart it, so it runs the code `~/.local/bin/luks-tray` resolves to -- run this after `git pull` on an editable install. |
+| `--svc-stop` | Stop it now. It stays enabled, so it returns at your next login. |
+| `--svc-uninstall` | Stop, disable and delete the unit. Your config, history and logs stay. |
+| `--show-svc-file` | Print the rendered unit and exit: a starter for a hand-installed or customised unit. |
+
+The unit runs `~/.local/bin/luks-tray`, where `pipx` and `pip install --user`
+both put it, so installing from a virtualenv writes the same file as installing
+from any other shell. It also pins the session variables systemd cannot inherit
+from the compositor -- `WAYLAND_DISPLAY` (or `DISPLAY`) and
+`XDG_CURRENT_DESKTOP`/`DESKTOP_SESSION`, which Qt and the dialogs need -- filled
+in from the shell that ran `--svc-install`. Run it from a terminal *inside* the
+graphical session, not over `ssh`.
+
+> ⚠️ If the tray only appears when you start it by hand, the user manager has no
+> display for the unit. Add
+> `dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP`
+> to your compositor's config (sway users usually already have it), then
+> `luks-tray --svc-restart`.
+
+Under a unit, the `↺ Restart luks-tray` menu entry asks systemd to restart the
+unit instead of spawning a second process, and `--replace` refuses to kill an
+instance systemd supervises (it would come straight back) -- it points you at
+`luks-tray --svc-restart` instead. Start-up failures are logged to
+`~/.config/luks-tray/debug.log`; `systemctl --user status luks-tray.service`
+shows what systemd saw.
+
+### Desktop autostart
+
+Every DE/WM has its own mechanism; use whichever you already use for other
+applets:
+
+- **XDG autostart** -- put a `luks-tray.desktop` in `~/.config/autostart/`:
+
+  ```
+  [Desktop Entry]
+  Type=Application
+  Name=luks-tray
+  Exec=luks-tray
+  ```
+
+  Add `OnlyShowIn=KDE;` (or another DE) to restrict it to one desktop.
+- **KDE Plasma** -- System Settings → Autostart → Add Application.
+- **sway / i3** -- `exec luks-tray` in the config (sway's `exec_always`, ideally
+  from a script that waits for the bar).  The tray registers itself when the
+  StatusNotifierWatcher appears, so start order does not matter.
+- **niri** -- `spawn-at-startup "luks-tray"`.
+- **Xfce / LXQt / MATE / Cinnamon** -- the session's "Application Autostart"
+  settings dialog.
 
 ---
 

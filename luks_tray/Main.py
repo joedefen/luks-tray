@@ -46,6 +46,7 @@ from PyQt6.QtCore import QTimer, Qt
 from luks_tray.History import HistoryClass
 from luks_tray.Utils import PyKill, prt, prt_once
 from luks_tray import Utils, __version__
+from luks_tray import service
 from luks_tray.IniTool import IniTool
 from luks_tray.DeviceInfo import DeviceInfo
 from luks_tray.dialogs import (CommonDialog, MasterPasswordDialog,
@@ -630,17 +631,26 @@ class LuksTray():
     def restart_self(self, *_args):
         """ Replace this process with a fresh instance of the applet.
 
-            The replacement is launched as ``python -m luks_tray.Main`` so that
-            PyKill recognises it via `command_names()`.  The single-instance
-            lock is released first: ``os._exit()`` skips atexit handlers, and
-            the replacement must be able to take the lock as soon as it starts.
-            If the replacement cannot be spawned the lock is taken back, so a
-            failed restart does not quietly leave the running tray unlocked.
+            Under a ``systemd --user`` unit the restart is handed to the
+            supervisor instead: ``Restart=always`` reacts to *our* exit, not to
+            a child we spawn, and the child shares the cgroup systemd kills
+            when it stops the unit.  See `_restart_via_systemd()`.
+
+            Elsewhere the replacement is launched as ``python -m luks_tray.Main``
+            so that PyKill recognises it via `command_names()`.  The
+            single-instance lock is released first: ``os._exit()`` skips atexit
+            handlers, and the replacement must be able to take the lock as soon
+            as it starts.  If the replacement cannot be spawned the lock is
+            taken back, so a failed restart does not quietly leave the running
+            tray unlocked.
 
             The package root goes on PYTHONPATH rather than into ``cwd=``: the
             replacement inherits whatever directory the user is in and must
             still be able to import the module when running from a checkout.
         """
+        if service.supervised_here():
+            self._restart_via_systemd()
+            return
         prt('+', 'restarting applet...')
         try:
             self.tray_icon.hide()
@@ -664,6 +674,35 @@ class LuksTray():
             if lock is not None:
                 lock.acquire()
             return
+        os._exit(0)
+
+    def _restart_via_systemd(self):
+        """ Hand this process's restart to systemd, from outside our cgroup.
+
+            ``systemctl --user restart`` is spawned through ``systemd-run
+            --user --scope`` (see `Utils.spawn_detached()`), so it keeps running
+            while systemd stops us.  We then exit with status 0, which is *not*
+            in the unit's ``RestartPreventExitStatus=``, so ``Restart=always``
+            also schedules a start: if the detached restart never got off the
+            ground, the supervisor still brings the tray back five seconds
+            later.  A failure to schedule anything keeps this instance alive
+            rather than leaving the user with no tray at all.
+
+            The lock is released last, immediately before ``os._exit()``, so the
+            restarting unit never finds the lock held by a live process.
+        """
+        prt('+', 'restarting applet via systemd...')
+        try:
+            service.detached_restart()
+        except (service.ServiceError, OSError) as exc:
+            prt(f'FAIL: cannot restart the unit: {exc}')
+            Utils.error_print(f'FAIL: cannot restart the unit: {exc}')
+            return
+        try:
+            self.tray_icon.hide()
+        except (AttributeError, RuntimeError) as exc:
+            prt(f'note: cannot hide the tray icon before restarting: {exc}')
+        Utils.SingleInstance.release_current()
         os._exit(0)
 
     def prompt_master_password(self):
@@ -1193,12 +1232,19 @@ def acquire_lock_or_take_over(lock, replace=False):
         Killing is therefore the *takeover* path, and it is opt-in
         (``--replace``).  Even then the recorded pid is only signalled after its
         command line is confirmed to still be luks-tray, so a recycled pid or a
-        foreign lock holder is left alone.
+        foreign lock holder is left alone -- and a holder that systemd
+        supervises is never signalled at all, because restarting the unit is
+        what recreates it (see `service.supervised_by()`).
     """
     if lock.acquire(retries=5, delay=0.2):
         return True
     holder = Utils.SingleInstance.read_pid(lock.path)
     if not replace or not holder:
+        return False
+    unit = service.supervised_by(holder)
+    if unit:
+        prt(f'--replace: pid {holder} is supervised by {unit}; not killing it')
+        prt(f'use `luks-tray --svc-restart` (or `systemctl --user restart {unit}`) instead')
         return False
     prt(f'--replace: terminating lock holder pid {holder}')
     if not PyKill.kill_pid(holder, ['luks-tray']):
@@ -1208,16 +1254,57 @@ def acquire_lock_or_take_over(lock, replace=False):
     return lock.acquire(retries=25, delay=0.2)
 
 
+def confirm(question):
+    """ Ask on the terminal; anything but an explicit yes is no. """
+    print(f'{question} [y/N] ', end='', flush=True)
+    try:
+        answer = input().strip().lower()
+    except EOFError:
+        return False
+    return answer in ('y', 'yes')
+
+
+def run_service_command(opts):
+    """ Run one --svc-* verb and return the process exit status.
+
+        None of these verbs build the applet: they render the shipped unit for
+        this session, install it, and hand control to systemctl.  They print to
+        stdout/stderr as they are, so the verbs stay usable from a terminal --
+        and from `if luks-tray --svc-status; then ...`, which is why `status`
+        has its own exit codes (0 active, 1 installed but not running, 2 not
+        installed) instead of the usual 0/1.
+    """
+    try:
+        holder = service.applet_holder(IniTool(paths_only=True).folder)
+    except OSError:
+        holder = None       # unreadable lock: not a reason to refuse the request
+    try:
+        return service.dispatch(opts.svc,
+                                force=opts.force,
+                                yes=opts.yes or opts.force,
+                                ask=confirm,
+                                holder=holder)
+    except service.ServiceError as exc:
+        Utils.error_print(f'luks-tray: {exc}')
+        return 1
+
+
 def main():
     """ Entry point: parse the CLI and then run the tray loop.
 
         The informational options (`--version`, `--edit-config`,
-        `--follow-log`, `--check-deps`) print or exec and never return; the
-        normal path takes the single-instance lock, builds `IniTool` and
-        `LuksTray` and hands control to `QApplication.exec()`.  Anything that
-        fails on the way is logged through `prt()` -- stdout may already be the
-        debug log by then -- and exits with status 15.  A second instance that
-        does not own the lock exits with status 3 instead of starting.
+        `--follow-log`, `--check-deps`, `--svc-*`) print or exec and never
+        return; the normal path takes the single-instance lock, builds
+        `IniTool` and `LuksTray` and hands control to `QApplication.exec()`.
+        Anything that fails on the way is logged through `prt()` -- stdout may
+        already be the debug log by then -- and exits with status 15.  A second
+        instance that does not own the lock exits with status 3 instead of
+        starting.
+
+        The `--svc-*` verbs never construct the applet and never take the lock:
+        they exist to install, inspect and remove the `systemd --user` unit, so
+        they have to keep working while a tray is running -- or while the unit
+        is broken.
 
         `--version` is deliberately handled by argparse (`action='version'`):
         it exits while parsing, before `IniTool` is built and before stdin is
@@ -1241,6 +1328,38 @@ def main():
     parser.add_argument('--replace', action='store_true',
             help='if another luks-tray holds the single-instance lock, terminate'
                  ' it and take over (default: refuse to start)')
+    parser.add_argument('-y', '--yes', action='store_true',
+            help='never prompt; assume yes for --svc-* questions')
+    parser.add_argument('--force', action='store_true',
+            help='replace or delete a unit file luks-tray did not write'
+                 ' (implies --yes)')
+    svc = parser.add_mutually_exclusive_group()
+    svc.add_argument('--svc', '--svc-status', dest='svc', action='store_const',
+            const='status',
+            help='report the systemd --user unit state, then exit (0 active,'
+                 ' 1 installed but not running, 2 not installed)')
+    svc.add_argument('--svc-install', dest='svc', action='store_const',
+            const='install',
+            help='write the unit for this session and enable it (not started);'
+                 ' only this verb writes the unit')
+    svc.add_argument('--svc-start', dest='svc', action='store_const',
+            const='start',
+            help='start the installed unit now; enables it if disabled, but'
+                 ' never writes the unit')
+    svc.add_argument('--svc-restart', dest='svc', action='store_const',
+            const='restart',
+            help='restart the installed unit so it runs the current code'
+                 ' (use after an editable install or a git pull); never writes it')
+    svc.add_argument('--svc-stop', dest='svc', action='store_const',
+            const='stop',
+            help='stop it now; it stays enabled for your next login')
+    svc.add_argument('--svc-uninstall', dest='svc', action='store_const',
+            const='uninstall',
+            help='stop, disable and delete the unit (config and logs are kept)')
+    svc.add_argument('--show-svc-file', dest='svc', action='store_const',
+            const='show-file',
+            help='print the systemd unit for this session, then exit'
+                 ' (a starter for a hand-installed or customized unit)')
     # The release gate installs the built wheel in a throwaway venv and runs
     # this, so the number printed has to come from the installed package --
     # not from pyproject.toml, and not from the source tree.
@@ -1248,6 +1367,11 @@ def main():
             version=f'%(prog)s {__version__}',
             help='print the version and exit')
     opts = parser.parse_args()
+
+    # The --svc-* verbs touch the unit files and systemd, and nothing else --
+    # not the configuration, not the lock, not the Qt application object.
+    if opts.svc:
+        sys.exit(run_service_command(opts))
 
     if opts.edit_config:
         ini_tool = IniTool(paths_only=True)
@@ -1305,10 +1429,16 @@ def main():
         lock = Utils.SingleInstance(ini_tool.lock_path)
         if not acquire_lock_or_take_over(lock, replace=opts.replace):
             holder = Utils.SingleInstance.read_pid(lock.path)
+            unit = service.supervised_by(holder) if holder else None
             message = 'another luks-tray is already running'
             if holder:
                 message += f' (pid {holder})'
-            if not opts.replace:
+            if unit:
+                # A supervised incumbent comes back as soon as it is killed:
+                # restarting its unit is the supported way to replace it.
+                message += (f' under {unit}; use `luks-tray --svc-restart`'
+                            f' (or `systemctl --user restart {unit}`)')
+            elif not opts.replace:
                 message += '; use --replace to terminate it and take over'
             prt(f'ERROR: {message}')
             Utils.error_print(f'ERROR: {message}')

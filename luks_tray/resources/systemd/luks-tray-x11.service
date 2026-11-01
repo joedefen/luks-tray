@@ -1,0 +1,40 @@
+# luks-tray -- the LUKS/VeraCrypt tray applet, supervised by `systemd --user`.
+#
+# Install it with:
+#   luks-tray --svc-install
+# or by hand:
+#   luks-tray --show-svc-file > ~/.config/systemd/user/luks-tray.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now luks-tray.service
+#
+# `--svc-install` renders this file for the session that ran it: the display
+# and desktop variables are appended from that shell, because a user unit
+# cannot inherit them from the X server or the window manager -- and the applet
+# needs them (Qt picks its platform plugin from them, and the dialogs use the
+# desktop name to decide whether an in-dialog title bar is needed).  A unit
+# copied by hand from a shell that exports none of them still starts; see
+# "Starting at login" in README.md.
+[Unit]
+Description=luks-tray (LUKS disk tray applet)
+PartOf=graphical-session.target
+After=graphical-session.target
+BindsTo=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+Environment=XDG_SESSION_TYPE=x11
+ExecStart=%h/.local/bin/luks-tray
+Restart=always
+RestartSec=5
+# 3 = another instance holds the single-instance lock; 15 = luks-tray exited on
+# an unhandled exception.  Retrying either one fails the same way, so the unit
+# is marked failed (`systemctl --user status`) instead of spinning.
+RestartPreventExitStatus=3 15
+
+[Install]
+WantedBy=graphical-session.target

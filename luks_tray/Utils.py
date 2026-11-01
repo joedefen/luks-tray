@@ -12,6 +12,7 @@ import os
 import sys
 import stat
 import shutil
+import subprocess
 import inspect
 import re
 import signal
@@ -236,6 +237,41 @@ def error_print(message):
         stream = sys.__stderr__ or sys.stderr
         stream.write(text)
         stream.flush()
+
+
+def in_systemd_service(env=None):
+    """ True when a systemd unit started this process.
+
+        systemd sets INVOCATION_ID for every service it launches. The tray uses
+        it to know that "restart" means "ask the supervisor", not "spawn a
+        child and exit": under `Restart=always` it is our own exit that systemd
+        reacts to, and a child we spawn shares the cgroup that systemd kills
+        when it stops us.
+    """
+    return bool((os.environ if env is None else env).get('INVOCATION_ID'))
+
+
+def spawn_detached(command, spawn=None, env=None):
+    """ Start `command` so that it outlives this process.
+
+        Under systemd the applet and everything it spawns share one cgroup, and
+        systemd kills that whole cgroup on stop/restart (the default
+        `KillMode=control-group`). `systemd-run --user --scope` puts the command
+        into a transient scope of its own, outside ours, which is what lets
+        `systemctl --user restart luks-tray.service` finish while it is stopping
+        us. `start_new_session=True` is setsid(2): it detaches the child from
+        our session and controlling terminal, so the same call also works when
+        the applet was started from a terminal or a DE autostart.
+    """
+    command = [str(part) for part in command]
+    if not command:
+        return None
+    env = os.environ if env is None else env
+    runner = shutil.which('systemd-run', path=env.get('PATH'))
+    if runner and in_systemd_service(env):
+        command = [runner, '--user', '--scope', '--quiet', '--', *command]
+    spawn = subprocess.Popen if spawn is None else spawn
+    return spawn(command, start_new_session=True)
 
 
 _PYTHON_RE = re.compile(r'^python[0-9.]*$')
