@@ -20,6 +20,11 @@ import importlib.resources as pkg_resources
 prt_kb = 512
 prt_path = ''
 prt_to_init = True
+# Keys already emitted through prt_once(). Bounded, because the tray runs for
+# weeks: when the set fills up it is cleared wholesale, which at worst repeats
+# a warning the user has already seen.
+_prt_seen = set()
+PRT_ONCE_MAX = 256
 
 # Deadline, in seconds, for external commands that change system state
 # (cryptsetup, mount, umount, mkfs, losetup). They all run on the Qt main
@@ -72,16 +77,20 @@ def prt(*args, **kwargs):
      """
     def check_stdout(use_stdout=None):
         global prt_to_init
+        # The two probes below deliberately stay silent: they run *inside*
+        # prt(), so logging a failure here would call prt() again and recurse
+        # until the stack runs out. "Not a tty" / "not a regular file" is also
+        # the normal answer for a tray started by a desktop session.
         def is_tty():
             try:
                 os.ttyname(sys.stdout.fileno())
                 return True
-            except Exception:
+            except Exception:                       # pylint: disable=broad-except
                 return False
         def is_reg():
             try:
                 return stat.S_ISREG(os.fstat(sys.stdout.fileno()).st_mode)
-            except Exception:
+            except Exception:                       # pylint: disable=broad-except
                 return False
         def reopen():
             global prt_to_init
@@ -106,6 +115,13 @@ def prt(*args, **kwargs):
     if 'to_stdout' in kwargs:
         to_stdout = bool(kwargs['to_stdout'])
         del kwargs['to_stdout']
+    # prt_once() wraps this function, so it asks for one extra frame in the
+    # [file:line] footer -- otherwise every one-time note would point at the
+    # wrapper instead of at the handler that actually noticed the failure.
+    above = 0
+    if '_above' in kwargs:
+        above = int(kwargs['_above'])
+        del kwargs['_above']
     check_stdout(to_stdout)
 
     dt = datetime.now().strftime('%m-%d^%H:%M:%S')
@@ -114,5 +130,26 @@ def prt(*args, **kwargs):
     kwargs['end'] = ' '
     kwargs['file'] = s
     print(*args, **kwargs)
-    string = f'{s.getvalue()} {where()}'
+    string = f'{s.getvalue()} {where(above)}'
     print(string, flush=True)
+
+
+def prt_once(key, *args, **kwargs):
+    """ prt() at most once per `key` for the lifetime of this process.
+
+        The menu refresh runs every 3 s, and several handlers on that path
+        raise the *same* exception on every tick -- a block device without a
+        `/sys/.../device/model` node, a loop device with no `backing_file`, an
+        auto-mount folder that is not empty. Logging those with plain prt()
+        would rotate the 512 KB debug log within minutes and bury the message
+        that actually matters, so they log through here instead: the key is
+        the identity of the failure (usually the path plus what failed), so a
+        genuinely *new* failure still gets printed.
+    """
+    if key in _prt_seen:
+        return
+    if len(_prt_seen) >= PRT_ONCE_MAX:
+        _prt_seen.clear()
+    _prt_seen.add(key)
+    kwargs['_above'] = kwargs.get('_above', 0) + 1
+    prt(*args, **kwargs)

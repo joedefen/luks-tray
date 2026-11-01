@@ -54,7 +54,7 @@ from PyQt6.QtCore import QTimer, Qt
     # from PyQt6.QtCore import Qt
 
 from luks_tray.History import HistoryClass
-from luks_tray.Utils import prt, CMD_TIMEOUT, PROBE_TIMEOUT, FORMAT_TIMEOUT, TIMEOUT_RC
+from luks_tray.Utils import prt, prt_once, CMD_TIMEOUT, PROBE_TIMEOUT, FORMAT_TIMEOUT, TIMEOUT_RC
 from luks_tray import Utils
 from luks_tray.IniTool import IniTool
 
@@ -271,9 +271,14 @@ class DeviceInfo:
                 fullpath = f'/sys/class/block/{device_name}/device/{suffix}'
                 with open(fullpath, 'r', encoding='utf-8') as f: # Read information
                     rv = f.read().strip()
-            except (FileNotFoundError, Exception):
-                # print(f"Error reading {info} for {device_name} : {e}")
-                pass
+            except (OSError, UnicodeDecodeError) as e:
+                # Not every block device has a .../device/model node (loops,
+                # dm devices, some partitions). This runs for every device on
+                # every 3 s refresh, so say it once per node: the empty string
+                # is still the right answer, it just is not a silent one.
+                rv = ''
+                prt_once(f'no {suffix} for {device_name}',
+                         f'note: cannot read {fullpath}: {e}')
             return rv
 
         # rv = f'{get_str(device_name, "vendor")}' #vendor seems useless/confusing
@@ -295,12 +300,19 @@ class DeviceInfo:
     def parse_lsblk(self):
         """ Parse ls_blk for all the goodies we need """
         def get_backing_file(loop_device):
+            node = f'/sys/block/{loop_device}/loop/backing_file'
             try:
-                with open(f'/sys/block/{loop_device}/loop/backing_file', 'r',
-                          encoding='utf-8') as f:
+                with open(node, 'r', encoding='utf-8') as f:
                     backing_file = f.read().strip()
                 return backing_file
-            except FileNotFoundError:
+            except FileNotFoundError as e:
+                # A loop device set up on a block device (or one created by
+                # systemd) has no backing_file node at all. Expected, but it is
+                # exactly what makes the tray treat the loop as file-less.
+                prt_once(f'no {node}', f'note: {node}: {e}')
+                return ''
+            except OSError as e:
+                prt_once(f'unreadable {node}', f'WARN: cannot read {node}: {e}')
                 return ''
 
         def eat_one(device):
@@ -946,6 +958,12 @@ class LuksTray():
             try:
                 return int(value)
             except (TypeError, ValueError):
+                # None is the normal case (not running under sudo); anything
+                # else means the environment holds something unexpected, which
+                # silently changes whose files the tray thinks it manages.
+                if value is not None:
+                    prt_once(f'bad id {value!r}',
+                             f'WARN: ignoring non-numeric id {value!r}, using {fallback!r}')
                 return int(fallback)
 
         return (as_int(os.environ.get('SUDO_UID'), os.getuid()),
@@ -959,6 +977,12 @@ class LuksTray():
             try:
                 return pwd.getpwnam(real_user).pw_dir
             except KeyError:
+                # SUDO_USER names an account that passwd does not know: guessing
+                # /home/<name> is a last resort and the user should hear about
+                # it, since every path derived from it will be a guess too.
+                prt_once(f'no passwd entry for {real_user}',
+                         f'WARN: SUDO_USER={real_user!r} has no passwd entry;'
+                         f' assuming /home/{real_user}')
                 return os.path.join('/home', real_user)
         return os.path.expanduser('~')
 
@@ -1093,7 +1117,11 @@ class LuksTray():
         try:
             child = os.path.abspath(child)
             parent = os.path.abspath(parent)
-        except Exception:                               # pylint: disable=broad-except
+        except (TypeError, ValueError, OSError) as exc:
+            # The conservative answer stays False, but log it: the caller uses
+            # this to decide whether a directory may be deleted.
+            prt_once(f'is_strictly_within {child!r} {parent!r}',
+                     f'WARN: cannot compare {child!r} with {parent!r}: {exc}')
             return False
         if child == parent:
             return False
@@ -1116,8 +1144,12 @@ class LuksTray():
         try:
             os.rmdir(path)              # only removes empty dirs
             return True
-        except OSError:
-            return False                # not empty or permission denied
+        except OSError as exc:
+            # Overwhelmingly "directory not empty", which is a normal outcome
+            # during cleanup -- but it is also what a permission problem looks
+            # like, so report each path once instead of failing invisibly.
+            prt_once(f'rmdir {path}', f'note: not removing {path!r}: {exc}')
+            return False
 
     @staticmethod
     def remove_if_auto(mount):
@@ -1174,7 +1206,9 @@ class LuksTray():
                 continue  # Skip mount points -- still mounted/used
             try:
                 stat_info = os.stat(full_path)
-            except OSError:
+            except OSError as exc:
+                prt_once(f'stat {full_path}',
+                         f'note: cannot inspect {full_path!r}: {exc}')
                 continue
             if stat_info.st_uid not in allowed_uids:
                 continue  # Someone else's directory: not ours to delete
@@ -1550,8 +1584,10 @@ class CommonDialog(QDialog):
             return f'ERR: mount point ({text}) must be absolute path'
         try:
             text = os.path.abspath(text) # normalize
-        except Exception:
-            pass
+        except (TypeError, ValueError, OSError) as exc:
+            # Keep the un-normalized text and let the checks below report on
+            # it; swallowing the reason made a rejected name unexplainable.
+            prt_once(f'abspath {text!r}', f'WARN: cannot normalize {text!r}: {exc}')
 
         if DeviceInfo.is_banned(text):
             return f'ERR: cannot mount on "special" {text}'
@@ -1720,7 +1756,11 @@ class CommonDialog(QDialog):
                     do_bindfs=bool(luks_file), readonly=readonly)
             return err
 
-        except Exception as e:
+        except Exception as e:                          # pylint: disable=broad-except
+            # The dialog only ever shows this one-liner, so the traceback has to
+            # reach the log or a non-command failure here is undiagnosable.
+            prt(f'ERROR: mount_luks_container: {e}')
+            prt(traceback.format_exc())
             return f"An error occurred: {str(e)}"
 
 
@@ -2174,7 +2214,10 @@ class MountFileDialog(CommonDialog):
                     megs = int(size_str)
                     if megs < 32:
                         errs.append(f'at least 32 expected ... invalid size ({megs})')
-                except Exception:
+                except (TypeError, ValueError) as exc:
+                    # The user sees the append()ed line; the exception detail
+                    # goes to the log for the "why" (e.g. "" vs "12M").
+                    prt(f'note: bad size_str {size_str!r}: {exc}')
                     errs.append(f'"int" expected ... invalid size ({size_str})')
 
 
@@ -2309,9 +2352,11 @@ def main():
         tray = LuksTray(ini_tool, opts)
         sys.exit(tray.app.exec())
 
-    except Exception as exce:
-        print("exception:", str(exce))
-        print(traceback.format_exc())
+    except Exception as exce:                           # pylint: disable=broad-except
+        # prt(), not print(): by now stdout may already point at the debug log,
+        # and a failure that kills the tray is exactly what that log is for.
+        prt("exception:", str(exce))
+        prt(traceback.format_exc())
         sys.exit(15)
 
 if __name__ == "__main__":

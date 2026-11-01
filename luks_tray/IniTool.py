@@ -91,7 +91,11 @@ class IniTool:
             # Expecting string of form: "[1,2,...]" or just "20"
             try:
                 vals = json.loads(val_str)
-            except Exception:
+            except (TypeError, ValueError) as exc:   # JSONDecodeError is a ValueError
+                # None means "not an array, treat it as a scalar" -- correct,
+                # but the reason belongs in the log (a bare `20` is fine, a
+                # mangled `[1,2` most likely is not).
+                prt(f'note: {val_str!r} is not a JSON array: {exc}')
                 return None
             if isinstance(vals, int):
                 vals = [vals]
@@ -159,7 +163,7 @@ class IniTool:
                     try:
                         params[key] = int(value)
                         continue
-                    except Exception:
+                    except (TypeError, ValueError):
                         params[key] = self.the_default(key, selector)
                         prt(f'skip {selector}.{key}: {value!r} [expecting int repr]')
                         continue

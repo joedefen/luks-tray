@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import hashlib
 import base64
 from cryptography.fernet import Fernet
-from luks_tray.Utils import prt, PROBE_TIMEOUT
+from luks_tray.Utils import prt, prt_once, PROBE_TIMEOUT
 
 class HistoryClass:
     """
@@ -246,8 +246,10 @@ class HistoryClass:
             if tmp_path and os.path.exists(tmp_path):
                 try:
                     os.remove(tmp_path)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    # A stray 0600 temp file next to the history is harmless,
+                    # but it means the write failed *and* its cleanup failed.
+                    prt(f'WARN: cannot remove leftover {tmp_path!r}: {exc}')
 
     def save(self, force=False):
         """
@@ -286,7 +288,11 @@ class HistoryClass:
         """
         try:
             info = os.stat(path)
-        except OSError:
+        except OSError as exc:
+            # None is a usable answer (the caller then does not cache), but a
+            # back_file that cannot be stat'ed is also the first sign that the
+            # history entry is about to be purged -- say so once per path.
+            prt_once(f'stat back_file {path}', f'note: cannot stat {path!r}: {exc}')
             return None
         return (info.st_mtime_ns, info.st_size)
 
@@ -440,9 +446,12 @@ class HistoryClass:
                     # upgrade to the salted PBKDF2 format on the next save
                     self.dirty = True
                 return True
-            except Exception:
-                # Decryption failed (wrong password or corrupt encrypted data)
-                prt("Warning: History file appears encrypted, but decryption failed.")
+            except Exception as exc:                    # pylint: disable=broad-except
+                # Decryption failed (wrong password or corrupt encrypted data).
+                # The exception is part of the message because "failed" alone
+                # cannot tell a typo (InvalidToken) from a truncated file.
+                prt("Warning: History file appears encrypted, but decryption"
+                    f" failed: {exc}")
                 self.status = 'locked'
                 return False
 
