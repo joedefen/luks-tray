@@ -5,7 +5,9 @@
 subdirectories below it, so these checks are the only thing between a typo and
 a sweep over unrelated paths.  They are tested as policy, not as plumbing:
 every refusal is asserted by its message, because "skip the cleanup and say
-why" is the intended behaviour.
+why" is the intended behaviour.  The dependency report is here for the same
+reason: when it says a command is missing, the message has to be actionable,
+and on a host that has the command installed but out of PATH it was not.
 
 The tests never construct a real `LuksTray` -- the helpers are reached through
 `LuksTray.__new__` with the three attributes they read, so no
@@ -470,6 +472,35 @@ def test_cleanup_reports_a_directory_it_cannot_inspect(
     tray = make_tray(auto_root=vault_root)
     assert tray.remove_unused_automounts() == 0
     assert 'cannot inspect' in capsys.readouterr().out
+
+
+# --- check_dependencies -----------------------------------------------------
+
+def test_a_complete_host_is_reported_quietly(monkeypatch, capsys):
+    monkeypatch.setattr(Main.shutil, 'which', lambda util: f'/usr/bin/{util}')
+    found, missing = LuksTray.check_dependencies()
+    assert missing == []
+    assert 'cryptsetup' in found
+    assert capsys.readouterr().out == ''
+
+
+def test_missing_is_printed_with_the_install_hint(monkeypatch, capsys):
+    monkeypatch.setattr(Main.shutil, 'which',
+                        lambda util: None if util == 'cryptsetup' else f'/usr/bin/{util}')
+    _, missing = LuksTray.check_dependencies()
+    assert missing == ['cryptsetup']
+    assert 'cryptsetup - please install' in capsys.readouterr().out
+
+
+def test_a_missing_report_names_the_path_it_searched(monkeypatch, capsys):
+    # The lookup is `shutil.which()`, so "not installed" and "installed out of
+    # PATH" print identically unless the report names the PATH.  A unit that
+    # pinned PATH without /usr/sbin once produced exactly that confusion.
+    monkeypatch.setattr(Main.shutil, 'which', lambda util: None)
+    monkeypatch.setenv('PATH', '/usr/local/bin:/usr/bin')
+    _, missing = LuksTray.check_dependencies()
+    assert missing
+    assert 'PATH=/usr/local/bin:/usr/bin' in capsys.readouterr().out
 
 
 # --- ids and paths ---------------------------------------------------------

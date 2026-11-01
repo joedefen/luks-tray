@@ -174,7 +174,8 @@ Settings and data files are stored in `~/.config/luks-tray/`:
 ## Requirements
 #### Additional System Utilities may be Needed
 This program requires `cryptsetup`, `fuser`, and other system utilities. After install, run `luks-tray --check-deps` to get a report on what dependencies are found and missing. If any are missing, install those using your distro package manager.
-    
+
+💡 The report searches `PATH`, so it prints the `PATH` it used whenever something is listed as missing: `cryptsetup`, `losetup`, `mkfs.ext4` and `blkid` live under `/usr/sbin` on Debian-style hosts, and a service manager that starts the applet with a `PATH` of only `/usr/bin:/bin` reports them as missing although they are installed. If `--check-deps` is clean in your shell but the log says `missing system commands`, the installed unit is the older one -- re-render it with `luks-tray --svc-install`.
 #### Passwordless `sudo` Setup (Required)
 
 The tray runs its privileged steps as `sudo -n …`, which never prompts. Grant passwordless access to the commands it actually needs -- not to `ALL` -- by running `sudo visudo` and adding (replacing `{yourusername}` with your actual username):

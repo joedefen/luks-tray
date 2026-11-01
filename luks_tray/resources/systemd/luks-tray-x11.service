@@ -24,7 +24,12 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# sbin directories are on the path on purpose: `cryptsetup`, `losetup`,
+# `mkfs.ext4` and `blkid` live in /usr/sbin on a non-usrmerged or
+# Debian-style host, and `check_dependencies()` looks them up with
+# `shutil.which()`.  Without them the applet exits at startup with
+# "missing system commands" although every one of them is installed.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
 Environment=XDG_RUNTIME_DIR=/run/user/%U
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
 Environment=XDG_SESSION_TYPE=x11

@@ -238,8 +238,13 @@ class LuksTray():
         if missing:
             # Was a bare `assert`: `python -O` strips it, so the tray carried
             # on with half the system commands missing (no cryptsetup, no
-            # mkfs.ext4, ...) and failed later in confusing ways.
-            raise RuntimeError(f'missing system commands: {missing}')
+            # mkfs.ext4, ...) and failed later in confusing ways.  The PATH is
+            # in the message because the lookup is `shutil.which()`: the usual
+            # cause is not a missing package but a unit or a service manager
+            # whose PATH omits /usr/sbin, where cryptsetup/losetup/mkfs.ext4
+            # live on a non-usrmerged or Debian-style host.
+            raise RuntimeError(f'missing system commands: {missing} '
+                               f'(PATH={os.environ.get("PATH", "")})')
 
         # Create an invisible base widget to serve as the dialog parent
         self.dialog_parent = QWidget(None) # Parented by None, so it's top-level
@@ -339,6 +344,13 @@ class LuksTray():
             prints the same two lists. Lookup is `shutil.which()`, so a PATH
             that lacks /usr/sbin reports `cryptsetup` as missing even though it
             is installed -- run the tray the way the desktop session would.
+            That is not hypothetical: the shipped units once pinned the path
+            without the sbin directories, and the applet refused to start under
+            `systemd --user` while the same shell found every command, so a
+            missing report now names the PATH it searched.  The lookup is not
+            widened to /usr/sbin behind the caller's back on purpose: the
+            commands are later run through the inherited PATH, so a hit found
+            outside it would only move the failure to the first `mount`.
 
             The list is meant to be *complete*, not minimal: a command left off
             it does not go away, it just fails later, on some unlucky path,
@@ -370,6 +382,10 @@ class LuksTray():
                 prt(f'✓  {util}')
             for util in missing:
                 prt(f'✗  {util} - please install')
+            if missing:
+                # The one line that separates "not installed" from "installed
+                # somewhere this process does not look".
+                prt(f'   PATH={os.environ.get("PATH", "")}')
         return found, missing
 
     @staticmethod

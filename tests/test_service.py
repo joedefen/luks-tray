@@ -106,6 +106,22 @@ def test_each_shipped_unit_pins_its_session_type(session):
 
 
 @pytest.mark.parametrize('session', ['wayland', 'x11'])
+def test_each_shipped_unit_keeps_the_sbin_directories_on_path(session):
+    # `cryptsetup`, `losetup`, `mkfs.ext4` and `blkid` live in /usr/sbin on a
+    # Debian-style or non-usrmerged host, and check_dependencies() looks them
+    # up with `shutil.which()`.  A unit that pinned PATH without sbin made the
+    # applet exit at startup with "missing system commands" while the same
+    # shell found every one of them.
+    text = service.read_unit(service.template_for(session))
+    path_line = next(line for line in text.splitlines()
+                     if line.startswith('Environment=PATH='))
+    directories = path_line.split('=', 1)[1].split(':')
+    assert '/usr/local/sbin' in directories
+    assert '/usr/sbin' in directories
+    assert '/sbin' in directories
+
+
+@pytest.mark.parametrize('session', ['wayland', 'x11'])
 def test_each_shipped_unit_stops_restarting_on_a_lock_or_a_crash(session):
     text = service.read_unit(service.template_for(session))
     assert 'Restart=always' in text
