@@ -12,10 +12,13 @@ constructed before the `QApplication`, and it does so with a core dump rather
 than an exception, so the dependency has to be explicit.
 """
 
+from types import SimpleNamespace
+
 import pytest
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QFont
 from PyQt6.QtWidgets import QLabel, QMenu, QWidget, QWidgetAction
 
+from luks_tray import __version__
 from luks_tray.Main import LuksTray
 
 # Qt takes ownership of some of these; keeping a Python reference prevents the
@@ -190,3 +193,40 @@ def test_the_installed_list_is_kept_for_the_next_comparison(tray):
 @pytest.mark.parametrize('icon_key', ['green', 'orange'])
 def test_every_icon_key_in_the_table_is_usable(tray, icon_key):
     assert tray.replace_menu_if_different([text_action('Mount')], icon_key) is True
+
+
+# --- the restart entry -----------------------------------------------------
+
+
+def menu_builder(qapp, restart_self=None):
+    """A `LuksTray` stand-in carrying only what `update_menu_items()` reads.
+
+    The locked state keeps the list short -- master password, Exit, Restart --
+    so the assertions are about the bottom of the menu, not about containers.
+    """
+    instance = LuksTray.__new__(LuksTray)
+    instance.history = SimpleNamespace(status='locked')
+    instance.ini_tool = SimpleNamespace(get_current_val=lambda key: True)
+    instance.app = None
+    instance.mono_font = QFont()
+    instance.replace_menu_if_different = lambda actions, icon_key: actions
+    if restart_self is not None:
+        instance.restart_self = restart_self
+    return instance
+
+
+def test_the_restart_entry_carries_the_app_name_and_version(qapp):
+    actions = menu_builder(qapp).update_menu_items()
+
+    texts = [action.text() for action in actions]
+    assert texts[-2:] == ['Exit', f'↺ Restart luks-tray v{__version__}']
+
+
+def test_the_restart_entry_restarts_the_applet(qapp):
+    called = []
+    instance = menu_builder(qapp, restart_self=lambda *args: called.append(True))
+
+    actions = instance.update_menu_items()
+    actions[-1].trigger()
+
+    assert called == [True]

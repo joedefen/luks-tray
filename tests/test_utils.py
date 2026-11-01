@@ -8,6 +8,7 @@ stdout is a regular file the caller opened -- because pytest's own capture turns
 the inherited stdout into a regular file.
 """
 
+import io
 import os
 import subprocess
 import sys
@@ -156,3 +157,40 @@ Utils.prt('in the second log')
     assert result.returncode == 0, result.stderr
     assert 'in the first log' in (tmp_path / 'one.log').read_text()
     assert 'in the second log' in (tmp_path / 'two.log').read_text()
+
+
+# --- keeping a console for start-up errors ---------------------------------
+
+
+def test_capture_console_duplicates_stderr_once(monkeypatch):
+    monkeypatch.setattr(Utils, '_console_fd', None)
+    fd = Utils.capture_console()
+    try:
+        assert fd >= 0
+        # The duplicate is kept, so a second call never leaks another fd.
+        assert Utils.capture_console() == fd
+    finally:
+        os.close(fd)
+
+
+def test_error_print_writes_to_the_captured_console(tmp_path, monkeypatch):
+    path = tmp_path / 'console.txt'
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    monkeypatch.setattr(Utils, '_console_fd', fd)
+    try:
+        Utils.error_print('another luks-tray is already running')
+    finally:
+        os.close(fd)
+    # The newline is added for the caller, so a message and a print() line
+    # never run together on the user's terminal.
+    assert path.read_text() == 'another luks-tray is already running\n'
+
+
+def test_error_print_falls_back_when_no_console_was_captured(monkeypatch):
+    stream = io.StringIO()
+    monkeypatch.setattr(Utils, '_console_fd', -1)
+    monkeypatch.setattr(sys, '__stderr__', stream)
+
+    Utils.error_print('boom')
+
+    assert stream.getvalue() == 'boom\n'

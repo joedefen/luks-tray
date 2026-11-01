@@ -10,6 +10,9 @@
 - **Mount point history** - Remembers previous mount locations for convenience and clarity
 - **Background monitoring** - Automatically detects newly inserted devices with LUKS containers
 - **Password management** - Optional master password to encrypt stored credentials
+- **Single instance** - A second copy refuses to start (exit status 3) instead of racing the running one; `--replace` terminates the holder and takes over.
+- **Restart from the menu** - The bottom menu entry reads `↺ Restart luks-tray v<version>`, so the running build is visible without leaving the menu.
+- **Late or restarting panels** - If the bar starts after the applet, or restarts later, the tray icon registers itself with it instead of staying invisible until the applet is restarted.
 
 ## Quick Start
 
@@ -26,6 +29,8 @@
     - if the app has a mount point in its history, it will fill in that mount point
     - otherwise, the app will generate a mount point in `~/Vaults`
 7. Finally, for convenience when working, add `luks-tray` to your "auto-start" apps.
+
+Only one copy can run at a time: a second launch reports the running instance and exits with status 3. Use `luks-tray --replace` to terminate it and take over, or the `↺ Restart luks-tray` entry at the bottom of the menu to restart it in place.
 
 ## Visual Interface
 
@@ -59,6 +64,7 @@ Notes:
 
 Settings and data files are stored in `~/.config/luks-tray/`:
 - **History file** - Stored of passwords and mount preferences; it is encrypted when the master password enabled.
+- **Lock file** - `luks-tray.lock` holds the PID of the running instance; the kernel releases the lock when that process exits, so a crash never blocks the next start.
 - **INI file** - the default .ini file looks like:
 
       [ui]

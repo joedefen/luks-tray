@@ -57,6 +57,8 @@ class IniTool:
         self.ini_path =  os.path.join(self.folder, "config.ini")
         self.log_path =  os.path.join(self.folder, "debug.log")
         self.history_path =  os.path.join(self.folder, "history.json")
+        # The single-instance lock main() holds for the life of the process.
+        self.lock_path =  os.path.join(self.folder, "luks-tray.lock")
         self.config = configparser.ConfigParser()
         self.last_mod_time = None
         self.section_params = {'ui': {}, }

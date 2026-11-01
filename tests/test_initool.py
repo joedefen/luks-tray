@@ -27,6 +27,7 @@ def test_paths_only_creates_nothing(isolated_home):
     assert tool.ini_path.endswith('config.ini')
     assert tool.log_path.endswith('debug.log')
     assert tool.history_path.endswith('history.json')
+    assert tool.lock_path.endswith('luks-tray.lock')
 
 
 def test_ensure_folder_does_not_write_a_config():

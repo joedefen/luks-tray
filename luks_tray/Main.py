@@ -24,10 +24,12 @@
 # pylint: disable=too-many-arguments,too-many-nested-blocks
 # pylint: disable=line-too-long,too-many-lines,too-many-public-methods
 # pylint: disable=too-many-return-statements
+import atexit
 import os
 import sys
 import signal
 import shutil
+import subprocess
 import pwd
 import traceback
 import time
@@ -42,7 +44,7 @@ from PyQt6.QtGui import QIcon, QCursor, QAction, QFont, QFontInfo
 from PyQt6.QtCore import QTimer, Qt
 
 from luks_tray.History import HistoryClass
-from luks_tray.Utils import prt, prt_once
+from luks_tray.Utils import PyKill, prt, prt_once
 from luks_tray import Utils, __version__
 from luks_tray.IniTool import IniTool
 from luks_tray.DeviceInfo import DeviceInfo
@@ -53,6 +55,7 @@ from luks_tray.LuksOps import (generate_uuid_for_file_path,
                                 get_luks_uuid_for_file, run_cmd,
                                 run_cmd_capture, run_unmount, sudo_cmd,
                                 sudo_run)
+from luks_tray.TrayWatch import STATUS_NOTIFIER_WATCHER, TrayWatch
 
 # The command/discovery/dialog helpers used to be module-level API of this
 # file. They now live in their own modules and are re-exported here so that
@@ -66,6 +69,7 @@ __all__ = [
     'MasterPasswordDialog',
     'MountDeviceDialog',
     'MountFileDialog',
+    'acquire_lock_or_take_over',
     'generate_uuid_for_file_path',
     'get_luks_uuid_for_file',
     'main',
@@ -75,7 +79,14 @@ __all__ = [
     'run_unmount',
     'sudo_cmd',
     'sudo_run',
+    'tray_watcher_present',
 ]
+
+# Every tray host -- plasmashell, xfce4-panel, waybar, swaybar+snixembed, ... --
+# claims STATUS_NOTIFIER_WATCHER (see TrayWatch.py).  A host that is not on the
+# bus yet is an event, not a wait: the item is registered again when one
+# appears, so start-up never blocks on the bar.
+TRAY_ATTACH_DELAY_MS = 500      # let a new host start serving calls
 
 
 # Paths that must never be accepted as `auto_mount_folder`. The startup cleanup
@@ -199,21 +210,42 @@ class LuksTray():
         self.mount_infos = {}
         self.upons = set()
 
-        self.tray_icon = QSystemTrayIcon(self.icons['none'], self.app)
-        self.tray_icon.setToolTip('luks-tray')
-        self.tray_icon.setVisible(True)
-
         self.containers, self.menu = {}, QMenu()
         self.actions = []
         # Guards for the 3 s poller, see update_menu() and busy_operation().
         # Both must exist before the first update_menu() call below.
         self.refreshing = False
         self.operation = None
+
+        # The tray item is shown immediately; a host that is not on the bus yet
+        # is picked up by the watch below instead of being waited for.  ``menu``
+        # exists first, so re-registering the item can restore it, and the watch
+        # starts *before* the item is shown: a watcher that appears between the
+        # two still produces the event we need.
+        tray_present = tray_watcher_present()
+        self._tray_seen = tray_present is True
+        self.tray_watch = TrayWatch(on_available=self._on_tray_host_appeared,
+                                    on_lost=self._on_tray_host_lost)
+        if not self.tray_watch.start() and tray_present is not None:
+            prt('WARN: cannot watch for a tray host that starts later')
+        self._install_tray_icon()
+        if tray_present is True:
+            prt('tray host detected.')
+        elif tray_present is False:
+            prt('no tray host yet; the icon registers when one appears.')
+        else:
+            prt('tray host status unknown (no QtDBus / no session bus).')
+
         self.update_menu()
         self.remove_unused_automounts()
 
-        self.timer = QTimer(self.tray_icon)
+        # Deliberately unparented: re-registering the item deletes the old
+        # QSystemTrayIcon, and a timer parented to it would go with it.
+        self.timer = QTimer()
         self.timer.timeout.connect(self.update_menu)
+        # The same tick retries a host announcement that was missed, so a watch
+        # that cannot fire (no QtDBus) still gets the icon registered later.
+        self.timer.timeout.connect(self._ensure_tray_attached)
         # Repeating, but update_menu() self-guards: a tick that lands while a
         # refresh or a mount/unmount is still running is dropped instead of
         # stacking a second refresh on top of it.
@@ -473,6 +505,15 @@ class LuksTray():
         action.triggered.connect(self.exit_app)
         actions.append(action)
 
+        # The version rides on the restart entry instead of a separate dead
+        # label: the log says the same thing at start-up, but "which build am I
+        # running?" is a question asked from the menu, usually about a desktop
+        # that behaves differently from what the reader expects.
+        action = QAction(f'↺ Restart luks-tray v{__version__}', self.app)
+        action.setFont(self.mono_font)
+        action.triggered.connect(self.restart_self)
+        actions.append(action)
+
         return self.replace_menu_if_different(actions, icon_key)
 
 
@@ -570,10 +611,105 @@ class LuksTray():
         self.tray_icon.hide()
         sys.exit()
 
+    def restart_self(self, *_args):
+        """ Replace this process with a fresh instance of the applet.
+
+            The replacement is launched as ``python -m luks_tray.Main`` so that
+            PyKill recognises it via `command_names()`.  The single-instance
+            lock is released first: ``os._exit()`` skips atexit handlers, and
+            the replacement must be able to take the lock as soon as it starts.
+            If the replacement cannot be spawned the lock is taken back, so a
+            failed restart does not quietly leave the running tray unlocked.
+
+            The package root goes on PYTHONPATH rather than into ``cwd=``: the
+            replacement inherits whatever directory the user is in and must
+            still be able to import the module when running from a checkout.
+        """
+        prt('+', 'restarting applet...')
+        try:
+            self.tray_icon.hide()
+        except (AttributeError, RuntimeError) as exc:
+            prt(f'note: cannot hide the tray icon before restarting: {exc}')
+        package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(
+            [package_root] + ([env['PYTHONPATH']] if env.get('PYTHONPATH') else []))
+        # --replace is never inherited: a restart releases the lock first, so
+        # the replacement has nothing to take over, and it must not keep a
+        # destructive flag should the lock change hands in between.
+        inherited = [arg for arg in sys.argv[1:] if arg != '--replace']
+        args = [sys.executable, '-m', 'luks_tray.Main', *inherited]
+        lock = Utils.SingleInstance.current
+        Utils.SingleInstance.release_current()
+        try:
+            subprocess.Popen(args, env=env)
+        except OSError as exc:
+            prt(f'FAIL: cannot restart the applet: {exc}')
+            if lock is not None:
+                lock.acquire()
+            return
+        os._exit(0)
+
     def prompt_master_password(self):
         """ Prompt for master passdword"""
         dialog = MasterPasswordDialog(self)
         dialog.exec()
+
+    # -- tray registration -------------------------------------------------
+
+    def current_icon_key(self):
+        """ The icon key in use, or 'none' before the first update_menu(). """
+        key = getattr(self, 'prev_icon_key', '')
+        return key if key in self.icons else 'none'
+
+    def _install_tray_icon(self):
+        """ Create the tray item; showing it is what registers it with a host.
+
+            Qt talks to the StatusNotifierWatcher once, when the item is shown,
+            and never retries, so re-creating the item is the only way to
+            register with a host that was absent the first time -- or with a
+            host that has been restarted since.  The previous item is hidden
+            before the new one is shown, so a host never lists two entries.
+        """
+        previous = getattr(self, 'tray_icon', None)
+        if previous is not None:
+            previous.hide()
+            previous.deleteLater()
+        self.tray_icon = QSystemTrayIcon(self.icons[self.current_icon_key()],
+                                         self.app)
+        self.tray_icon.setToolTip('luks-tray')
+        if self.menu is not None:
+            self.tray_icon.setContextMenu(self.menu)
+        self.tray_icon.setVisible(True)
+
+    def _on_tray_host_appeared(self):
+        """ A host appeared (or restarted): register the item with it again. """
+        self._tray_seen = True
+        # A watcher claims its bus name just before it starts serving calls, so
+        # give it a moment instead of racing its own start-up.
+        QTimer.singleShot(TRAY_ATTACH_DELAY_MS, self._reattach_tray)
+
+    def _on_tray_host_lost(self):
+        """ The host went away; the registration went with it. """
+        self._tray_seen = False
+
+    def _reattach_tray(self):
+        """ Re-create the item at last, if a host is really there now. """
+        if tray_watcher_present() is not True:
+            # The host left again between its announcement and this call; the
+            # next appearance schedules another attempt.
+            self._tray_seen = False
+            return
+        self._install_tray_icon()
+        prt('tray icon registered with the host that is now running')
+
+    def _ensure_tray_attached(self):
+        """ Retry a missed host announcement from the periodic 3 s tick. """
+        watch = getattr(self, 'tray_watch', None)
+        if getattr(self, '_tray_seen', True) or watch is None or not watch.watching:
+            return
+        if tray_watcher_present():
+            self._on_tray_host_appeared()
 
     def update_history(self, uuid, values, back_file=None):
         """ Record/refresh the history entry for a container.
@@ -999,15 +1135,73 @@ class LuksTray():
         return path
 
 
+def tray_watcher_present():
+    """ Ask the session bus whether a StatusNotifierWatcher is registered.
+
+        Returns True/False, or None when the question cannot be asked at all
+        (no QtDBus module, no session bus, D-Bus error).  QtDBus ships with the
+        PyQt6 this applet already requires, so the check adds no package; the
+        import is local, so importing this module -- and therefore
+        `luks-tray --help` -- never touches D-Bus.
+    """
+    try:
+        # pylint: disable=import-outside-toplevel
+        from PyQt6.QtDBus import QDBusConnection
+    except ImportError:
+        prt('WARN: QtDBus unavailable; cannot detect a tray')
+        return None
+    try:
+        bus = QDBusConnection.sessionBus()
+        if not bus.isConnected():
+            prt('WARN: no D-Bus session bus; cannot detect a tray')
+            return None
+        interface = bus.interface()
+        # The default D-Bus timeout is 25s, which would stall start-up and the
+        # periodic retry if the bus is wedged.
+        interface.setTimeout(2000)
+        reply = interface.isServiceRegistered(STATUS_NOTIFIER_WATCHER)
+        return bool(reply.isValid() and reply.value())
+    except Exception as exc:                    # pylint: disable=broad-except
+        prt(f'WARN: tray detection failed: {exc}')
+        return None
+
+
+def acquire_lock_or_take_over(lock, replace=False):
+    """ Take the single-instance lock and report whether this process owns it.
+
+        The lock comes *first*: killing an incumbent must never be what a plain
+        start does, because a DE autostart plus a supervisor that restarts the
+        tray would then ping-pong forever, each new instance terminating the
+        other.
+
+        Killing is therefore the *takeover* path, and it is opt-in
+        (``--replace``).  Even then the recorded pid is only signalled after its
+        command line is confirmed to still be luks-tray, so a recycled pid or a
+        foreign lock holder is left alone.
+    """
+    if lock.acquire(retries=5, delay=0.2):
+        return True
+    holder = Utils.SingleInstance.read_pid(lock.path)
+    if not replace or not holder:
+        return False
+    prt(f'--replace: terminating lock holder pid {holder}')
+    if not PyKill.kill_pid(holder, ['luks-tray']):
+        prt(f'WARNING: pid {holder} does not look like luks-tray; not killing it')
+        return False
+    # The old process may need a moment to exit and let go of the flock.
+    return lock.acquire(retries=25, delay=0.2)
+
+
 def main():
     """ Entry point: parse the CLI and then run the tray loop.
 
         The informational options (`--version`, `--edit-config`,
         `--follow-log`, `--check-deps`) print or exec and never return; the
-        normal path builds `IniTool` and `LuksTray` and hands control to
-        `QApplication.exec()`. Anything that fails on the way is logged
-        through `prt()` -- stdout may already be the debug log by then -- and
-        exits with status 15.
+        normal path takes the single-instance lock, builds `IniTool` and
+        `LuksTray` and hands control to `QApplication.exec()`.  Anything that
+        fails on the way is logged through `prt()` -- stdout may already be the
+        debug log by then -- and exits with status 15.  A second instance that
+        does not own the lock exits with status 3 instead of starting.
 
         `--version` is deliberately handled by argparse (`action='version'`):
         it exits while parsing, before `IniTool` is built and before stdin is
@@ -1028,6 +1222,9 @@ def main():
             help='exec ${EDITOR:-vim} on config.ini file')
     parser.add_argument('--check-deps', action='store_true',
             help='check that necessary system programs are installed')
+    parser.add_argument('--replace', action='store_true',
+            help='if another luks-tray holds the single-instance lock, terminate'
+                 ' it and take over (default: refuse to start)')
     # The release gate installs the built wheel in a throwaway venv and runs
     # this, so the number printed has to come from the installed package --
     # not from pyproject.toml, and not from the source tree.
@@ -1069,16 +1266,6 @@ def main():
         sys.exit(1) # just in case ;-)
 
     try:
-        # Detach stdin from the terminal: every command runs with `sudo -n`
-        # and feeds its password over a pipe, so a child that tried to read
-        # the tty would steal keystrokes from the user's shell. The price is
-        # that there is no terminal left to interrupt a wedged child, which
-        # is why every subprocess call carries a deadline (CMD_TIMEOUT /
-        # PROBE_TIMEOUT in Utils) and cannot freeze the UI indefinitely.
-        devnull_fd = os.open('/dev/null', os.O_RDWR)
-        os.dup2(devnull_fd, sys.stdin.fileno())
-        os.close(devnull_fd)
-
         # Point the log at debug.log before the real IniTool is built: a problem
         # the constructor has to report then reaches the file instead of a
         # stdout that a desktop launch has already pointed nowhere. The
@@ -1087,9 +1274,42 @@ def main():
         # into, without creating config.ini as a side effect.
         configure_ini = IniTool(paths_only=True)
         configure_ini.ensure_folder()
+        # Before configure_log() moves fd 2: error_print() needs a handle on
+        # the console the user started us from, or "already running" would
+        # only ever appear in the log a desktop launch points nowhere.
+        Utils.capture_console()
         Utils.configure_log(configure_ini.log_path)
 
         ini_tool = IniTool(paths_only=False)
+
+        # The lock is the guarantee that two trays never coexist. It is taken
+        # before anything destructive happens: a plain launch refuses to start
+        # when an instance already owns it, and only `--replace` inspects the
+        # holder, terminates it and takes over.
+        lock = Utils.SingleInstance(ini_tool.lock_path)
+        if not acquire_lock_or_take_over(lock, replace=opts.replace):
+            holder = Utils.SingleInstance.read_pid(lock.path)
+            message = 'another luks-tray is already running'
+            if holder:
+                message += f' (pid {holder})'
+            if not opts.replace:
+                message += '; use --replace to terminate it and take over'
+            prt(f'ERROR: {message}')
+            Utils.error_print(f'ERROR: {message}')
+            sys.exit(3)
+        atexit.register(lock.release)
+
+        # Detach stdin from the terminal: every command runs with `sudo -n`
+        # and feeds its password over a pipe, so a child that tried to read
+        # the tty would steal keystrokes from the user's shell. The price is
+        # that there is no terminal left to interrupt a wedged child, which
+        # is why every subprocess call carries a deadline (CMD_TIMEOUT /
+        # PROBE_TIMEOUT in Utils) and cannot freeze the UI indefinitely.
+        # It happens after the lock check, so a refused second start still has
+        # a terminal to print its "already running" message on.
+        devnull_fd = os.open('/dev/null', os.O_RDWR)
+        os.dup2(devnull_fd, sys.stdin.fileno())
+        os.close(devnull_fd)
 
         tray = LuksTray(ini_tool, opts)
         sys.exit(tray.app.exec())
