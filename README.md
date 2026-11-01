@@ -17,7 +17,7 @@
 2. Setup passwordless `sudo` if not already (see notes below if needed).
 3. From a terminal:
     - run `luks-tray --check-deps` and install any required commands.
-    - run `luk-tray` to ensure it finds your system tray and appears.
+    - run `luks-tray` to ensure it finds your system tray and appears.
 4. Right-click the tray icon to see available containers. You may:
     - Insert a disk with LUKS devices to detect them automatically.
     - Add an existing or create a new encrypted file to manage it.
@@ -51,8 +51,8 @@ Notes:
 - or click of the action lines to perform the described action
 - LUKS devices must be created with other tools such as Gnome Disks.
 - LUKS files are only automatically detected in its history; when you add or create new LUKS files, they are added to the history.
-- When creating LUKS files, the default folder is `~/.Crypts`.
-- When mounting LUKS files for the first time, the default folder is `~/Crypts/{basename}` where `{basename}` is the basename of the encrypted LUKS file (less any `.luks`, `.luks2`, or `.crypt` suffix).
+- When creating LUKS files, the default folder is `~/.Vaults`.
+- When mounting LUKS files for the first time, the default folder is `~/Vaults/{basename}` where `{basename}` is the basename of the encrypted LUKS file (less any `.luks`, `.luks2`, or `.crypt` suffix).
 
 
 ## Configuration
@@ -92,18 +92,25 @@ This program requires `cryptsetup`, `fuser`, and other system utilities. After i
     
 #### Passwordless `sudo` Setup (Required)
 
-To allow the tray app to manage LUKS containers without prompting for your password each time, configure passwordless `sudo` for specific commands. For example, in a terminal, run `sudo visudo`, and then add this line at the end of the file (replacing {yourusername} with your actual username):
+The tray runs its privileged steps as `sudo -n …`, which never prompts. Grant passwordless access to the commands it actually needs -- not to `ALL` -- by running `sudo visudo` and adding (replacing `{yourusername}` with your actual username):
 
-    {yourusername} ALL=(ALL) NOPASSWD: ALL
+```
+Cmnd_Alias LUKS_TRAY = /usr/bin/cryptsetup, /usr/bin/mount, /usr/bin/umount, \
+                       /usr/bin/losetup, /usr/bin/fuser, \
+                       /usr/bin/mkdir, /usr/bin/rmdir, /usr/bin/chown, \
+                       /usr/bin/truncate, /usr/bin/mkfs.ext4, /usr/bin/bindfs
 
-💡 This grants your user passwordless access to all commands. You may be able to limit it to just the `luks-tray` app or a subset of commands it uses (listed with `--check-deps`). See `man sudoers` for details.
+{yourusername} ALL=(ALL) NOPASSWD: LUKS_TRAY
+```
+
+💡 `sudo` matches the *resolved* command path, so confirm each entry on your distro with `command -v cryptsetup mount umount losetup fuser mkdir rmdir chown truncate mkfs.ext4 bindfs`, and correct any that live under `/usr/sbin` (common for `mkfs.ext4`). The rest of the `luks-tray --check-deps` list -- `lsblk`, `blkid`, `touch` -- runs unprivileged and needs no rule; `sudo` itself must of course be installed. See `man sudoers` for details.
 
 #### A Working System Tray
 It works best with DEs/WMs that offer **first-class tray support**, such as:
 
-  - **KDE Plasma** (X11 or Waylan)
+  - **KDE Plasma** (X11 or Wayland)
   - **i3wm** with **polybar**
-  - **sway** with **waybar** (actually, quite 2nd class ... see "Workaounds for SWAY" below)
+  - **sway** with **waybar** (actually, quite 2nd class ... see "Workarounds for SWAY" below)
 
 > ⚠️ **GNOME**: Requires a third-party extension (such as AppIndicator support) to show tray icons. Results may vary across GNOME versions.<br>
 > ⚠️ **Xfce** and similar lightweight DEs: Tray menus may open off-screen or be partially cut off, depending on panel layout and screen resolution.
