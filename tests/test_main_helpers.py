@@ -606,3 +606,97 @@ def test_an_open_container_that_is_not_mounted_has_no_mount_point(monkeypatch):
     assert container.opened is True
     assert container.upon == ''
     assert container.mounts == []
+
+
+# --- keying a container that lsblk could not identify ----------------------
+
+
+def loop_container(back_file, uuid=None):
+    """A file container as `parse_lsblk()` builds one for a loop device."""
+    container = Main.DeviceInfo.make_partition_namespace('x.img-luks', '64M')
+    container.type = 'crypt'
+    container.uuid = uuid
+    container.back_file = back_file
+    container.upon = '/home/joe/Vaults/x'
+    container.opened = True
+    return container
+
+
+def refuse(_path):
+    """Stand-in for `get_container_identity()` when it must not be asked."""
+    raise AssertionError('an identifiable container must not be probed')
+
+
+def test_a_loop_container_lsblk_cannot_identify_is_keyed_by_its_header(monkeypatch):
+    # A TrueCrypt/VeraCrypt header is encrypted, so `lsblk` reports no UUID for
+    # the loop device and the entry arrives keyed by None while the history
+    # keys the same file by its salt. That mismatch is what put two identical
+    # rows in the menu (lsblk's one and the history stand-in) and let
+    # `merge_containers_history()` write a None entry of its own.
+    container = loop_container('/home/joe/.Vaults/x.img')
+    tray = make_file_tray()
+    tray.containers = {None: container}
+    monkeypatch.setattr(Main, 'get_container_identity', lambda _path: 'salt-abc')
+
+    tray.identify_file_containers()
+
+    assert list(tray.containers) == ['salt-abc']
+    assert tray.containers['salt-abc'] is container
+    assert container.uuid == 'salt-abc'
+
+
+def test_a_container_that_already_has_a_uuid_is_not_probed(monkeypatch):
+    tray = make_file_tray()
+    tray.containers = {'UUID-1': loop_container('/home/joe/.Vaults/y.img',
+                                                uuid='UUID-1')}
+    monkeypatch.setattr(Main, 'get_container_identity', refuse)
+
+    tray.identify_file_containers()
+
+    assert list(tray.containers) == ['UUID-1']
+
+
+def test_a_device_entry_has_no_file_to_identify(monkeypatch):
+    # Device containers are keyed by the LUKS UUID; there is nothing to probe
+    # even when the key is empty.
+    container = Main.DeviceInfo.make_partition_namespace('sda1', '3T')
+    tray = make_file_tray()
+    tray.containers = {'': container}
+    monkeypatch.setattr(Main, 'get_container_identity', refuse)
+
+    tray.identify_file_containers()
+
+    assert list(tray.containers) == ['']
+
+
+def test_a_file_whose_identity_cannot_be_read_stays_visible(monkeypatch):
+    # '' means "no answer": keeping the entry under its own key is what makes
+    # the container stay in the menu, and a password typed into its dialog
+    # still finds it.
+    container = loop_container('/home/joe/.Vaults/gone.img')
+    tray = make_file_tray()
+    tray.containers = {None: container}
+    monkeypatch.setattr(Main, 'get_container_identity', lambda _path: '')
+
+    tray.identify_file_containers()
+
+    assert list(tray.containers) == [None]
+    assert tray.containers[None] is container
+
+
+# --- menu text: the real user's home is abbreviated ------------------------
+
+
+def test_shorten_home_abbreviates_the_real_users_home(isolated_home):
+    home = str(isolated_home)
+    assert LuksTray.shorten_home(f'{home}/Vaults/x') == '~/Vaults/x'
+    assert LuksTray.shorten_home(home) == '~'
+
+
+def test_shorten_home_leaves_everything_else_alone(isolated_home):
+    home = str(isolated_home)
+    assert LuksTray.shorten_home('') == ''
+    assert LuksTray.shorten_home('/mnt/x') == '/mnt/x'
+    # A sibling whose name merely starts the same way is not inside the home.
+    assert LuksTray.shorten_home(f'{home}x/y') == f'{home}x/y'
+    assert LuksTray.shorten_home('/home/somebody-else/x') == '/home/somebody-else/x'

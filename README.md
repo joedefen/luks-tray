@@ -129,7 +129,8 @@ Notes:
 - LUKS files are only automatically detected in its history; when you add or create new LUKS files, they are added to the history.
 - A TrueCrypt/VeraCrypt file is managed like a LUKS file once added, except that it can never be *discovered*: its header is encrypted, so nothing can tell it apart from random data without the password. Add it once with `✚`, and the history carries it from then on.
 - When creating LUKS files, the default folder is `~/.Vaults`.
-- When mounting LUKS files for the first time, the default folder is `~/Vaults/{basename}` where `{basename}` is the basename of the encrypted LUKS file (less any `.luks`, `.luks2`, or `.crypt` suffix).
+- When mounting LUKS files for the first time, the default folder is `~/Vaults/{basename}` where `{basename}` is the basename of the encrypted LUKS file, less a known container suffix (`.luks`, `.luks2`, `.crypt`, `.img`): `~/.Vaults/test-only-tcrypt.img` is first offered `~/Vaults/test-only-tcrypt`.
+- Keep the two folders apart: containers in `~/.Vaults`, mount points in `~/Vaults`. Only the suffixes above are dropped from a derived mount point, so a container named without one (`myvault.dat`) kept *under* `~/Vaults` is offered its own path as its first mount point, and that is refused with `mount point (...) exists but is not a directory`.
 
 
 ## Configuration

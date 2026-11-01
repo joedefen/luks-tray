@@ -12,14 +12,16 @@ argument, which is exactly what makes these tests possible without building a
 """
 
 import os
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QCheckBox, QLabel, QLineEdit, QProgressBar, QPushButton
 
-from luks_tray.dialogs import Common
+from luks_tray.dialogs import Common, MountFile
 from luks_tray.dialogs.Common import CommonDialog
+from luks_tray.dialogs.MountFile import MountFileDialog, derive_mount_point
 
 
 class FakeIni:
@@ -448,3 +450,82 @@ def test_check_upon_does_not_guard_against_a_non_path_object(dialog):
 
     with pytest.raises(TypeError):
         dialog.check_upon(Awkward(), set())
+
+
+# --- the mount point a file container is offered ---------------------------
+
+
+@pytest.mark.parametrize('name, expected', [
+    ('vault.luks', 'vault'),
+    ('vault.luks2', 'vault'),
+    ('vault.crypt', 'vault'),
+    ('test-only-tcrypt.img', 'test-only-tcrypt'),
+    ('my.vault', 'my.vault'),
+    ('no-extension', 'no-extension'),
+])
+def test_a_known_container_suffix_is_dropped_from_the_mount_point(name, expected):
+    # The mount point is a directory the user looks for by the name of the
+    # vault, so `x.img` is offered `x`. A suffix nobody knows is kept: guessing
+    # where an extension starts would turn `my.vault` into `my`.
+    assert (derive_mount_point('/mnt/Vaults', f'/mnt/.Vaults/{name}')
+            == f'/mnt/Vaults/{expected}')
+
+
+def test_a_name_that_is_only_a_suffix_is_left_whole():
+    # Dropping it would derive an empty basename and offer the vault area
+    # itself as the mount point.
+    assert derive_mount_point('/mnt/Vaults', '/mnt/.Vaults/.img') == '/mnt/Vaults/.img'
+
+
+class MountFileTray(FakeTray):
+    """A tray stand-in carrying the four things `mount_file()` calls."""
+
+    def __init__(self):
+        super().__init__('/unused')
+        self.containers = {}
+        self.mounted_upon = []
+        self.history_written = []
+
+    def update_mounts(self):
+        pass
+
+    @contextmanager
+    def busy_operation(self, name):
+        yield
+
+    def update_history(self, uuid, values, back_file=None, meta_type=None):
+        self.history_written.append((uuid, values['upon'], back_file))
+
+    def update_menu(self):
+        pass
+
+
+def test_adding_an_image_offers_and_records_the_name_without_the_suffix(
+        qapp, monkeypatch, isolated_home):
+    """`~/.Vaults/x.img` mounts at `~/Vaults/x`, and that is what is remembered.
+
+        "Mount At" is prefilled with the mount area while the file lives in the
+        hidden container folder, so the mount point is *derived* from the file
+        name. The history has to record the derived path, not the prefilled
+        text: leaving the field alone is the normal case for "Add Existing".
+    """
+    tray = MountFileTray()
+    dialog = MountFileDialog(tray, None, create=False)
+    os.makedirs(dialog.vault_dir)
+    errors = []
+    dialog.alert_errors = errors.append
+    monkeypatch.setattr(MountFile, 'mount_luks_container',
+                        lambda _tray, _container, _pw, upon, **_kw:
+                        tray.mounted_upon.append(upon))
+    monkeypatch.setattr(MountFile, 'get_container_identity', lambda _path: 'salt-abc')
+
+    dialog.inputs['password'].setText('vaultpass')
+    dialog.inputs['back_file'].setText(
+        str(isolated_home / '.Vaults' / 'test-only-tcrypt.img'))
+    dialog.mount_file(None)
+
+    expected = os.path.join(dialog.vault_dir, 'test-only-tcrypt')
+    assert errors == []
+    assert tray.mounted_upon == [expected]
+    assert tray.history_written == [
+        ('salt-abc', expected, str(isolated_home / '.Vaults' / 'test-only-tcrypt.img'))]

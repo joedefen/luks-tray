@@ -341,16 +341,18 @@ cryptsetup and the kernel agree with those fakes.
 ### Where it lives
 
 ```text
-~/Vaults/test-only-tcrypt.img
+~/.Vaults/test-only-tcrypt.img
 ```
 
-* `~/Vaults` is the default `auto_mount_folder`, so the mount point the tray
-  makes during the run lands beside it.  It is safe there: the startup pass
-  ([`remove_unused_automounts()`](../luks_tray/Main.py)) removes empty
-  *directories* and skips everything that is not one, so a `.img` file is never
-  a candidate.
-* `test-only-` is load-bearing.  The passphrase below is published; this file
-  must never be a vault anybody cares about.
+Two folders, and they are not interchangeable:
+
+* `~/.Vaults` (hidden) — **containers**.  It is already where the tray creates
+  new ones (`dot_vault_dir`; README → "When creating LUKS files, the default
+  folder is `~/.Vaults`"), so a test container sits beside the real ones.
+* `~/Vaults` — **mount points** (`auto_mount_folder`).  Nothing but directories
+  belongs there.
+* `test-only-` is load-bearing: the passphrase is published, and this file must
+  never be a vault anybody cares about.
 * **`tcrypt`, not `veracrypt`.**  `tcplay` writes a TrueCrypt header.  That is
   measured rather than assumed: `cryptsetup --debug --veracrypt-pim 0
   tcryptDump` reports `TCRYPT: Magic: TRUE, Header version: 5` and settles on
@@ -362,9 +364,27 @@ cryptsetup and the kernel agree with those fakes.
 So one container is enough.  `veracrypt` is not in Debian — `apt-cache search
 veracrypt` returns `tcplay`, `libtcplay` and `libtcplay-dev`.  If you ever want
 the `VERA` variant too, build it with the upstream tool from veracrypt.fr, save
-it as `~/Vaults/test-only-veracrypt.img`, create it at PIM 0 and run the same
+it as `~/.Vaults/test-only-veracrypt.img`, create it at PIM 0 and run the same
 checklist; it adds the higher iteration count and nothing else this code does
 differently.
+
+### Why not in `~/Vaults`
+
+Only one of the two folders takes files.  "Add Existing Crypt File" prefills
+*Mount At* with `~/Vaults`, and
+[`mount_file()`](../luks_tray/dialogs/MountFile.py) turns that back into
+`~/Vaults/<basename>` with one known suffix dropped
+([`CONTAINER_SUFFIXES`](../luks_tray/dialogs/MountFile.py): `.luks`, `.luks2`,
+`.crypt`, `.img`).  A `.img` container *in* the mount area therefore derives
+`~/Vaults/test-only-tcrypt` and no longer collides with itself — that collision
+(`check_upon()` answering `mount point (...) exists but is not a directory`) is
+what a name without a known suffix still does: `myvault.dat` derives itself.
+The list cannot cover every name somebody might choose, so the rule stays:
+containers in `~/.Vaults`, mount points in `~/Vaults`.
+
+Sitting outside the auto-mount root also keeps the container out of the startup
+sweep: [`remove_unused_automounts()`](../luks_tray/Main.py) removes empty
+*directories* below `~/Vaults` and skips everything else.
 
 ### Install and create it (Debian)
 
@@ -378,8 +398,8 @@ the queue before each prompt, so `printf 'vaultpass\n' | sudo tcplay …` is
 discarded and it reports `could not read passphrase`.  Type the three answers:
 
 ```sh
-truncate -s 64M ~/Vaults/test-only-tcrypt.img
-LOOP=$(sudo losetup --find --show ~/Vaults/test-only-tcrypt.img)
+truncate -s 64M ~/.Vaults/test-only-tcrypt.img
+LOOP=$(sudo losetup --find --show ~/.Vaults/test-only-tcrypt.img)
 sudo tcplay -c -d "$LOOP" -b AES-256-XTS -a whirlpool
 #   Passphrase: vaultpass
 #   Repeat passphrase: vaultpass
@@ -396,7 +416,7 @@ option, bad superblock`:
 
 ```sh
 printf 'vaultpass' | sudo cryptsetup open --type tcrypt --veracrypt-pim 0 \
-    --key-file - ~/Vaults/test-only-tcrypt.img test-only-tcrypt.img-luks
+    --key-file - ~/.Vaults/test-only-tcrypt.img test-only-tcrypt.img-luks
 sudo mkfs.ext4 -L luks-tray-test /dev/mapper/test-only-tcrypt.img-luks
 sudo cryptsetup close test-only-tcrypt.img-luks
 ```
@@ -412,7 +432,7 @@ file directly, with no loop device — the asymmetry with `tcplay` above.
 **1. There is nothing to detect.**
 
 ```sh
-blkid -o value -s UUID ~/Vaults/test-only-tcrypt.img; echo "rc=$?"
+blkid -o value -s UUID ~/.Vaults/test-only-tcrypt.img; echo "rc=$?"
 # <nothing>
 # rc=2
 ```
@@ -421,7 +441,7 @@ No signature and no UUID, which is why the identity falls back to the 64-byte
 salt in [`ContainerType.py`](../luks_tray/ContainerType.py):
 
 ```sh
-lt-venv/bin/python -c "from luks_tray.LuksOps import get_container_identity as g; print(g('$HOME/Vaults/test-only-tcrypt.img'))"
+lt-venv/bin/python -c "from luks_tray.LuksOps import get_container_identity as g; print(g('$HOME/.Vaults/test-only-tcrypt.img'))"
 # salt-17a9cbd25b840999bf5859ce99b47880
 ```
 
@@ -431,7 +451,7 @@ Stable across mounts, different once the container is re-made.
 
 ```sh
 printf 'vaultpass' | sudo cryptsetup open --type luks --key-file - \
-    ~/Vaults/test-only-tcrypt.img probe
+    ~/.Vaults/test-only-tcrypt.img probe
 # Device ... is not a valid LUKS device.                             rc=1
 ```
 
@@ -440,7 +460,7 @@ type".  A wrong passphrase is a different verdict, and is never retried:
 
 ```sh
 printf 'wrongpass' | sudo cryptsetup --veracrypt-pim 0 tcryptDump \
-    ~/Vaults/test-only-tcrypt.img
+    ~/.Vaults/test-only-tcrypt.img
 # No device header detected with this passphrase.                    rc=2
 ```
 
@@ -453,11 +473,15 @@ type was not what was wrong.
 HOME=$(mktemp -d) ./runner
 ```
 
-Add file container → this path → `vaultpass`.  Expect: an entry appears in the
-menu although `lsblk` knows nothing about the file; the dialog shows
-`Type: TrueCrypt/VeraCrypt` where a LUKS container shows a UUID; unmount then
-close leaves no `/dev/mapper/test-only-tcrypt.img-luks`; and restarting the tray
-keeps the entry.
+Add file container → `~/.Vaults/test-only-tcrypt.img` → `vaultpass`, leaving
+*Mount At* at its prefilled `~/Vaults`: that is what `mount_file()` turns into
+`~/Vaults/test-only-tcrypt`, the `.img` suffix dropped.  Expect: **one** menu
+entry, reading `~/.Vaults/test-only-tcrypt.img ~/Vaults/test-only-tcrypt` — one,
+although `lsblk` cannot identify the file: it is keyed by the header's salt,
+exactly as the history keys it, so no second stand-in row appears; the dialog
+shows `Type: TrueCrypt/VeraCrypt` where a LUKS container shows a UUID; unmount
+then close leaves no `/dev/mapper/test-only-tcrypt.img-luks`; and restarting the
+tray keeps the entry.
 
 `HOME` is the variable that moves the history, not `XDG_CONFIG_HOME`: the config
 folder is `$HOME/.config/luks-tray`, built from `get_user_home()`.  Without it a
@@ -487,11 +511,15 @@ reason they are unsupported.
 ### Cleanup
 
 ```sh
+sudo umount ~/Vaults/test-only-tcrypt           # twice: bindfs, then ext4
 sudo cryptsetup close test-only-tcrypt.img-luks 2>/dev/null
-rm ~/Vaults/test-only-tcrypt.img
+rm ~/.Vaults/test-only-tcrypt.img
 ```
 
-Keeping it is also fine: 64 MB in `~/Vaults` is cheaper than rediscovering any
+The emptied mount point needs no `rmdir`: the startup pass removes empty
+directories below `~/Vaults`.
+
+Keeping it is also fine: 64 MB in `~/.Vaults` is cheaper than rediscovering any
 of the above.
 
 ---

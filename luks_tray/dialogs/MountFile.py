@@ -13,7 +13,30 @@ from luks_tray.Utils import prt
 from luks_tray.DeviceInfo import DeviceInfo
 from luks_tray.dialogs.Common import CommonDialog
 from luks_tray.LuksOps import (get_container_identity, mount_luks_container,
-                                run_cmd, run_unmount, sudo_cmd)
+                                run_unmount, sudo_cmd)
+
+
+# Suffixes a vault file is commonly given. They are dropped from the mount point
+# "Mount At" is prefilled with, so `~/.Vaults/test-only-tcrypt.img` mounts at
+# `~/Vaults/test-only-tcrypt`. A name without one of them keeps every character:
+# guessing where an extension starts would turn `my.vault` into `my`, and the
+# mount point is a directory the user will look for by the name they chose.
+CONTAINER_SUFFIXES = ('.luks', '.luks2', '.crypt', '.img')
+
+
+def derive_mount_point(vault_dir, back_file):
+    """ The mount point a file container stored in `back_file` is offered.
+
+        `<vault_dir>/<basename>`, with one known container suffix removed. The
+        result is a *candidate*: `check_upon()` still decides whether it is
+        usable (it exists, it is a directory, it is not in use).
+    """
+    basename = os.path.basename(back_file)
+    for suffix in CONTAINER_SUFFIXES:
+        if basename.endswith(suffix) and len(basename) > len(suffix):
+            basename = basename[:-len(suffix)]
+            break
+    return os.path.join(vault_dir, basename)
 
 
 class MountFileDialog(CommonDialog):
@@ -77,8 +100,11 @@ class MountFileDialog(CommonDialog):
             self.add_input_field('password', "Enter Password", '',
                                 24, add_on='password')
             self.add_input_field('back_file', "Crypt File", '', 48, add_on='file')
-            # Prefilled with the vault area: `mount_file()` turns that back
-            # into `<vault_dir>/<file name without .luks>` when it validates.
+            # Prefilled with the *mount* area, not the container folder:
+            # `mount_file()` turns that back into `<vault_dir>/<basename>` and
+            # drops a known container suffix (see CONTAINER_SUFFIXES), so
+            # `~/.Vaults/test-only-tcrypt.img` is offered
+            # `~/Vaults/test-only-tcrypt`.
             self.add_input_field('upon', "Mount At", self.vault_dir, 36, add_on='folder')
             self.add_input_field('readonly', "Read-only",
                                  '', 48, field_type='checkbox')
@@ -222,12 +248,15 @@ class MountFileDialog(CommonDialog):
                     continue
                 path = os.path.abspath(path)
                 values[key] = path
+                # Creating a missing container folder belongs to
+                # `mount_luks_container()`: it is handed ``dot_vault_dir`` and
+                # creates that one unprivileged, just before writing the file.
+                # The branch that used to live here compared
+                # ``basename(dirname)`` ('.Vaults') with the *full* dot_vault_dir
+                # path, so it could never run. All this dialog checks is that the
+                # parent of that folder is somewhere real, which refuses a typo
+                # before sudo is asked for anything.
                 dirname = os.path.dirname(path)
-                if not os.path.isdir(dirname):
-                    if os.path.basename(dirname) == self.dot_vault_dir:
-                        err = run_cmd(['mkdir', '-p', dirname])
-                        if err:
-                            errs.append(err)
                 if not os.path.isdir(os.path.dirname(dirname)):
                     errs.append(f'ERR: Crypt File {path} must be in an existing directory')
 
@@ -244,13 +273,18 @@ class MountFileDialog(CommonDialog):
                 if 'back_file' in values or container.back_file:
                     back_file = container.back_file if container.back_file else values['back_file']
                     if path == self.vault_dir:
-                        basename = os.path.basename(back_file)
-                        for suffix in ('.luks', '.luks2', '.crypt'):
-                            if basename.endswith(suffix):
-                                if len(basename) > len(suffix):
-                                    basename = basename[:-len(suffix)]
-                        path = os.path.join(self.vault_dir, basename)
+                        # Leaving "Mount At" at its prefilled vault_dir means
+                        # "put it beside the other vaults, named after this
+                        # container": `x.img` mounts at `<vault_dir>/x`, not at
+                        # `<vault_dir>/x.img`.
+                        path = derive_mount_point(self.vault_dir, back_file)
 
+                # The history has to remember the mount point that was used,
+                # not the text that was typed: "Mount At" is prefilled with the
+                # vault *area*, and the derived path is what gets mounted. The
+                # two differ whenever the user leaves the field alone, which is
+                # the normal case for "Add Existing".
+                values[key] = path
                 mount_point = path
                 err = self.check_upon(path, tray.upons)
                 if err:

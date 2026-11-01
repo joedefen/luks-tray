@@ -478,3 +478,55 @@ def test_the_icon_table_pairs_every_nickname_with_a_shipped_shield():
     for base in table.bases:
         name = f'{base}-v{table.version}.svg'
         assert resources.files('luks_tray.resources').joinpath(name).is_file(), name
+
+
+# --- the container rows ----------------------------------------------------
+
+
+def file_container(upon='', vital=None):
+    """A crypt *file* container, with the fields the menu line reads."""
+    container = Main.DeviceInfo.make_partition_namespace('tcrypt.img-luks', '64M')
+    container.type = 'crypt'
+    container.uuid = 'salt-abc'
+    container.back_file = '/home/joe/.Vaults/test-only-tcrypt.img'
+    container.upon = upon
+    container.opened = bool(upon)
+    container.vital = vital
+    return container
+
+
+def test_a_mounted_file_container_is_shortened_on_both_halves(qapp, monkeypatch):
+    monkeypatch.setenv('HOME', '/home/joe')
+    instance = menu_builder(qapp, status='unlocked',
+                            containers={'salt-abc': file_container(
+                                upon='/home/joe/Vaults/test-only-tcrypt')})
+
+    texts = menu_texts(instance.update_menu_items())
+
+    # The same home appears twice on the line -- once as the file, once as the
+    # mount point -- and neither half spells it out.
+    assert texts[0] == '▣ ~/.Vaults/test-only-tcrypt.img ~/Vaults/test-only-tcrypt'
+
+
+def test_a_remembered_mount_point_is_bracketed_and_shortened_too(qapp, monkeypatch):
+    monkeypatch.setenv('HOME', '/home/joe')
+    instance = menu_builder(qapp, status='unlocked', containers={
+        'salt-abc': file_container(
+            vital=SimpleNamespace(upon='/home/joe/Vaults/test-only-tcrypt'))})
+
+    texts = menu_texts(instance.update_menu_items())
+
+    # Not mounted, so the remembered mount point is bracketed -- and still
+    # abbreviated, because a line full of /home/<user> reads badly.
+    assert texts[0] == '▽ ~/.Vaults/test-only-tcrypt.img [~/Vaults/test-only-tcrypt]'
+
+
+def test_a_container_with_no_mount_point_shows_only_its_file(qapp, monkeypatch):
+    monkeypatch.setenv('HOME', '/home/joe')
+    instance = menu_builder(qapp, status='unlocked',
+                            containers={'salt-abc': file_container()})
+
+    texts = menu_texts(instance.update_menu_items())
+
+    # No empty brackets around a mount point that was never chosen.
+    assert texts[0] == '▽ ~/.Vaults/test-only-tcrypt.img'

@@ -56,6 +56,7 @@ from luks_tray.dialogs import (CommonDialog, MasterPasswordDialog,
                                MountDeviceDialog, MountFileDialog,
                                OptionsDialog)
 from luks_tray.LuksOps import (generate_uuid_for_file_path,
+                                get_container_identity,
                                 get_luks_uuid_for_file, run_cmd,
                                 run_cmd_capture, run_unmount, sudo_cmd,
                                 sudo_run)
@@ -449,6 +450,40 @@ class LuksTray():
             self.history.ensure_container(container)
         self.history.save()
 
+    def identify_file_containers(self):
+        """ Key a loop-backed container by the container *inside* the file.
+
+            `parse_lsblk()` keys one by the UUID of its loop device, which is
+            the file's own identity only while `blkid` can read a header there.
+            A TrueCrypt/VeraCrypt header is encrypted, so `lsblk` reports
+            nothing for the loop device and the entry arrived keyed by `None`,
+            while the history keys that same file by its salt (see
+            `get_container_identity()`). The menu then listed the container
+            twice -- once from `lsblk`, once as a history stand-in built by
+            `history_file_container()` -- and `merge_containers_history()`
+            recorded the `None` key as a history entry of its own. Several such
+            containers also collided under the single `None` key, so all but
+            one of them vanished from the menu.
+
+            Re-keying before the history is merged makes the two agree, which
+            is what removes the duplicate. It costs one `blkid` per poll, and
+            only for a container `lsblk` could not identify at all.
+        """
+        identified = {}
+        for uuid, container in self.containers.items():
+            identity = ''
+            if not uuid and container.back_file:
+                identity = get_container_identity(container.back_file)
+            if not identity:
+                # Nothing to improve on: a container with a UUID keeps it, and
+                # one whose file cannot be read stays visible under its own key
+                # rather than disappearing from the menu.
+                identified[uuid] = container
+                continue
+            container.uuid = identity
+            identified[identity] = container
+        self.containers = identified
+
     def history_file_container(self, vital):
         """ The stand-in container for a history entry lsblk did not report.
 
@@ -498,6 +533,7 @@ class LuksTray():
             if self.history.status in ('unlocked', 'clear_text'):
                 self.update_mounts()
                 self.containers = self.lsblk.parse_lsblk()
+                self.identify_file_containers()
                 self.merge_containers_history()
                 # add in the containers that are not mounted but in
                 # the history
@@ -576,22 +612,30 @@ class LuksTray():
             separated = False
             idx = -1
             for idx, container in enumerate(self.containers.values()):
-                mountpoint = container.upon
-                if not mountpoint and container.vital:
-                    mountpoint = f'[{container.vital.upon}]'
+                # Two forms of the same path: `upon_path` decides the symbol
+                # ('/'-prefixed means mounted), `mountpoint` is what gets shown.
+                # A mount point that is only remembered is bracketed -- and has
+                # never been '/'-prefixed either, so it reads as closed.
+                upon_path = container.upon
+                if upon_path:
+                    mountpoint = LuksTray.shorten_home(upon_path)
+                elif container.vital and container.vital.upon:
+                    mountpoint = f'[{LuksTray.shorten_home(container.vital.upon)}]'
+                else:
+                    mountpoint = ''
 
                 if idx > 0 and not separated and container.type == 'crypt':
                     actions.append(None)
                     separated = True
 
+                # Both halves of the line are abbreviated the same way: the
+                # menu is a list, not a place for `/home/<user>` twice per row.
                 name = container.name
                 if container.back_file:
-                    name = container.back_file
-                    if name.startswith('/home/'):
-                        name = '~' + name[6:]
+                    name = LuksTray.shorten_home(container.back_file)
 
                 # Determine which emoji/symbol to show
-                if mountpoint.startswith('/'):
+                if upon_path.startswith('/'):
                     emoji = '⧈' if container.readonly else '▣'
                     icon_key = 'ok' if icon_key != 'alert' else icon_key
                 elif container.opened:
@@ -601,11 +645,13 @@ class LuksTray():
                     emoji = '▽'
 
 
-                # Construct menu line text
+                # Construct menu line text. `mountpoint` is empty for a
+                # container that is closed and was never mounted here, and a
+                # trailing space there looks like a truncated row.
                 if emoji == '‼':
                     text = f'{name} CLICK-to-LOCK'
                 else:
-                    text = f'{name} {mountpoint}'
+                    text = f'{name} {mountpoint}'.rstrip()
 
 
                 # Add the emoji-enhanced item; the left click opens the
@@ -1385,6 +1431,26 @@ class LuksTray():
                 return os.path.expanduser(path)
             # ~otheruser — let os.path.expanduser handle it
             return os.path.expanduser(path)
+        return path
+
+    @staticmethod
+    def shorten_home(path):
+        """ The display form of `path`: the real user's home becomes `~`.
+
+            For menu and dialog text only -- anything that mounts, unmounts or
+            compares paths keeps the absolute value. The home used is the one
+            `expand_real_user()` expands `~` back to, so the abbreviation and
+            the expansion always name the same directory.
+        """
+        if not path:
+            return path
+        home = LuksTray.get_real_user_home().rstrip('/')
+        if not home:
+            return path
+        if path == home:
+            return '~'
+        if path.startswith(home + '/'):
+            return '~' + path[len(home):]
         return path
 
 
