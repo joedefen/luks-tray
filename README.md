@@ -18,7 +18,67 @@ Version 3.0.0 (v3) added and enhanced features and improved quality.
 - **Restart from the menu** - The bottom menu entry reads `↺ Restart luks-tray v<version>`, so the running build is visible without leaving the menu [**added in v3**]
 - **A log that explains itself** - `≡ Open Log` pages `debug.log` live, and the entry becomes `≡ Open Log [n errors]` once *this session* has reported a failure, so a dialog that says what failed is one click away from the log that says why. The log starts with a `=== luks-tray v<version> started, pid <pid> ===` line and ends with the matching one [**added in v3**]
 - **Late or restarting panels** - If the bar starts after the applet, or restarts later, the tray icon registers itself with it instead of staying invisible until the applet is restarted [**improved in v3**]
+- **Wayland dialog support** - On niri, sway and the other tiling compositors a dialog is a client, so the compositor decides its size and placement. Every dialog therefore carries one stable `app-id` (`luks-tray`), which a single window rule can match to make the dialogs float, and `--show-window-rules` prints the rule for the current session to paste into the compositor's config. Because sway hides title bars, each dialog also repeats its purpose as a heading inside the dialog itself, so nothing depends on the title bar being visible. See [Wayland tiling compositors](#wayland-tiling-compositors-niri-sway) [**improved in v3**]
 - **Start at login** - The `--svc-*` verbs write, render, enable and manage a `systemd --user` unit for the session. See [Starting at Login](#starting-at-login) [**added in v3**]
+
+## Competitive Analysis (as of November 2026)
+
+This tool exists because of a specific mismatch, and the date in this heading is
+there because competitor GUIs change. The VeraCrypt GUI was the model: a list of
+containers *you* own, each with a mount point *you* chose, all of it one click
+from the tray. The Linux options at the time were either whole-disk tools that
+happened to accept a file, or GUIs that covered only one container type and
+remembered nothing -- so keeping a handful of file containers in rotation meant
+re-entering a passphrase and a path every time, and no single place ever showed
+what was open.
+
+The use-case this applet is written for: **many ad hoc encrypted file
+containers, mounted and unmounted often, on a desktop or tiling WM that gives
+per-container state nowhere else.** Judged against that, the alternatives fall
+into four groups. This is not a benchmark; it is what the author compared, and
+what each group still can and cannot do. Corrections are welcome as issues.
+
+| Group | Examples | Strong at | Stops where it matters here |
+| --- | --- | --- | --- |
+| **Desktop file managers and auto-mount** | GNOME Files (Nautilus), Dolphin, Thunar, PCManFM, GNOME Disks -- all on udisks2 | Everything a desktop is expected to do: removable media, whole disks, system partitions; a LUKS partition is usually one click and one passphrase prompt, and some will loop-mount a LUKS image too | The passphrase is prompted per mount, never remembered for an ad-hoc container; the mount point is udisks2's choice under `/media/…` or `/run/media/…` and is not remembered per container; a container that is *opened but not mounted* looks like nothing at all; and TrueCrypt/VeraCrypt file containers are outside the model entirely. It is also a file manager, not a posture indicator: you learn the state of your vaults by browsing |
+| **VeraCrypt's own GUI** | VeraCrypt (TrueCrypt's successor; TrueCrypt mode for old volumes) | The closest thing to this tool's workflow, and its direct inspiration: favourites that pin a mount point, a tray presence, container creation | VeraCrypt volumes (and TrueCrypt ones in TrueCrypt mode) only -- a LUKS container cannot be opened at all, as far as this author knows. It also carries no master password of its own, so it can remember *where* a container mounts but not *how to open* it, and it is not packaged by most distros, so it arrives out of band |
+| **`cryptsetup` front-ends** | zuluCrypt/zuluMount, cryptmount, plain `cryptsetup` in a terminal | zuluCrypt is the closest open-source match on format coverage: LUKS, TrueCrypt and VeraCrypt in one GUI, with a volume list | No master password over the stored entries, no per-container mount-point history in the form this tool uses, and no overall posture in the tray. The CLI tools it wraps are excellent and fully scriptable -- which is exactly why this applet calls them, rather than replacing them |
+| **Transparent folder encryption** | Plasma Vault, GNOME Vaults, Cryptomator (gocryptfs/cryfs underneath) | A folder that is simply *there* once unlocked, with no mount step to forget | A different problem: these encrypt a directory in place, usually through FUSE, and are not a single container file you can copy, move, hand to another machine, or open with plain `cryptsetup` elsewhere. For "my documents directory is encrypted" they are the better answer |
+
+What is left, and why this tool is not redundant:
+
+- **A master password over the history.** The history file stores passphrases
+  *and* mount preferences under one master password, entered once per session
+  (or not stored at all, if you set none). A file manager never stores a
+  container passphrase and VeraCrypt's GUI stores no secret at all, so this is
+  the feature that most distinguishes the tool -- and it is deliberately a
+  *single* file you can delete to revoke everything.
+- **Mount points are pinned and remembered.** Each container carries its last
+  mount point, the default root is a single configurable, validated
+  `auto_mount_folder` (`~/Vaults`), and both are visible in the dialog before
+  the mount happens. VeraCrypt favourites do the same for VeraCrypt files; no
+  file manager does it for a LUKS container.
+- **State, not just availability.** The shield colour is a posture: locked,
+  mounted, read-only, and the `‼` case of *opened but not mounted* -- a volume
+  whose passphrase succeeded and whose filesystem did not get mounted, which is
+  both leaked and lost. A file manager has no place to report that.
+- **One list, one set of verbs.** A discovered LUKS partition, a LUKS file and a
+  legacy TrueCrypt/VeraCrypt file appear side by side and are mounted,
+  unmounted and inspected by the same two clicks. zuluCrypt is the only other
+  entry above that spans those formats.
+- **No daemon and no root GUI.** It is a tray process plus narrowly scoped
+  `sudo` rules (see [Requirements](#requirements)); the privileged work is the
+  same `cryptsetup`/`mount`/`umount` a shell would run, with no udisks2 policy
+  in between and no privilege boundary to learn.
+
+Where a different tool is the right answer: whole-disk and `/home` encryption
+(the file managers, `systemd-cryptsetup`, or your distro's installer); hidden or
+system VeraCrypt volumes, or a non-default PIM (VeraCrypt itself -- see
+[Limitations](#limitations)); a directory that should simply be encrypted all
+the time (the folder-encryption tools); and anything scripted or headless
+(`cryptsetup` directly).
+This is also a one-author project without a security audit or distro packages,
+which is a real difference from every group above -- judge it accordingly.
 
 ## Quick Start
 
