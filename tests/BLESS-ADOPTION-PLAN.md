@@ -140,8 +140,9 @@ version read from the module; `tests/inspect_dist.py` accepts that pair;
 *All checks passed* under the pinned selection; `git ls-files deploy` empty;
 link checker 282 links in 16 files, all resolve.
 
-And `lt-venv/bin/python ./bless` at commit `79f16d6` runs as designed and stops
-exactly where this plan says it must:
+And `lt-venv/bin/python ./bless` at commit `79f16d6` ran as designed and stopped
+exactly where this plan said it must — this is the *before* picture; Phase 2
+closes with the after one:
 
 ```
 [bless] luks-tray 3.0.0
@@ -159,10 +160,13 @@ coverage report it printed is the measure of the job ahead — **1893
 statements** across the package, of which `Main.py` (550) and
 `dialogs/Common.py` (247) are the two largest targets.
 
-## Phase 2 — the test suite (open)
+## Phase 2 — the test suite (done: 274 tests, 54.1% of 1893 statements)
 
-This is the whopper: `bless` will not pass without it, and CI has nothing to
-run. The raw material already exists as the throwaway harnesses in `/tmp`
+**Done.** Everything planned below is in the tree, and the whole `./bless`
+pipeline runs end to end on it — the transcript is at the end of this section.
+
+This was the whopper: `bless` would not pass without it, and CI had nothing to
+run. The raw material already existed as the throwaway harnesses in `/tmp`
 (`luks_fix8_check.py`, `luks_fix10_check.py`, `luks_fix11_check.py`,
 `luks_fix16_check.py`, `luks_cleanup_check.py`, `luks_split_check.py`), written
 to prove one fix each and then abandoned; they become assertions here instead of
@@ -201,6 +205,53 @@ being rewritten from scratch.
   identity derivation, the exact `test`/`publish`/`quit` prompt handling, the
   `X.Y.Z.99.N` arithmetic, and `branch_plan`'s refusals. `bless` is loaded by
   path (`importlib`) because it is a script, not a module.
+
+**What landed.** Nine modules plus `conftest.py` — `test_utils.py`,
+`test_initool.py`, `test_history.py`, `test_luksops.py`,
+`test_main_helpers.py`, `test_dialogs.py`, `test_menu.py`, `test_metadata.py`,
+`test_repo_hygiene.py` and `test_bless.py` — 274 tests in 1.8 s. Per module:
+`Utils` 57.9%, `IniTool` 62.8%, `History` 93.8%, `LuksOps` 96.9%,
+`dialogs/Common.py` 85.5%, `DeviceInfo` 14.5%, `Main.py` 44.6%.
+
+Two real defects fell out of writing them (medium #12 in
+[`AUDIT.md`](../tests/AUDIT.md)), both on error paths: `run_unmount()` called
+`QMessageBox.set_title`, which does not exist, so the "device busy" dialog
+raised `AttributeError` instead of appearing; and `hide_progress()` tested
+`hasattr()` on an attribute that `__init__` always sets, so the `finally:` calls
+in the dialogs' unmount handlers hit `'NoneType' has no attribute 'hide'`.
+
+**Still uncovered, and why the floor waits.** `DeviceInfo`'s `lsblk`/`/sys`
+parsing, the menu-building and refresh half of `Main.py` (`update_menu()`,
+`update_menu_items()`, `update_history()`, `busy_operation()`) and the three
+dialog subclasses (`MasterPasswordDialog`, `MountDeviceDialog`,
+`MountFileDialog`) are the largest remaining statements and the least pure: the
+subclasses need a stand-in tray with a history, containers and a
+`busy_operation()` context manager. The `fail_under` floor goes in once they are
+covered, so it is a ratchet rather than a number chosen to make tonight's build
+green.
+
+**Verified — the whole gate, end to end** (`lt-venv/bin/python ./bless`, answer
+`quit`):
+
+```
+[bless] luks-tray 3.0.0
+[preflight] clean tree at dd0ea7e on dev
+[index] luks-tray 3.0.0 is not on PyPI (6 versions exist; latest is 2.0.5)
+[gate] lint / compile / tests  → 274 passed, 54.1% coverage
+[build] build/bless-3.0.0 (wiped first) → luks_tray-3.0.0.tar.gz + .whl
+[inspect] both files against tests/inspect_dist.py
+[check] twine check --strict → PASSED, both
+[smoke] installed the wheel into build/bless-3.0.0/smoke-venv
+[smoke] installed wheel reports luks-tray 3.0.0
+[branch] would fast-forward main to dd0ea7e
+====> Enter test or publish or quit:  (quit)
+[stop] nothing was tagged, uploaded or pushed
+```
+
+The smoke stage is worth reading twice: it pip-installed the built wheel into a
+throwaway virtualenv — pulling real PyQt6 — and ran `luks-tray --version` there,
+which is the only way to prove that the console script, the packaged SVGs and
+the version line agree in an installation rather than in the source tree.
 
 ## Phase 3 — CI (open)
 
