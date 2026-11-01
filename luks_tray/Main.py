@@ -228,11 +228,28 @@ class LuksTray():
             prints the same two lists. Lookup is `shutil.which()`, so a PATH
             that lacks /usr/sbin reports `cryptsetup` as missing even though it
             is installed -- run the tray the way the desktop session would.
+
+            The list is meant to be *complete*, not minimal: a command left off
+            it does not go away, it just fails later, on some unlucky path,
+            with a message that no longer says "install me". Three entries look
+            superfluous and are not:
+
+            - `sudo` is never looked up by the app itself -- `sudo_cmd()` and
+              `sudo_run()` prepend it -- so without this check its absence
+              would surface as a FileNotFoundError from subprocess rather than
+              as a readable "please install sudo";
+            - `blkid` is only a read-only probe, but it is what keeps a file
+              container's history entry alive: without it the LUKS UUID cannot
+              be re-derived and the entry (password, mount point) is purged;
+            - `touch` and `chown` sit on the two paths that are rarely re-run:
+              a newly created file container, and the repair of a root-owned
+              vault root left behind by an older `sudo mkdir -p`.
         """
         utilities = [
-            'lsblk', 'cryptsetup', 'rmdir',
-            'mount', 'umount', 'bindfs', 'losetup',
-            'fuser', 'truncate', 'mkfs.ext4',
+            'sudo', 'lsblk', 'blkid', 'cryptsetup', 'losetup',
+            'mkdir', 'rmdir', 'touch', 'chown',
+            'mount', 'umount', 'bindfs', 'fuser',
+            'truncate', 'mkfs.ext4',
         ]
         found, missing = [], []
         for util in utilities:
