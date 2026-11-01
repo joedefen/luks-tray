@@ -9,9 +9,11 @@
     what `status` reports ('clear_text', 'unlocked', 'locked').
 
     Writes are atomic (temp file + rename) and 0600. On restore the entries are
-    re-checked against the system: a file container whose LUKS UUID no longer
+    re-checked against the system: a file container whose identity no longer
     matches the file on disk is dropped, so a replaced or deleted crypt file
-    cannot silently inherit another volume's saved password.
+    cannot silently inherit another volume's saved password. "Identity" is the
+    LUKS UUID, or the salt of a TrueCrypt/VeraCrypt header, which has no UUID
+    anything can read (see ContainerType.py).
 """
 # pylint: disable=invalid-name,broad-exception-caught
 # pylint: disable=line-too-long,too-many-instance-attributes
@@ -26,6 +28,7 @@ from types import SimpleNamespace
 import hashlib
 import base64
 from cryptography.fernet import Fernet
+from luks_tray.ContainerType import salt_identity
 from luks_tray.Utils import prt, prt_once, PROBE_TIMEOUT
 
 class HistoryClass:
@@ -46,11 +49,11 @@ class HistoryClass:
     ENCRYPTED_VERSION = 2
     KDF_ITERATIONS = 600_000  # OWASP-style floor for PBKDF2-HMAC-SHA256
     KDF_SALT_BYTES = 16
-    # Upper bound for the `blkid` result cache keyed on (path, mtime, size),
-    # see _probe_back_file_uuid(). One entry per backing file the history
+    # Upper bound for the identity cache keyed on (path, mtime, size), see
+    # _probe_back_file_identity(). One entry per backing file the history
     # refers to is the normal occupancy; the cap only stops a long-lived tray
     # from accumulating paths that were renamed or deleted.
-    BLKID_CACHE_MAX = 64
+    IDENTITY_CACHE_MAX = 64
 
     def __init__(self, path, master_password=''):
         self.status = None # 'clear_text', 'unlocked', 'locked'
@@ -61,10 +64,11 @@ class HistoryClass:
         self.last_mtime = None
         self.file_existed = False
         self.upons = set() # all known mounts
-        # path -> ((mtime_ns, size), uuid). Filled by _probe_back_file_uuid();
-        # survives _json_data_to_namespaces() so that re-parsing the history
-        # does not shell out to blkid again for unchanged backing files.
-        self._back_file_uuid_cache = {}
+        # path -> ((mtime_ns, size), identity). Filled by
+        # _probe_back_file_identity(); survives _json_data_to_namespaces() so
+        # that re-parsing the history does not shell out to blkid (or re-read
+        # a header salt) again for unchanged backing files.
+        self._back_file_identity_cache = {}
 
     @staticmethod
     def make_ns(uuid):
@@ -72,13 +76,20 @@ class HistoryClass:
         Creates a new SimpleNamespace object to represent a LUKS volume's vital information.
 
         Args:
-            uuid (str): The unique identifier for the LUKS volume.
+            uuid (str): The unique identifier for the volume -- the LUKS UUID,
+                or the salt identity of a TrueCrypt/VeraCrypt file.
+
+        `meta_type` is '' until a container has been opened once: the header
+        type cannot be read out of a file, only asked for (see ContainerType.py
+        and `LuksOps.unlock_container()`), and the answer is remembered here so
+        that the next unlock asks for the right one first.
         """
         return SimpleNamespace(
                 uuid=uuid, # can be full path
                 password='',
                 upon='', # "primary" mount only
                 back_file='', # backing file if any
+                meta_type='', # 'luks', 'tcrypt', or '' if not known yet
                 when=0,  # last update
             )
 
@@ -297,31 +308,15 @@ class HistoryClass:
             return None
         return (info.st_mtime_ns, info.st_size)
 
-    def _probe_back_file_uuid(self, path):
-        """UUID of the LUKS header stored in `path`, or '' if it has none.
+    def _blkid_uuid(self, path):
+        """UUID of the LUKS header in `path`, or None when blkid had no answer.
 
-            `blkid` is an external program and this runs for every history
-            entry with a back_file. `restore()` re-parses the whole history
-            whenever its mtime moves -- which any mount, unmount or newly
-            discovered container causes -- so an uncached probe meant one
-            `blkid` per entry per re-parse, on the Qt main thread.
-
-            The answer can only change when the file's contents change, so it
-            is remembered against (mtime, size): writing, reformatting or
-            truncating the file always moves at least one of them, which is
-            why a stale UUID cannot outlive the data it describes.
-
-            Negative answers are cached too (a back_file that legitimately
-            carries no LUKS header should stop being probed), but *only* when
-            blkid reported it cleanly. A timeout, an unstattable path or an
-            I/O/permission complaint is not an answer: it is left uncached so
-            the next refresh retries instead of purging a valid entry.
+            `''` is a *clean* answer -- "there is no LUKS signature here" --
+            while None means the probe itself failed (a timeout, an unreadable
+            path, no `blkid` installed) and says nothing about the contents.
+            The difference matters to the caller: a disk that was busy for a
+            moment must not cost the user a history entry.
         """
-        stamp = self._file_stamp(path)
-        if stamp is not None:
-            cached = self._back_file_uuid_cache.get(path)
-            if cached is not None and cached[0] == stamp:
-                return cached[1]
         try:
             # The deadline matters here because this runs while the tray is
             # loading history: a back_file on hung media would otherwise stall
@@ -333,29 +328,71 @@ class HistoryClass:
             # Unknown -- not "no UUID". Caching this would permanently purge a
             # perfectly valid entry because a disk was briefly busy.
             prt(f'blkid timed out after {PROBE_TIMEOUT}s: {path}')
-            return ''
+            return None
         except subprocess.CalledProcessError as exce:
             complaint = (exce.stderr or '').strip()
             if complaint:
                 # "cannot open ...: Permission denied", I/O errors and the
                 # like: no verdict about the contents, so no caching.
                 prt(f'blkid failed for {path}: {complaint}')
-                return ''
+                return None
             # blkid exits 2 with no complaint when the file simply has no
             # signature -- a real answer, just an empty one.
-            uuid = ''
+            return ''
         except OSError as exce:  # blkid missing, fork failure, ...
             prt(f'blkid could not run for {path}: {exce}')
-            return ''
-        else:
-            uuid = result.stdout.strip()  # the UUID as a string
+            return None
+        return result.stdout.strip()  # the UUID as a string
+
+    def _probe_back_file_identity(self, path):
+        """ Identity of the container stored in `path`, None if unknown.
+
+            There are two identities, one per header type:
+
+            - LUKS: the UUID `blkid` reads out of the cleartext header -- the
+              same value lsblk reports for the loop device;
+            - TrueCrypt/VeraCrypt: the salt its encrypted header starts with,
+              hashed. blkid answers "no signature" for such a file, which is
+              exactly how that fallback is reached (see ContainerType.py).
+
+            Both change when the container is re-created, which is what the
+            purge check in `_json_data_to_namespaces()` needs, and neither
+            needs the passphrase.
+
+            `blkid` is an external program and this runs for every history
+            entry with a back_file. `restore()` re-parses the whole history
+            whenever its mtime moves -- which any mount, unmount or newly
+            discovered container causes -- so an uncached probe meant one
+            `blkid` per entry per re-parse, on the Qt main thread.
+
+            The answer can only change when the file's contents change, so it
+            is remembered against (mtime, size): writing, reformatting or
+            truncating the file always moves at least one of them, which is
+            why a stale identity cannot outlive the data it describes.
+
+            Negative answers are cached too (a back_file that legitimately
+            carries no header should stop being probed), but *only* when the
+            probe answered cleanly. A timeout, an unstattable path or an
+            I/O/permission complaint is not an answer: None is returned
+            uncached, and the caller keeps the entry.
+        """
+        stamp = self._file_stamp(path)
         if stamp is not None:
-            if len(self._back_file_uuid_cache) >= self.BLKID_CACHE_MAX:
+            cached = self._back_file_identity_cache.get(path)
+            if cached is not None and cached[0] == stamp:
+                return cached[1]
+        identity = self._blkid_uuid(path)
+        if identity is None:
+            return None
+        if not identity:
+            identity = salt_identity(path)
+        if stamp is not None:
+            if len(self._back_file_identity_cache) >= self.IDENTITY_CACHE_MAX:
                 # Rebuilt lazily, so dropping everything is cheaper than
-                # maintaining an LRU: worst case one blkid per live entry.
-                self._back_file_uuid_cache.clear()
-            self._back_file_uuid_cache[path] = (stamp, uuid)
-        return uuid
+                # maintaining an LRU: worst case one probe per live entry.
+                self._back_file_identity_cache.clear()
+            self._back_file_identity_cache[path] = (stamp, identity)
+        return identity
 
     def _json_data_to_namespaces(self, entries):
         """
@@ -381,8 +418,12 @@ class HistoryClass:
                 if key in entry:
                     legit[key] = entry[key]
             ns = SimpleNamespace(**legit)
-            if ns.back_file and self._probe_back_file_uuid(ns.back_file) != uuid:
-                purges.append(uuid)
+            if ns.back_file:
+                # None means the probe could not answer; only a real, different
+                # identity is a reason to forget a password.
+                identity = self._probe_back_file_identity(ns.back_file)
+                if identity is not None and identity != uuid:
+                    purges.append(uuid)
             self.vitals[uuid] = ns
             if ns.upon:
                 self.upons.add(ns.upon)

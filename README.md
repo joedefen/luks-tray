@@ -1,6 +1,6 @@
 # LUKS Tray
 
-**luks-tray** is a QT-based tray utility for managing ad hoc LUKS-encrypted files: mount and unmount with ease from your Linux desktop environment.
+**luks-tray** is a QT-based tray utility for managing ad hoc LUKS-encrypted files: mount and unmount with ease from your Linux desktop environment. Legacy TrueCrypt/VeraCrypt *file* containers can be added and managed the same way -- see [Limitations](#limitations) for exactly how far that goes.
 
 Version 3.0.0 (v3) added and enhanced features and improved quality.
 
@@ -10,6 +10,7 @@ Version 3.0.0 (v3) added and enhanced features and improved quality.
 - **Visual status indicators** - Symbols mounted (▣), mounted read-only (⧈), unmounted (▽), and open-but-unmounted (‼) states
 - **Options dialog** - `⚙ Options…` edits the settings below and reaches the master password; the fixed entries carry a symbol too (`✦` create, `✚` add, `⚙` options, `☓` exit, `↺` restart) [**added in v3**]
 - **File container support** - Add, create, and manage LUKS file containers from the tray.
+- **TrueCrypt/VeraCrypt file containers** - `✚ Add Existing Crypt File` also opens a legacy TrueCrypt or VeraCrypt container. Which header it has is worked out from `cryptsetup`'s answer rather than asked for, the history keys such an entry by its header salt (there is no readable UUID), and the next unlock asks for the type that worked [**added in v3**]
 - **Mount point history** - Remembers previous mount locations for convenience and clarity
 - **Background monitoring** - Automatically detects newly inserted devices with LUKS containers
 - **Password management** - Optional master password to encrypt stored credentials
@@ -62,6 +63,7 @@ Notes:
 - the fixed entries at the bottom carry a symbol: `✦` create a new crypt file, `✚` add an existing one, `⚙` options, `☓` exit, `↺` restart
 - LUKS devices must be created with other tools such as Gnome Disks.
 - LUKS files are only automatically detected in its history; when you add or create new LUKS files, they are added to the history.
+- A TrueCrypt/VeraCrypt file is managed like a LUKS file once added, except that it can never be *discovered*: its header is encrypted, so nothing can tell it apart from random data without the password. Add it once with `✚`, and the history carries it from then on.
 - When creating LUKS files, the default folder is `~/.Vaults`.
 - When mounting LUKS files for the first time, the default folder is `~/Vaults/{basename}` where `{basename}` is the basename of the encrypted LUKS file (less any `.luks`, `.luks2`, or `.crypt` suffix).
 
@@ -97,7 +99,8 @@ Settings and data files are stored in `~/.config/luks-tray/`:
 
 - **Not for whole disk encryption** - Designed for fixed and removable partition and file containers. Thus, excludes system mount points like `/`, `/home`, `/var` to avoid interfering with boot-time encrypted volumes.
 - **No udisks2 integration** - Manages its own mount/unmount state. Mixing mounts/unmounts desktop auto-mounting tools may not produce the best results.
-- **Loop device requirement** - File containers require `lsblk` to show them as loop devices (standard on most distros)
+- **Loop device requirement** - LUKS file containers are found through their loop device, so `lsblk` must report one (standard on most distros). A TrueCrypt/VeraCrypt file has no loop device -- `cryptsetup` reads the file itself -- and is carried by the history instead.
+- **TrueCrypt/VeraCrypt: add-only, default PIM** - These are supported for *legacy file containers*: they must be added by hand (no discovery, see above) and this applet never creates one. Only the default PIM (0) is used, so a container created with a non-default PIM is refused with the same message as a wrong password, and hidden or system (whole-disk) volumes are out of scope.
 - **Single filesystem focus** - Containers with multiple filesystems are out of scope of this tool and get very limited support (i.e., mostly handling only the first filesystem).
 ---
 ## Requirements

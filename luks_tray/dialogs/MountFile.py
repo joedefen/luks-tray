@@ -8,13 +8,12 @@ import os
 
 from PyQt6.QtWidgets import QCheckBox
 
+from luks_tray.ContainerType import TCRYPT
 from luks_tray.Utils import prt
 from luks_tray.DeviceInfo import DeviceInfo
 from luks_tray.dialogs.Common import CommonDialog
-from luks_tray.LuksOps import (generate_uuid_for_file_path,
-                                get_luks_uuid_for_file,
-                                mount_luks_container, run_cmd, run_unmount,
-                                sudo_cmd)
+from luks_tray.LuksOps import (get_container_identity, mount_luks_container,
+                                run_cmd, run_unmount, sudo_cmd)
 
 
 class MountFileDialog(CommonDialog):
@@ -60,7 +59,13 @@ class MountFileDialog(CommonDialog):
                                  '', 48, field_type='checkbox')
             if container.size_str:
                 self.add_line(f'Size: {container.size_str}')
-            if container.uuid:
+            if vital.meta_type == TCRYPT:
+                # Nothing readable would be printed as a UUID here: a
+                # TrueCrypt/VeraCrypt header is encrypted, so the history key
+                # is its salt (see ContainerType.py). Say what the file is
+                # instead of showing a hash the user cannot check anywhere.
+                self.add_line('Type: TrueCrypt/VeraCrypt')
+            elif container.uuid:
                 self.add_line(f'UUID: {container.uuid}')
 
             self.add_push_button('OK', self.mount_file, container.uuid)
@@ -160,9 +165,10 @@ class MountFileDialog(CommonDialog):
             (`check_upon()` against `tray.upons`) and the size in MiB; the
             overwrite checkbox is only consulted when it is present.
 
-            After a successful mount the history entry is keyed by the LUKS
-            UUID *inside* the file, because that is what `restore()` verifies
-            on every load.
+            After a successful mount the history entry is keyed by the
+            identity of the container *inside* the file -- its LUKS UUID, or
+            the salt of a TrueCrypt/VeraCrypt header -- because that is what
+            `restore()` verifies on every load.
         """
 
         tray, container = self.tray, None
@@ -306,14 +312,17 @@ class MountFileDialog(CommonDialog):
         # update history with new values if mount worked
         #
         # A new/added file still has uuid=None here. File entries are keyed by
-        # the LUKS UUID inside the file (see get_luks_uuid_for_file), so look
-        # it up now that the file exists; the path-derived UUID is a
-        # best-effort fallback only (such an entry is culled on the next
-        # restore if the real UUID cannot be verified).
+        # the identity of the container inside the file (see
+        # get_container_identity), so look it up now that the file exists; the
+        # path-derived UUID is a best-effort fallback only (such an entry is
+        # culled on the next restore if the real identity cannot be found).
         if not uuid:
-            uuid = (container.uuid or get_luks_uuid_for_file(back_file)
-                    or generate_uuid_for_file_path(back_file))
-        tray.update_history(uuid, values, back_file=back_file)
+            uuid = container.uuid or get_container_identity(back_file)
+        # `container.meta_type` was set by mount_luks_container(): which type
+        # actually opened the file is the only way to learn it, and recording
+        # it makes the next unlock ask for that one first.
+        tray.update_history(uuid, values, back_file=back_file,
+                            meta_type=getattr(container, 'meta_type', ''))
 
         tray.update_menu()
         self.accept()

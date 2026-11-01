@@ -25,6 +25,7 @@ import traceback
 
 from PyQt6.QtWidgets import QMessageBox
 
+from luks_tray.ContainerType import CONTAINER_TYPES, LUKS, TCRYPT, salt_identity
 from luks_tray.Utils import prt, CMD_TIMEOUT, PROBE_TIMEOUT, FORMAT_TIMEOUT, TIMEOUT_RC
 
 
@@ -52,6 +53,22 @@ def get_luks_uuid_for_file(file_path):
     rc, stdout, _stderr = run_cmd_capture(
             ['blkid', '-o', 'value', '-s', 'UUID', file_path])
     return stdout.strip() if rc == 0 else ''
+
+def get_container_identity(file_path):
+    """ The history key for the container stored in `file_path`.
+
+        A LUKS file is keyed by the UUID inside it -- the same value
+        HistoryClass re-checks on restore. A TrueCrypt/VeraCrypt file has no
+        such UUID (its header is encrypted), so it is keyed by its salt; see
+        ContainerType.py. The path-derived UUID is the last resort: nothing
+        re-derives it, so such an entry is dropped on the next restore rather
+        than silently inheriting another volume's password.
+    """
+    if not file_path:
+        return ''
+    return (get_luks_uuid_for_file(file_path)
+            or salt_identity(file_path)
+            or generate_uuid_for_file_path(file_path))
 
 def sudo_cmd(args, errs=None, input_str=None, timeout=None):
     """ run sudo -n {args}; the -n will avoid prompting for a
@@ -212,19 +229,74 @@ def run_unmount(mount_point: str, busy_warns: set) -> str | None:
 ####################################################
 # LUKS Primitives
 ####################################################
-def _unlock_luks(device_path, password, luks_device, readonly=False):
-    """Common LUKS unlock logic"""
+def _open_argv(device_path, luks_device, readonly, meta_type):
+    """ The `cryptsetup open` command for one declared header type. """
+    args = ['cryptsetup', 'open', '--type', meta_type]
+    if meta_type == TCRYPT:
+        # A TCRYPT header carries a PIM. cryptsetup's "use the default
+        # iteration count" is 0, which is also the only thing a
+        # TrueCrypt-era container has, and a wrong PIM is reported exactly
+        # like a wrong password -- so passing 0 is safe for every container
+        # this applet creates and for the legacy ones it is aimed at.
+        args += ['--veracrypt-pim', '0']
+    if readonly:
+        args.append('--readonly')
+    return args + ['--key-file', '-', device_path, luks_device]
+
+
+def _unlock_luks(device_path, password, luks_device, readonly=False,
+                 meta_type=LUKS):
+    """ One `cryptsetup open` attempt, for one declared header type. """
     # No "already unlocked?" short-circuit here on purpose. It used to be
     # `if hasattr(self, 'opened') and self.opened`, but `self` was the
     # dialog, which never defines `opened`, so the test never fired.
     # Making it live (e.g. "the mapper path exists") would skip the
     # password check and mount a volume somebody else has open, so a
     # repeat `cryptsetup open` is left to fail with its own message.
-    args = ['cryptsetup', 'open', '--type', 'luks']
-    if readonly:
-        args.append('--readonly')
-    args += ['--key-file', '-', device_path, luks_device]
-    return sudo_cmd(args, input_str=password)
+    return sudo_cmd(_open_argv(device_path, luks_device, readonly, meta_type),
+                    input_str=password)
+
+
+def unlock_container(device_path, password, luks_device, readonly=False,
+                     meta_type=''):
+    """ Open a container, asking for the declared type first.
+
+        Returns `(err, used_type)`, where `used_type` is the type that opened
+        the container (or the last one tried when nothing did).
+
+        The type cannot be read out of the file -- a LUKS header is cleartext,
+        a TrueCrypt/VeraCrypt one is encrypted (see ContainerType.py) -- so it
+        is asked for, and the *failure* decides whether the other type is
+        worth a turn:
+
+        - rc=1 is cryptsetup's "is not a valid LUKS device". That is a
+          deterministic verdict about the header, so the same password is
+          handed to `--type tcrypt` next;
+        - anything else (rc=2 "no key available with this passphrase", a
+          timeout, a missing device node) is about the password or the system,
+          and a second attempt would only replace a useful message with a
+          confusing one.
+
+        `meta_type=''` means "not known yet", which starts with LUKS: that is
+        what every container this applet creates is, and rc=1 makes the
+        fallback to TCRYPT cheap.
+    """
+    first = meta_type if meta_type in CONTAINER_TYPES else LUKS
+    order = [first] + [kind for kind in CONTAINER_TYPES if kind != first]
+    failure, tried = '', first
+    for kind in order:
+        tried = kind
+        argv = ['sudo', '-n'] + _open_argv(device_path, luks_device, readonly,
+                                           kind)
+        rc, stdout, stderr = run_cmd_capture(argv, input_str=password)
+        if rc == 0:
+            return None, kind
+        # Same shape run_cmd() gives every other failure, so the dialog shows
+        # this one the same way.
+        failure = f"FAIL: {' '.join(argv)}: {stdout} {stderr} [rc={rc}]"
+        if rc != 1:
+            return failure, tried
+    return failure, tried
 
 
 def _mount_manual(tray, mapper_path, upon, do_bindfs=False, readonly=False):
@@ -267,7 +339,7 @@ def _setup_loop_device(container):
 ####################################################
 def mount_luks_container(tray, container, password, upon=None, luks_device=None,
                         readonly=False, luks_file=None, size=None,
-                        dot_vault_dir=None):
+                        dot_vault_dir=None, meta_type=''):
     """
     Unified function to mount any LUKS container (device or file).
 
@@ -281,6 +353,12 @@ def mount_luks_container(tray, container, password, upon=None, luks_device=None,
         size: Size for new file creation
         dot_vault_dir: directory new crypt files default to (dialog's
             ``~/.Vaults``); only used when creating a container
+        meta_type: 'luks', 'tcrypt', or '' when it is not known yet (a new
+            file, or one added before this was recorded). '' falls back to
+            `container.meta_type`, which is where the dialog found it. Ignored
+            for a file that is being created: that one is always LUKS2. The
+            type that actually opened the container is stored back on
+            `container.meta_type`, which is how the dialog learns it.
     """
     if not upon:
         # This function reports failure by returning a string (callers do
@@ -333,8 +411,19 @@ def mount_luks_container(tray, container, password, upon=None, luks_device=None,
                 if err:
                     return err
                 needs_filesystem = True
+                # `luksFormat --type luks2` just wrote the header, so the file
+                # is LUKS whatever an earlier container at this path was.
+                meta_type = LUKS
+            else:
+                # Nothing in the file says which type it is (see
+                # ContainerType.py), so fall back to what the history
+                # remembered the last time it was opened.
+                meta_type = meta_type or getattr(container, 'meta_type', '')
         else:
             # Handle device container setup
+            # Only LUKS devices are ever discovered (see DeviceInfo), so there
+            # is nothing to ask here.
+            meta_type = LUKS
             luks_device = luks_device or f'{container.name}-luks'
             device_path = f'/dev/{container.name}'
             needs_filesystem = False
@@ -346,9 +435,13 @@ def mount_luks_container(tray, container, password, upon=None, luks_device=None,
                     return err
 
         # Manual mounting always: unlock with cryptsetup, then mount manually
-        err = _unlock_luks(device_path, password, luks_device, readonly=readonly)
+        err, meta_type = unlock_container(device_path, password, luks_device,
+                                          readonly=readonly, meta_type=meta_type)
         if err:
             return err
+        # The dialog copies this into the history entry, so the next attempt
+        # asks for the type that worked instead of rediscovering it.
+        container.meta_type = meta_type
 
         mapper_path = f'/dev/mapper/{luks_device}'
 

@@ -53,6 +53,7 @@ class DeviceInfo:
             parent=None,    # a partition
             filesystems=[],        # child file systems
             back_file='', # backing file
+            meta_type='', # 'luks', 'tcrypt', or '' if not known yet
             vital=None, # history if any
             readonly=False, # whether readonly
             )

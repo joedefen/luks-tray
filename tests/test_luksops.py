@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from luks_tray import LuksOps
+from luks_tray.ContainerType import LUKS, TCRYPT
 from luks_tray.LuksOps import (
     _as_text,
     _mount_manual,
@@ -29,6 +30,7 @@ from luks_tray.LuksOps import (
     _unlock_luks,
     ensure_dir,
     generate_uuid_for_file_path,
+    get_container_identity,
     get_luks_uuid_for_file,
     mount_luks_container,
     run_cmd,
@@ -36,6 +38,7 @@ from luks_tray.LuksOps import (
     run_unmount,
     sudo_cmd,
     sudo_run,
+    unlock_container,
 )
 from luks_tray.Utils import TIMEOUT_RC
 
@@ -69,6 +72,31 @@ def test_get_luks_uuid_for_file_reports_nothing_when_blkid_fails(monkeypatch):
     monkeypatch.setattr(LuksOps, 'run_cmd_capture',
                         lambda *a, **k: (2, '', 'bad file'))
     assert get_luks_uuid_for_file('/vaults/a.luks') == ''
+
+
+def test_the_identity_of_a_luks_file_is_its_uuid(monkeypatch):
+    monkeypatch.setattr(LuksOps, 'get_luks_uuid_for_file', lambda _path: 'UUID-1')
+    monkeypatch.setattr(LuksOps, 'salt_identity', lambda _path: 'salt-x')
+    assert get_container_identity('/vaults/a.luks') == 'UUID-1'
+
+
+def test_the_identity_of_an_encrypted_header_is_its_salt(monkeypatch):
+    monkeypatch.setattr(LuksOps, 'get_luks_uuid_for_file', lambda _path: '')
+    monkeypatch.setattr(LuksOps, 'salt_identity', lambda _path: 'salt-x')
+    assert get_container_identity('/vaults/a.crypt') == 'salt-x'
+
+
+def test_the_identity_falls_back_to_the_path(monkeypatch):
+    monkeypatch.setattr(LuksOps, 'get_luks_uuid_for_file', lambda _path: '')
+    monkeypatch.setattr(LuksOps, 'salt_identity', lambda _path: '')
+    assert get_container_identity('/vaults/a.bin') == (
+        generate_uuid_for_file_path('/vaults/a.bin'))
+
+
+def test_the_identity_of_an_empty_path_is_empty(monkeypatch):
+    monkeypatch.setattr(LuksOps, 'salt_identity',
+                        lambda _path: pytest.fail('nothing to read'))
+    assert get_container_identity('') == ''
 
 
 def test_run_cmd_returns_none_on_success():
@@ -328,6 +356,99 @@ def test_unlock_can_be_readonly(monkeypatch):
     assert '--readonly' in seen[0]
 
 
+def test_unlock_of_a_tcrypt_header_asks_for_that_type_and_a_zero_pim(monkeypatch):
+    seen = []
+    monkeypatch.setattr(LuksOps, 'sudo_cmd',
+                        lambda args, errs=None, input_str=None, timeout=None:
+                        seen.append(args) or None)
+    assert _unlock_luks('/vaults/a.crypt', 'pw', 'a.crypt-luks',
+                        meta_type=TCRYPT) is None
+    assert seen[0] == ['cryptsetup', 'open', '--type', 'tcrypt',
+                       '--veracrypt-pim', '0', '--key-file', '-',
+                       '/vaults/a.crypt', 'a.crypt-luks']
+
+
+# --- choosing the header type ----------------------------------------------
+
+
+def fake_open(monkeypatch, answers):
+    """ Answer successive `cryptsetup open` runs from `{type: (rc, stderr)}`.
+
+        Returns the list of types that were actually asked for, which is the
+        whole point of these tests: which type gets a turn, and how many.
+    """
+    calls = []
+
+    def fake(argv, input_str=None, timeout=None):
+        kind = argv[argv.index('--type') + 1]
+        calls.append(kind)
+        rc, stderr = answers[kind]
+        return rc, '', stderr
+
+    monkeypatch.setattr(LuksOps, 'run_cmd_capture', fake)
+    return calls
+
+
+def test_unlock_container_opens_luks_first_when_the_type_is_unknown(monkeypatch):
+    calls = fake_open(monkeypatch, {'luks': (0, '')})
+    assert unlock_container('/vaults/a.luks', 'pw', 'a-luks') == (None, LUKS)
+    assert calls == ['luks']
+
+
+def test_not_a_luks_device_is_what_makes_it_try_tcrypt(monkeypatch):
+    calls = fake_open(monkeypatch,
+            {'luks': (1, 'Device /vaults/a.crypt is not a valid LUKS device.'),
+             'tcrypt': (0, '')})
+    assert unlock_container('/vaults/a.crypt', 'pw', 'a-luks') == (None, TCRYPT)
+    assert calls == ['luks', 'tcrypt']
+
+
+def test_a_wrong_password_is_not_retried_as_the_other_type(monkeypatch):
+    calls = fake_open(monkeypatch,
+            {'luks': (2, 'No key available with this passphrase.'),
+             'tcrypt': (0, '')})
+    err, kind = unlock_container('/vaults/a.luks', 'pw', 'a-luks')
+    assert kind == LUKS
+    assert err.startswith('FAIL: sudo -n cryptsetup open --type luks ')
+    assert '[rc=2]' in err
+    assert calls == ['luks']
+
+
+def test_a_remembered_type_is_asked_for_first(monkeypatch):
+    calls = fake_open(monkeypatch, {'tcrypt': (0, '')})
+    assert unlock_container('/vaults/a.crypt', 'pw', 'a-luks',
+                            meta_type=TCRYPT) == (None, TCRYPT)
+    assert calls == ['tcrypt']
+
+
+def test_an_unrecognised_meta_type_falls_back_to_luks(monkeypatch):
+    calls = fake_open(monkeypatch, {'luks': (0, '')})
+    assert unlock_container('/vaults/a.luks', 'pw', 'x',
+                            meta_type='bitlk') == (None, LUKS)
+    assert calls == ['luks']
+
+
+def test_both_types_failing_reports_the_last_attempt(monkeypatch):
+    calls = fake_open(monkeypatch,
+            {'luks': (1, 'not a valid LUKS device'),
+             'tcrypt': (2, 'No device header detected with this passphrase.')})
+    err, kind = unlock_container('/vaults/random.bin', 'pw', 'x')
+    assert kind == TCRYPT
+    assert 'No device header detected' in err
+    assert calls == ['luks', 'tcrypt']
+
+
+def test_two_wrong_type_answers_end_the_attempts(monkeypatch):
+    # tcrypt answering rc=1 is not the expected shape, but the loop has to
+    # stop either way: the user gets the last failure, not a third attempt.
+    calls = fake_open(monkeypatch, {'luks': (1, 'not a valid LUKS device'),
+                                    'tcrypt': (1, 'no TCRYPT header')})
+    err, kind = unlock_container('/vaults/x.bin', 'pw', 'x')
+    assert kind == TCRYPT
+    assert 'no TCRYPT header' in err
+    assert calls == ['luks', 'tcrypt']
+
+
 def test_mount_manual_mounts_readonly_when_asked(monkeypatch):
     seen = []
     monkeypatch.setattr(LuksOps, 'sudo_cmd',
@@ -411,9 +532,9 @@ def test_mount_luks_container_stops_when_the_mount_point_cannot_be_made(
 def test_mount_luks_container_mounts_a_device(monkeypatch, tmp_path):
     order = []
     monkeypatch.setattr(LuksOps, 'ensure_dir', lambda _path: order.append('mkdir') or None)
-    monkeypatch.setattr(LuksOps, '_unlock_luks',
-                        lambda device, password, name, readonly=False:
-                        order.append(('unlock', device, name)) or None)
+    monkeypatch.setattr(LuksOps, 'unlock_container',
+                        lambda device, password, name, readonly=False, meta_type='':
+                        order.append(('unlock', device, name)) or (None, LUKS))
     monkeypatch.setattr(LuksOps, '_mount_manual',
                         lambda tray, mapper, upon, do_bindfs=False, readonly=False:
                         order.append(('mount', mapper, upon)) or None)
@@ -430,13 +551,41 @@ def test_mount_luks_container_sets_up_a_loop_device_first(monkeypatch, tmp_path)
     monkeypatch.setattr(LuksOps, 'ensure_dir', lambda _path: None)
     monkeypatch.setattr(LuksOps, '_setup_loop_device',
                         lambda container: order.append('loop') or (None, '/dev/loop3'))
-    monkeypatch.setattr(LuksOps, '_unlock_luks',
-                        lambda device, password, name, readonly=False:
-                        order.append(('unlock', device)) or None)
+    monkeypatch.setattr(LuksOps, 'unlock_container',
+                        lambda device, password, name, readonly=False, meta_type='':
+                        order.append(('unlock', device)) or (None, LUKS))
     monkeypatch.setattr(LuksOps, '_mount_manual', lambda *a, **k: None)
     container = SimpleNamespace(name='a.luks', back_file='/vaults/a.luks')
     mount_luks_container(None, container, 'pw', upon=str(tmp_path / 'mnt'))
     assert order == ['loop', ('unlock', '/dev/loop3')]
+
+
+def test_mount_luks_container_records_which_type_opened_the_file(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(LuksOps, 'ensure_dir', lambda _path: None)
+    monkeypatch.setattr(LuksOps, 'unlock_container', lambda *a, **k: (None, TCRYPT))
+    monkeypatch.setattr(LuksOps, '_mount_manual', lambda *a, **k: None)
+    container = SimpleNamespace(name='', meta_type='')
+    crypt = tmp_path / 'a.crypt'
+    crypt.write_bytes(b'\x00' * 200)
+    mount_luks_container(None, container, 'pw', upon=str(tmp_path / 'mnt'),
+                         luks_file=str(crypt))
+    # This is how the dialog learns the answer: the container carries it.
+    assert container.meta_type == TCRYPT
+
+
+def test_mount_luks_container_asks_for_the_declared_type_first(
+        monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(LuksOps, 'ensure_dir', lambda _path: None)
+    monkeypatch.setattr(LuksOps, 'unlock_container',
+                        lambda device, password, name, readonly=False, meta_type='':
+                        seen.append(meta_type) or (None, meta_type))
+    monkeypatch.setattr(LuksOps, '_mount_manual', lambda *a, **k: None)
+    container = SimpleNamespace(name='', meta_type=TCRYPT)
+    mount_luks_container(None, container, 'pw', upon=str(tmp_path / 'mnt'),
+                         luks_file=str(tmp_path / 'a.crypt'))
+    assert seen == [TCRYPT]
 
 
 def test_mount_luks_container_returns_a_loop_failure(monkeypatch, tmp_path):
@@ -449,12 +598,15 @@ def test_mount_luks_container_returns_a_loop_failure(monkeypatch, tmp_path):
 
 def test_mount_luks_container_returns_an_unlock_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(LuksOps, 'ensure_dir', lambda _path: None)
-    monkeypatch.setattr(LuksOps, '_unlock_luks', lambda *a, **k: 'FAIL: wrong password')
+    monkeypatch.setattr(LuksOps, 'unlock_container',
+                        lambda *a, **k: ('FAIL: wrong password', LUKS))
     monkeypatch.setattr(LuksOps, '_mount_manual',
                         lambda *a, **k: pytest.fail('must not mount'))
-    container = SimpleNamespace(name='sdb1')
+    container = SimpleNamespace(name='sdb1', meta_type='')
     assert mount_luks_container(None, container, 'pw', upon=str(tmp_path)) == (
         'FAIL: wrong password')
+    assert container.meta_type == ''   # nothing opened it, so nothing to record
+    assert container.meta_type == ''   # nothing opened it, so nothing to record
 
 
 def test_mount_luks_container_creates_a_new_file_container(monkeypatch, tmp_path):
@@ -466,7 +618,7 @@ def test_mount_luks_container_creates_a_new_file_container(monkeypatch, tmp_path
                         lambda args, *a, **k: order.append(tuple(args)) or None)
     monkeypatch.setattr(LuksOps, 'sudo_run',
                         lambda args, *a, **k: order.append(tuple(args)) or (0, '', ''))
-    monkeypatch.setattr(LuksOps, '_unlock_luks', lambda *a, **k: None)
+    monkeypatch.setattr(LuksOps, 'unlock_container', lambda *a, **k: (None, LUKS))
     monkeypatch.setattr(LuksOps, '_mount_manual',
                         lambda tray, mapper, upon, do_bindfs=False, readonly=False:
                         order.append(('bindfs', do_bindfs)) or None)
@@ -493,7 +645,7 @@ def test_mount_luks_container_reports_a_failed_format(monkeypatch, tmp_path):
     monkeypatch.setattr(LuksOps, 'sudo_cmd', lambda args, *a, **k: None)
     monkeypatch.setattr(LuksOps, 'sudo_run',
                         lambda args, *a, **k: (1, '', 'device is too small'))
-    monkeypatch.setattr(LuksOps, '_unlock_luks',
+    monkeypatch.setattr(LuksOps, 'unlock_container',
                         lambda *a, **k: pytest.fail('must not unlock'))
     err = mount_luks_container(
         None, SimpleNamespace(name=''), 'pw', upon=str(tmp_path / 'mnt'),
@@ -505,7 +657,7 @@ def test_mount_luks_container_reports_a_failed_format(monkeypatch, tmp_path):
 def test_mount_luks_container_logs_and_wraps_an_unexpected_exception(
         monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(LuksOps, 'ensure_dir', lambda _path: None)
-    monkeypatch.setattr(LuksOps, '_unlock_luks',
+    monkeypatch.setattr(LuksOps, 'unlock_container',
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError('boom')))
     err = mount_luks_container(None, SimpleNamespace(name='sdb1'), 'pw',
                                upon=str(tmp_path))

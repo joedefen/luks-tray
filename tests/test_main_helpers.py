@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from luks_tray import Main
 from luks_tray.IniTool import IniTool
 from luks_tray.Main import LuksTray
 
@@ -523,3 +524,54 @@ def test_expand_real_user_leaves_other_users_and_plain_paths(monkeypatch):
 def test_expand_real_user_falls_back_to_expanduser(monkeypatch, isolated_home):
     monkeypatch.delenv('SUDO_USER', raising=False)
     assert LuksTray.expand_real_user('~/Vaults') == str(isolated_home / 'Vaults')
+
+
+# --- the stand-in for a container lsblk cannot see -------------------------
+
+
+def make_file_tray(mount_infos=None):
+    """A `LuksTray` stand-in with only what `history_file_container()` reads."""
+    tray = LuksTray.__new__(LuksTray)
+    tray.mount_infos = mount_infos or {}
+    return tray
+
+
+def vital(**values):
+    defaults = {'uuid': 'salt-abc', 'back_file': '/home/joe/Vaults/old.crypt',
+                'upon': '', 'meta_type': 'tcrypt'}
+    defaults.update(values)
+    return SimpleNamespace(**defaults)
+
+
+def test_a_history_only_container_offers_the_mapper_name_it_would_have(monkeypatch):
+    # A TrueCrypt/VeraCrypt file has no loop device, so lsblk never reports it
+    # and this namespace is the menu's only handle on it.
+    monkeypatch.setattr(Main.os.path, 'exists', lambda _path: False)
+    container = make_file_tray().history_file_container(vital())
+    # `mount_luks_container()` names a file's mapper `<basename>-luks`; the
+    # menu needs the same name to be able to close it again.
+    assert container.name == 'old.crypt-luks'
+    assert container.type == 'crypt'
+    assert container.back_file == '/home/joe/Vaults/old.crypt'
+    assert container.uuid == 'salt-abc'
+    assert container.meta_type == 'tcrypt'
+    assert container.opened is False
+    assert container.upon == ''
+
+def test_an_open_history_only_container_carries_its_mount_point(monkeypatch):
+    mount_infos = {'/dev/mapper/old.crypt-luks':
+                   SimpleNamespace(upon='/home/joe/Vaults/old', readonly=True)}
+    monkeypatch.setattr(Main.os.path, 'exists', lambda _path: True)
+    container = make_file_tray(mount_infos).history_file_container(vital())
+    assert container.opened is True
+    assert container.upon == '/home/joe/Vaults/old'
+    assert container.mounts == ['/home/joe/Vaults/old']
+    assert container.readonly is True
+
+
+def test_an_open_container_that_is_not_mounted_has_no_mount_point(monkeypatch):
+    monkeypatch.setattr(Main.os.path, 'exists', lambda _path: True)
+    container = make_file_tray().history_file_container(vital())
+    assert container.opened is True
+    assert container.upon == ''
+    assert container.mounts == []

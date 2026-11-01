@@ -311,6 +311,12 @@ grows a credential, drifts from the gates above, or loses the offscreen setting.
 * **Sway/Wayland support is open**, with four items in
   [`AUDIT.md`](AUDIT.md); the `archive/sway` tag is where the abandoned attempt
   lives.
+* **TrueCrypt/VeraCrypt support is deliberately one-sided.**  Adding and
+  unmounting a file container is implemented and exercised against a container
+  made with `tcplay`; discovery, creation, non-default PIMs and hidden/system
+  volumes are not, and cannot be tested here without a real VeraCrypt install.
+  [`ContainerType.py`](../luks_tray/ContainerType.py) says why the header type
+  has to be *asked for* rather than read.
 
 The audit itself — what was broken, what was fixed, and what remains — is
 [`AUDIT.md`](AUDIT.md).  Why the release works this way, and what `bless` assumes

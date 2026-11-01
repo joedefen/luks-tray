@@ -356,6 +356,35 @@ class LuksTray():
             self.history.ensure_container(container)
         self.history.save()
 
+    def history_file_container(self, vital):
+        """ The stand-in container for a history entry lsblk did not report.
+
+            A LUKS file container is normally discovered through its loop
+            device, which is why the menu can see one that was closed by
+            another session. A TrueCrypt/VeraCrypt file has no loop device at
+            all -- cryptsetup reads the file directly -- and its header is
+            encrypted, so lsblk has nothing to report and this namespace is the
+            only record of it.
+
+            The mapper name is derived exactly the way `mount_luks_container()`
+            derives it, which is enough to tell "open" from "closed" and to
+            close it again from the menu.
+        """
+        container = DeviceInfo.make_partition_namespace('', '')
+        container.type = 'crypt'
+        container.back_file = vital.back_file
+        container.uuid = vital.uuid
+        container.meta_type = getattr(vital, 'meta_type', '')
+        container.vital = vital
+        container.name = f'{os.path.basename(vital.back_file)}-luks'
+        container.opened = os.path.exists(f'/dev/mapper/{container.name}')
+        mount = self.mount_infos.get(f'/dev/mapper/{container.name}')
+        if container.opened and mount:
+            container.upon = mount.upon
+            container.mounts = [mount.upon]
+            container.readonly = mount.readonly
+        return container
+
     def update_menu(self):
         """Refresh device/history state, then rebuild the tray menu.
 
@@ -383,16 +412,13 @@ class LuksTray():
                     container = self.containers.get(vital.uuid, None)
                     if container:
                         container.vital = vital
+                        if getattr(vital, 'meta_type', ''):
+                            container.meta_type = vital.meta_type
                     if not container and vital.back_file:
                         # insert known file container (present device
                         # containers should be in the containers list already)
-                        ns = DeviceInfo.make_partition_namespace('', '')
-                        ns.type = 'crypt'
-                        ns.back_file = vital.back_file
-                        ns.opened = False
-                        ns.uuid = vital.uuid
-                        ns.vital = vital
-                        self.containers[vital.uuid] = ns
+                        self.containers[vital.uuid] = (
+                                self.history_file_container(vital))
 
             self.update_menu_items()
         finally:
@@ -766,14 +792,18 @@ class LuksTray():
         if tray_watcher_present():
             self._on_tray_host_appeared()
 
-    def update_history(self, uuid, values, back_file=None):
+    def update_history(self, uuid, values, back_file=None, meta_type=None):
         """ Record/refresh the history entry for a container.
 
-            `back_file` is only meaningful for LUKS *file* containers, and it
-            must be stored here: HistoryClass re-derives the LUKS UUID of every
+            `back_file` is only meaningful for crypt *file* containers, and it
+            must be stored here: HistoryClass re-derives the identity of every
             back_file on restore and purges the entry when it does not match
             the key. A file entry written without its back_file can therefore
             never be found again after a restart.
+
+            `meta_type` is the header type that opened the file ('luks' or
+            'tcrypt'), or None to leave what is recorded alone -- a device is
+            always LUKS and nothing ever has to be remembered for it.
         """
         vital = self.history.get_vital(uuid)
         if uuid:
@@ -784,6 +814,9 @@ class LuksTray():
         dirty = False
         if back_file is not None and vital.back_file != back_file:
             vital.back_file = back_file
+            dirty = True
+        if meta_type and getattr(vital, 'meta_type', '') != meta_type:
+            vital.meta_type = meta_type
             dirty = True
         if (values['password'] != vital.password or mount_point != vital.upon
                 or time.time() - 24*3600 >= vital.when):

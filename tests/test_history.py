@@ -9,8 +9,10 @@ they are asserted rather than assumed:
 * a wrong master password must leave the file byte-for-byte untouched;
 * a legacy unsalted file must still open, and be rewritten salted on the next
   save;
-* a back_file whose LUKS UUID no longer matches must be purged, so a replaced
-  crypt file cannot inherit another volume's saved password.
+* a back_file whose identity no longer matches must be purged, so a replaced
+  crypt file cannot inherit another volume's saved password -- the identity
+  being the LUKS UUID, or the salt of an encrypted (TrueCrypt/VeraCrypt)
+  header.
 """
 
 import base64
@@ -22,7 +24,25 @@ import subprocess
 
 from cryptography.fernet import Fernet
 
+from luks_tray.ContainerType import salt_identity
 from luks_tray.History import HistoryClass
+
+
+def tcrypt_header(salt=b'\x11' * 64):
+    """What an encrypted TrueCrypt/VeraCrypt header looks like: salt, then noise.
+
+    Nothing in the rest of it is cleartext -- that is the whole point -- so a
+    file like this is also exactly what a *wrong* guess about the format looks
+    like. Only the salt can be read, and only the salt is identity.
+    """
+    return salt + bytes(range(32)) * 4
+
+
+def blkid_says_nothing(monkeypatch):
+    """ blkid's clean "no signature here" answer, which is what a TCRYPT file gets. """
+    def no_signature(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(2, ['blkid'], output='', stderr='')
+    monkeypatch.setattr(subprocess, 'run', no_signature)
 
 
 def make_history(tmp_path, master_password='', name='history.json'):
@@ -268,7 +288,8 @@ def test_an_entry_whose_back_file_changed_uuid_is_purged(tmp_path, monkeypatch):
     (tmp_path / 'history.json').write_text(json.dumps({
         'stale-uuid': {'back_file': '/vaults/replaced.luks'}}))
     history = make_history(tmp_path)
-    monkeypatch.setattr(history, '_probe_back_file_uuid', lambda _path: 'other-uuid')
+    monkeypatch.setattr(history, '_probe_back_file_identity',
+                        lambda _path: 'other-uuid')
     history.restore()
     assert history.vitals == {}
     assert history.dirty is True
@@ -278,10 +299,56 @@ def test_an_entry_whose_back_file_matches_is_kept(tmp_path, monkeypatch):
     (tmp_path / 'history.json').write_text(json.dumps({
         'good-uuid': {'back_file': '/vaults/good.luks', 'upon': '/mnt/good'}}))
     history = make_history(tmp_path)
-    monkeypatch.setattr(history, '_probe_back_file_uuid', lambda _path: 'good-uuid')
+    monkeypatch.setattr(history, '_probe_back_file_identity',
+                        lambda _path: 'good-uuid')
     history.restore()
     assert list(history.vitals) == ['good-uuid']
     assert history.upons == {'/mnt/good'}
+
+
+def test_a_probe_that_could_not_answer_keeps_the_entry(tmp_path, monkeypatch):
+    (tmp_path / 'history.json').write_text(json.dumps({
+        'good-uuid': {'back_file': '/vaults/good.luks'}}))
+    history = make_history(tmp_path)
+    monkeypatch.setattr(history, '_probe_back_file_identity', lambda _path: None)
+    history.restore()
+    assert list(history.vitals) == ['good-uuid']
+    assert history.dirty is False
+
+
+def test_a_tcrypt_entry_keyed_by_its_salt_survives_restore(tmp_path, monkeypatch):
+    target = tmp_path / 'legacy.crypt'
+    target.write_bytes(tcrypt_header())
+    key = salt_identity(str(target))
+    (tmp_path / 'history.json').write_text(json.dumps({
+        key: {'back_file': str(target), 'password': 'p',
+              'meta_type': 'tcrypt'}}))
+    blkid_says_nothing(monkeypatch)
+    history = make_history(tmp_path)
+    history.restore()
+    assert list(history.vitals) == [key]
+    assert history.vitals[key].password == 'p'
+    assert history.vitals[key].meta_type == 'tcrypt'
+
+
+def test_a_re_created_tcrypt_container_is_purged(tmp_path, monkeypatch):
+    target = tmp_path / 'legacy.crypt'
+    target.write_bytes(tcrypt_header())
+    key = salt_identity(str(target))
+    (tmp_path / 'history.json').write_text(json.dumps({
+        key: {'back_file': str(target), 'password': 'old'}}))
+    blkid_says_nothing(monkeypatch)
+    first = make_history(tmp_path)
+    first.restore()
+    assert list(first.vitals) == [key]
+
+    # Same path, new container: the salt is re-drawn, so neither the old key
+    # nor the old password may come back.
+    target.write_bytes(tcrypt_header(salt=b'\x22' * 64))
+    fresh = make_history(tmp_path)
+    fresh.restore()
+    assert fresh.vitals == {}
+    assert fresh.dirty is True
 
 
 # --- the blkid probe and its cache ----------------------------------------
@@ -303,7 +370,7 @@ def _completed(stdout='UUID-1\n'):
 def test_the_probe_caches_a_clean_answer(tmp_path, monkeypatch):
     history = make_history(tmp_path)
     target = tmp_path / 'container.luks'
-    target.write_text('not really a luks header')
+    target.write_bytes(b'LUKS\xba\xbe' + b'\x00' * 200)
     calls = []
 
     def fake_run(*args, **kwargs):
@@ -311,8 +378,8 @@ def test_the_probe_caches_a_clean_answer(tmp_path, monkeypatch):
         return _completed()
 
     monkeypatch.setattr(subprocess, 'run', fake_run)
-    assert history._probe_back_file_uuid(str(target)) == 'UUID-1'
-    assert history._probe_back_file_uuid(str(target)) == 'UUID-1'
+    assert history._probe_back_file_identity(str(target)) == 'UUID-1'
+    assert history._probe_back_file_identity(str(target)) == 'UUID-1'
     assert len(calls) == 1  # the second answer came from the cache
 
 
@@ -327,8 +394,8 @@ def test_the_probe_retries_when_blkid_did_not_answer(tmp_path, monkeypatch):
         raise subprocess.TimeoutExpired(['blkid'], 15)
 
     monkeypatch.setattr(subprocess, 'run', timeout)
-    assert history._probe_back_file_uuid(str(target)) == ''
-    assert history._probe_back_file_uuid(str(target)) == ''
+    assert history._probe_back_file_identity(str(target)) is None
+    assert history._probe_back_file_identity(str(target)) is None
     assert len(calls) == 2  # a timeout is not an answer, so nothing is cached
 
 
@@ -342,22 +409,31 @@ def test_the_probe_does_not_cache_a_complaint(tmp_path, monkeypatch):
             2, ['blkid'], output='', stderr='cannot open: Permission denied')
 
     monkeypatch.setattr(subprocess, 'run', denied)
-    assert history._probe_back_file_uuid(str(target)) == ''
-    assert history._back_file_uuid_cache == {}
+    assert history._probe_back_file_identity(str(target)) is None
+    assert history._back_file_identity_cache == {}
 
 
 def test_the_probe_caches_no_signature(tmp_path, monkeypatch):
     history = make_history(tmp_path)
     target = tmp_path / 'container.luks'
     target.write_text('x')
-
-    def no_signature(*_args, **_kwargs):
-        raise subprocess.CalledProcessError(2, ['blkid'], output='', stderr='')
-
-    monkeypatch.setattr(subprocess, 'run', no_signature)
-    assert history._probe_back_file_uuid(str(target)) == ''
-    assert history._back_file_uuid_cache[str(target)] == (
+    blkid_says_nothing(monkeypatch)
+    assert history._probe_back_file_identity(str(target)) == ''
+    assert history._back_file_identity_cache[str(target)] == (
         history._file_stamp(str(target)), '')
+
+
+def test_the_probe_identifies_an_encrypted_header_by_its_salt(tmp_path, monkeypatch):
+    history = make_history(tmp_path)
+    target = tmp_path / 'legacy.crypt'
+    target.write_bytes(tcrypt_header())
+    blkid_says_nothing(monkeypatch)
+    identity = history._probe_back_file_identity(str(target))
+    assert identity == salt_identity(str(target))
+    assert identity.startswith('salt-')
+    # Remembered like any other answer, so a second look re-reads nothing.
+    assert history._back_file_identity_cache[str(target)] == (
+        history._file_stamp(str(target)), identity)
 
 
 def test_a_missing_blkid_is_reported_and_not_cached(tmp_path, monkeypatch):
@@ -369,23 +445,23 @@ def test_a_missing_blkid_is_reported_and_not_cached(tmp_path, monkeypatch):
         raise FileNotFoundError('blkid')
 
     monkeypatch.setattr(subprocess, 'run', missing)
-    assert history._probe_back_file_uuid(str(target)) == ''
-    assert history._back_file_uuid_cache == {}
+    assert history._probe_back_file_identity(str(target)) is None
+    assert history._back_file_identity_cache == {}
 
 
 def test_the_probe_cache_is_bounded(tmp_path, monkeypatch):
     history = make_history(tmp_path)
     monkeypatch.setattr(subprocess, 'run', lambda *a, **k: _completed())
-    for index in range(HistoryClass.BLKID_CACHE_MAX):
+    for index in range(HistoryClass.IDENTITY_CACHE_MAX):
         target = tmp_path / f'c{index}.luks'
         target.write_text('x')
-        history._probe_back_file_uuid(str(target))
-    assert len(history._back_file_uuid_cache) == HistoryClass.BLKID_CACHE_MAX
+        history._probe_back_file_identity(str(target))
+    assert len(history._back_file_identity_cache) == HistoryClass.IDENTITY_CACHE_MAX
     extra = tmp_path / 'extra.luks'
     extra.write_text('x')
-    history._probe_back_file_uuid(str(extra))
+    history._probe_back_file_identity(str(extra))
     # Full cache is dropped wholesale rather than maintained as an LRU.
-    assert list(history._back_file_uuid_cache) == [str(extra)]
+    assert list(history._back_file_identity_cache) == [str(extra)]
 
 
 # --- vitals ----------------------------------------------------------------
