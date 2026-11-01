@@ -39,6 +39,7 @@ import random
 import tempfile
 from pathlib import Path
 from functools import partial
+from contextlib import contextmanager
 from io import StringIO
 from datetime import datetime
 from types import SimpleNamespace
@@ -539,11 +540,18 @@ class LuksTray():
 
         self.containers, self.menu = {}, QMenu()
         self.actions = []
+        # Guards for the 3 s poller, see update_menu() and busy_operation().
+        # Both must exist before the first update_menu() call below.
+        self.refreshing = False
+        self.operation = None
         self.update_menu()
         self.remove_unused_automounts()
 
         self.timer = QTimer(self.tray_icon)
         self.timer.timeout.connect(self.update_menu)
+        # Repeating, but update_menu() self-guards: a tick that lands while a
+        # refresh or a mount/unmount is still running is dropped instead of
+        # stacking a second refresh on top of it.
         self.timer.start(3000)  # 3000 milliseconds = 3 seconds
 
     @staticmethod
@@ -637,30 +645,62 @@ class LuksTray():
         QMessageBox.information(None, "Partition Details", details)
 
     def update_menu(self):
-        """ TBD """
-        self.ini_tool.update_config()
-        if self.history.status in ('unlocked', 'clear_text'):
-            self.update_mounts()
-            self.containers = self.lsblk.parse_lsblk()
-            self.merge_containers_history()
-            # add in the containers that are not mounted but in
-            # the history
-            for vital in self.history.vitals.values():
-                container = self.containers.get(vital.uuid, None)
-                if container:
-                    container.vital = vital
-                if not container and vital.back_file:
-                    # insert known file container (present device containers
-                    # should be in the containers list already)
-                    ns = DeviceInfo.make_partition_namespace('', '')
-                    ns.type = 'crypt'
-                    ns.back_file = vital.back_file
-                    ns.opened = False
-                    ns.uuid = vital.uuid
-                    ns.vital = vital
-                    self.containers[vital.uuid] = ns
+        """Refresh device/history state, then rebuild the tray menu.
 
-        self.update_menu_items()
+            This is both the 3 s timer slot and the call dialogs make when an
+            operation finishes, so it has to be re-entrancy safe. It reads
+            /proc/mounts, spawns lsblk, reloads history (blkid per back_file)
+            and finally rebuilds the QMenu. A nested second run used to happen
+            whenever an event was dispatched inside the first one -- the
+            processEvents() that show_progress() called did exactly that --
+            and it could rebuild the menu from a container list captured
+            *before* a cryptsetup/mount that was still in flight.
+        """
+        if self.refreshing or self.operation:
+            return
+        self.refreshing = True
+        try:
+            self.ini_tool.update_config()
+            if self.history.status in ('unlocked', 'clear_text'):
+                self.update_mounts()
+                self.containers = self.lsblk.parse_lsblk()
+                self.merge_containers_history()
+                # add in the containers that are not mounted but in
+                # the history
+                for vital in self.history.vitals.values():
+                    container = self.containers.get(vital.uuid, None)
+                    if container:
+                        container.vital = vital
+                    if not container and vital.back_file:
+                        # insert known file container (present device
+                        # containers should be in the containers list already)
+                        ns = DeviceInfo.make_partition_namespace('', '')
+                        ns.type = 'crypt'
+                        ns.back_file = vital.back_file
+                        ns.opened = False
+                        ns.uuid = vital.uuid
+                        ns.vital = vital
+                        self.containers[vital.uuid] = ns
+
+            self.update_menu_items()
+        finally:
+            self.refreshing = False
+
+    @contextmanager
+    def busy_operation(self, name):
+        """Suspend polling while a privileged dialog action is in flight.
+
+            Between `cryptsetup open` and `mount` (or between `umount` and
+            `cryptsetup close`) the system is in a state no refresh should
+            snapshot: the container looks half-opened, and the menu rebuilt
+            from it offered the wrong action. Restored on exit, including via
+            exceptions, so a failed operation cannot park the poller.
+        """
+        previous, self.operation = self.operation, name
+        try:
+            yield
+        finally:
+            self.operation = previous
 
     def update_menu_items(self):
         """Update context menu with LUKS partitions."""
@@ -1478,8 +1518,14 @@ class CommonDialog(QDialog):
         self.progress_label.setText(message)
         self.progress_label.show()
         self.progress_bar.show()
-        # Force UI update before starting potentially slow operation
-        QApplication.processEvents()
+        # Paint the dialog now, but *without* spinning the event loop: this
+        # used to be QApplication.processEvents(), which dispatched the tray's
+        # 3 s QTimer (and any queued click) in the middle of the operation and
+        # re-entered update_menu() while cryptsetup was still running.
+        # activate() + repaint() shows the new widgets with no such risk.
+        if self.layout() is not None:
+            self.layout().activate()
+        self.repaint()
 
     def hide_progress(self):
         """Hide progress indicator and re-enable buttons."""
@@ -1845,9 +1891,16 @@ class MountDeviceDialog(CommonDialog):
 
             self.hide_password()
             self.show_progress('Mount device...')
-            err = self.mount_luks_container(tray, container, values['password'],
-                    upon=mount_point, readonly=values['readonly'], luks_device=luks_device)
-            self.hide_progress()
+            try:
+                # Keep the poller out until cryptsetup open *and* mount have
+                # both finished; a refresh in between rebuilds the menu from
+                # a half-mounted container.
+                with tray.busy_operation('mount device'):
+                    err = self.mount_luks_container(tray, container, values['password'],
+                            upon=mount_point, readonly=values['readonly'],
+                            luks_device=luks_device)
+            finally:
+                self.hide_progress()
 
             if err:
                 errs.append(err)
@@ -1870,47 +1923,50 @@ class MountDeviceDialog(CommonDialog):
 
         # Show progress - disable buttons and add progress indicator
         self.show_progress("Unmount/Close device...")
+        try:
+            # No menu refresh between the umount and the cryptsetup close.
+            with tray.busy_operation('unmount device'):
+                tray.update_mounts()
+                busy_warns = set()
 
-        tray.update_mounts()
-        busy_warns = set()
+                if container:
+                    unmounteds = []
+                    filesystems = [fs for fs in container.filesystems
+                                   if getattr(fs, 'name', '')]
+                    for fs in filesystems:
+                        for mount in fs.mounts:
+                            ### self.kill_bindfs_on_mount(mount)
+                            if tray.is_mounted(mount):
+                                err = run_unmount(mount, busy_warns)
+                                if err:
+                                    errs.append(err)
+                                else:
+                                    unmounteds.append(mount)
 
-        if container:
-            unmounteds = []
-            filesystems = [fs for fs in container.filesystems
-                           if getattr(fs, 'name', '')]
-            for fs in filesystems:
-                for mount in fs.mounts:
-                    ### self.kill_bindfs_on_mount(mount)
-                    if tray.is_mounted(mount):
-                        err = run_unmount(mount, busy_warns)
-                        if err:
-                            errs.append(err)
+                    # cryptsetup close takes the *mapper* name, which lives in
+                    # the child filesystem entries. An opened container may
+                    # legitimately have none -- the '‼' open-but-unmounted
+                    # anomaly -- so fall back to the container's own name (file
+                    # containers are their own mapper) and, failing that,
+                    # report a usable error.
+                    close_name = filesystems[0].name if filesystems else ''
+                    if not close_name and container.type == 'crypt':
+                        close_name = container.name
+                    if not errs:
+                        if close_name:
+                            sudo_cmd(["cryptsetup", "close", close_name], errs)
                         else:
-                            unmounteds.append(mount)
-
-            # cryptsetup close takes the *mapper* name, which lives in the
-            # child filesystem entries. An opened container may legitimately
-            # have none -- the '‼' open-but-unmounted anomaly -- so fall back
-            # to the container's own name (file containers are their own
-            # mapper) and, failing that, report a usable error.
-            close_name = filesystems[0].name if filesystems else ''
-            if not close_name and container.type == 'crypt':
-                close_name = container.name
-            if not errs:
-                if close_name:
-                    sudo_cmd(["cryptsetup", "close", close_name], errs)
+                            errs.append(
+                                f'ERR: cannot close {container.name}: no mapper '
+                                f'device name known (no filesystem detected)')
+                    if not errs:
+                        for mount in unmounteds:
+                            LuksTray.remove_if_auto(mount)
                 else:
-                    errs.append(
-                        f'ERR: cannot close {container.name}: no mapper '
-                        f'device name known (no filesystem detected)')
-            if not errs:
-                for mount in unmounteds:
-                    LuksTray.remove_if_auto(mount)
-        else:
-            errs.append(f'ERR: container w UUID={uuid} not found')
-
-        # Hide progress indicator
-        self.hide_progress()
+                    errs.append(f'ERR: container w UUID={uuid} not found')
+        finally:
+            # Hide progress indicator
+            self.hide_progress()
 
         if errs:
             if not busy_warns:
@@ -2002,32 +2058,36 @@ class MountFileDialog(CommonDialog):
         tray = LuksTray.singleton
         container = tray.containers.get(uuid, None)
         self.show_progress('Unmount/Close crypt file...')
-        busy_warns = set()
-        if container:
-            if container.mounts:
-                for _ in range(2):
-                    # it may take two dismounts, one for the regular mount, and
-                    # one for the bindfs mount
-                    tray.update_mounts()
-                    for mount in container.mounts:
-                        if tray.is_mounted(mount):
-                            err = run_unmount(mount, busy_warns)
-                            if err:
-                                errs.append(err)
-                            else:
-                                LuksTray.remove_if_auto(mount)
+        try:
+            with tray.busy_operation('unmount file'):
+                busy_warns = set()
+                if container:
+                    if container.mounts:
+                        for _ in range(2):
+                            # it may take two dismounts, one for the regular
+                            # mount, and one for the bindfs mount
+                            tray.update_mounts()
+                            for mount in container.mounts:
+                                if tray.is_mounted(mount):
+                                    err = run_unmount(mount, busy_warns)
+                                    if err:
+                                        errs.append(err)
+                                    else:
+                                        LuksTray.remove_if_auto(mount)
 
-                    if busy_warns:
-                        break
+                            if busy_warns:
+                                break
 
-            if not errs:
-                sudo_cmd(["cryptsetup", "close", container.name], errs=errs)
-                    # If this is a file container with a loop device, detach it
-            if not errs and container.back_file:
-                ignores = []
-                sudo_cmd(["losetup", "-d", f"/dev/{container.name}"], errs=ignores)
-
-        self.hide_progress()
+                    if not errs:
+                        sudo_cmd(["cryptsetup", "close", container.name], errs=errs)
+                        # If this is a file container with a loop device,
+                        # detach it
+                    if not errs and container.back_file:
+                        ignores = []
+                        sudo_cmd(["losetup", "-d", f"/dev/{container.name}"],
+                                 errs=ignores)
+        finally:
+            self.hide_progress()
 
         tray.update_menu()
         if errs:
@@ -2134,13 +2194,21 @@ class MountFileDialog(CommonDialog):
 
         if not errs:
             self.show_progress('Mount file...')
-            if mount_point and not os.path.exists(mount_point):
-                # os.makedirs(mount_point, exist_ok=True)
-                err = run_cmd(['mkdir', '-p', mount_point])
-            if not err:
-                err = self.mount_luks_container(tray, container, values['password'],
-                        mount_point, readonly=values['readonly'],
-                        luks_file=back_file, size=values.get('size_str', None))
+            try:
+                with tray.busy_operation('mount file'):
+                    # `err` has to start out defined: with an existing mount
+                    # point the mkdir branch below is skipped.
+                    err = None
+                    if mount_point and not os.path.exists(mount_point):
+                        # os.makedirs(mount_point, exist_ok=True)
+                        err = run_cmd(['mkdir', '-p', mount_point])
+                    if not err:
+                        err = self.mount_luks_container(tray, container,
+                                values['password'], mount_point,
+                                readonly=values['readonly'],
+                                luks_file=back_file,
+                                size=values.get('size_str', None))
+            finally:
                 self.hide_progress()
 
             if err:
