@@ -36,7 +36,14 @@ from luks_tray.DeviceInfo import DeviceInfo
 
 
 def requires_manual_title():
-    """Checks if we are likely in a Wayland/Sway environment where SSD is missing."""
+    """Checks if we are likely in a Wayland/Sway environment where SSD is missing.
+
+        Asked at the point of use ([`set_title()`](luks_tray/dialogs/Common.py))
+        rather than cached in a module-level `IS_SWAY_LIKE_ENV`: it is two
+        environment lookups, and a constant computed at import time froze the
+        answer for the process -- so an environment changed after import (or a
+        test that wants the Sway layout) could never take effect.
+    """
     # If using Xwayland under a tiling WM, XDG_CURRENT_DESKTOP might be helpful
     params = ['XDG_CURRENT_DESKTOP', 'DESKTOP_SESSION']
     for param in params:
@@ -45,9 +52,6 @@ def requires_manual_title():
         if 'sway' in (os.environ.get(param) or '').lower():
             return True
     return False
-
-# Global flag to run the check only once
-IS_SWAY_LIKE_ENV = requires_manual_title()
 
 
 class CommonDialog(QDialog):
@@ -92,7 +96,7 @@ class CommonDialog(QDialog):
     def set_title(self, title):
         """ Sets the window title ... if sway, putting it in the dialog box """
         self.setWindowTitle(title)
-        if IS_SWAY_LIKE_ENV:
+        if requires_manual_title():
             title_label = QLabel(title)
             title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             # Apply some styling to make it look like a title bar

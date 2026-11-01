@@ -46,9 +46,9 @@ from luks_tray.Utils import prt, prt_once
 from luks_tray import Utils
 from luks_tray.IniTool import IniTool
 from luks_tray.DeviceInfo import DeviceInfo
-from luks_tray.dialogs import (IS_SWAY_LIKE_ENV, CommonDialog,
-                               MasterPasswordDialog, MountDeviceDialog,
-                               MountFileDialog, requires_manual_title)
+from luks_tray.dialogs import (CommonDialog, MasterPasswordDialog,
+                               MountDeviceDialog, MountFileDialog,
+                               requires_manual_title)
 from luks_tray.LuksOps import (generate_uuid_for_file_path,
                                 get_luks_uuid_for_file, run_cmd,
                                 run_cmd_capture, run_unmount, sudo_cmd,
@@ -61,7 +61,6 @@ __all__ = [
     'CommonDialog',
     'DeviceInfo',
     'HistoryClass',
-    'IS_SWAY_LIKE_ENV',
     'IniTool',
     'LuksTray',
     'MasterPasswordDialog',
@@ -103,12 +102,15 @@ FORBIDDEN_AUTO_MOUNT_PREFIXES = tuple(os.path.normpath(path) for path in (
 class LuksTray():
     """ The tray icon, the menu it shows, and the refresh/mount policy.
 
-        `main()` creates exactly one instance and leaves it in
-        `LuksTray.singleton`; the static helpers below and the dialogs reach
-        the configuration through it. Besides the `QSystemTrayIcon` this owns
-        the single `QMenu`, rebuilt only when its contents actually change
-        (see `replace_menu_if_different()`), and the 3 s `QTimer` that drives
-        `update_menu()`.
+        `main()` creates exactly one instance, and the vault-root policy
+        (`get_auto_mount_root()` and friends) are *methods* on it rather than
+        lookups through a class-level `singleton`: a static helper that reads
+        the configuration can only work after a tray exists, which turned
+        construction order into a hidden requirement and crashed with
+        `AttributeError` when it was violated. Besides the `QSystemTrayIcon`
+        this owns the single `QMenu`, rebuilt only when its contents actually
+        change (see `replace_menu_if_different()`), and the 3 s `QTimer` that
+        drives `update_menu()`.
 
         The poller is synchronous but self-guarded: `update_menu()` returns
         immediately while a refresh or a privileged dialog operation is in
@@ -116,7 +118,6 @@ class LuksTray():
         between `cryptsetup open` and `mount` cannot snapshot a half-mounted
         container.
     """
-    singleton = None
     svg_info = SimpleNamespace(version='04', bases=[
                             'white-shield',  # no LUKS partitions unlocked
                             'alert-shield',  # some partitions unlocked but not mounted
@@ -131,7 +132,6 @@ class LuksTray():
                         ] )
 
     def __init__(self, ini_tool, opts):
-        LuksTray.singleton = self
         self.uid = os.environ.get('SUDO_UID', os.getuid())
         self.gid = os.environ.get('SUDO_GID', os.getgid())
 
@@ -587,14 +587,26 @@ class LuksTray():
         if dirty:
             self.history.put_vital(vital)
 
-    @staticmethod
-    def get_auto_mount_root():
-        """ Return the configured `auto_mount_folder` as an absolute path. """
-        tray = LuksTray.singleton
-        auto_root = tray.ini_tool.get_current_val('auto_mount_folder')
-        auto_root = LuksTray.expand_real_user(auto_root)
-        auto_root = os.path.abspath(auto_root)
-        return auto_root
+    def get_auto_mount_root(self):
+        """ Return the configured `auto_mount_folder` as an absolute path.
+
+            A relative value is *refused*, not resolved: `abspath` would turn
+            `Vaults` into `<cwd>/Vaults`, which then passes every check in
+            [`validate_auto_mount_root()`](luks_tray/Main.py) -- it is absolute
+            by then, two levels deep, neither home nor a system tree -- so a
+            typo would silently relocate the vault area to wherever the process
+            happened to start. The configured default is used instead, reported
+            once per offending value.
+        """
+        configured = self.ini_tool.get_current_val('auto_mount_folder')
+        auto_root = LuksTray.expand_real_user(configured)
+        if not os.path.isabs(auto_root):
+            fallback = self.ini_tool.the_default('auto_mount_folder')
+            prt_once(f'auto_mount_folder {configured!r}',
+                     f'WARN: auto_mount_folder {configured!r} is not an '
+                     f'absolute path; using {fallback!r} instead')
+            auto_root = LuksTray.expand_real_user(fallback)
+        return os.path.abspath(auto_root)
 
     @staticmethod
     def get_real_user_ids():
@@ -639,7 +651,7 @@ class LuksTray():
         return os.path.expanduser('~')
 
     @staticmethod
-    def validate_auto_mount_root(auto_root=None):
+    def validate_auto_mount_root(auto_root):
         """ Return None if `auto_root` may be cleaned, else an error string.
 
             [`remove_unused_automounts()`](luks_tray/Main.py) deletes (empty)
@@ -662,8 +674,6 @@ class LuksTray():
             cleanup and log why (`remove_unused_automounts` treats any returned
             string as "do nothing").
         """
-        if auto_root is None:
-            auto_root = LuksTray.get_auto_mount_root()
         try:
             path = os.path.abspath(auto_root)
         except Exception as exc:                       # pylint: disable=broad-except
@@ -729,7 +739,7 @@ class LuksTray():
         return None
 
     @staticmethod
-    def ensure_auto_mount_root(auto_root=None):
+    def ensure_auto_mount_root(auto_root):
         """ Make the auto-mount root exist, and belong to the real user.
 
             Earlier releases created mount points with `sudo mkdir -p`, which
@@ -748,8 +758,6 @@ class LuksTray():
 
             Returns None on success, or a 'FAIL: ...' string.
         """
-        if auto_root is None:
-            auto_root = LuksTray.get_auto_mount_root()
         if not os.path.isdir(auto_root):
             return run_cmd(['mkdir', '-p', auto_root])
         real_uid, real_gid = LuksTray.get_real_user_ids()
@@ -764,8 +772,7 @@ class LuksTray():
             return f'FAIL: not repairing ownership of {auto_root!r}: {problem}'
         return sudo_cmd(['chown', f'{real_uid}:{real_gid}', auto_root])
 
-    @staticmethod
-    def generate_auto_mount_folder():
+    def generate_auto_mount_folder(self):
         """ Return a new, unused mount point below the auto-mount root.
 
             Makes the root exist and belong to the user first (see
@@ -780,14 +787,13 @@ class LuksTray():
 
         def available(basename):
             """ Full path for `basename`, or None if it is already taken. """
-            nonlocal auto_root, tray
+            nonlocal auto_root
             fullpath = os.path.join(auto_root, basename)
-            if fullpath in tray.upons or fullpath in tray.history.upons:
+            if fullpath in self.upons or fullpath in self.history.upons:
                 return None
             return fullpath
 
-        tray = LuksTray.singleton
-        auto_root = LuksTray.get_auto_mount_root()
+        auto_root = self.get_auto_mount_root()
         if os.path.exists(auto_root) and not os.path.isdir(auto_root):
             # `assert` is stripped by `python -O`, and the caller would then
             # hand out mount points inside a non-directory.
@@ -873,13 +879,16 @@ class LuksTray():
         try:
             with os.scandir(path) as entries:
                 return next(entries, None) is None
-        except OSError:
+        except OSError as exc:
+            # "Cannot tell" is the same answer as "not empty" for both callers
+            # (nothing gets deleted), but swallowing it made a permission
+            # problem look exactly like a normal in-use vault directory.
+            prt_once(f'scandir {path}', f'note: cannot list {path!r}: {exc}')
             return False
 
-    @staticmethod
-    def remove_if_auto(mount):
+    def remove_if_auto(self, mount):
         """Remove target_dir if it is empty and within parent_dir"""
-        parent_dir = LuksTray.get_auto_mount_root()
+        parent_dir = self.get_auto_mount_root()
         target_dir = os.path.abspath(mount)
 
         if not LuksTray.is_strictly_within(target_dir, parent_dir):
@@ -900,7 +909,7 @@ class LuksTray():
             dedicated, user-owned directory the whole pass is skipped. Returns
             the number of directories removed.
         """
-        parent_dir = LuksTray.get_auto_mount_root()
+        parent_dir = self.get_auto_mount_root()
         problem = LuksTray.validate_auto_mount_root(parent_dir)
         if problem:
             prt(f'WARN: skipping auto-mount cleanup: {problem}')
@@ -1042,8 +1051,17 @@ def main():
         os.dup2(devnull_fd, sys.stdin.fileno())
         os.close(devnull_fd)
 
+        # Point the log at debug.log before the real IniTool is built: a problem
+        # the constructor has to report then reaches the file instead of a
+        # stdout that a desktop launch has already pointed nowhere. The
+        # `paths_only` instance creates nothing on its own, so `ensure_folder()`
+        # is called explicitly -- it makes the folder `configure_log()` writes
+        # into, without creating config.ini as a side effect.
+        configure_ini = IniTool(paths_only=True)
+        configure_ini.ensure_folder()
+        Utils.configure_log(configure_ini.log_path)
+
         ini_tool = IniTool(paths_only=False)
-        Utils.prt_path = ini_tool.log_path
 
         tray = LuksTray(ini_tool, opts)
         sys.exit(tray.app.exec())

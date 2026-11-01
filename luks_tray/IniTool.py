@@ -11,6 +11,13 @@
     `update_config()` re-reads the file only when its mtime changed, so the 3 s
     refresh can afford to call it and a hand-edited config takes effect without
     a restart.
+
+    Constructing this class changes no process-wide state. Every path it
+    exposes is absolute, so there is no reason to `os.chdir()` into the config
+    folder -- and doing it used to silently redefine what a *relative* path
+    means for the whole process (including every child command): a relative
+    `auto_mount_folder`, or a relative path typed into a dialog, resolved
+    against `~/.config/luks-tray` instead of being rejected.
 """
 # pylint: disable=invalid-name, broad-exception-caught
 # pylint: disable=too-many-branches,too-many-statements
@@ -56,7 +63,6 @@ class IniTool:
         self.params_by_selector = {}
         if not paths_only:
             self.ensure_ini_file()
-            os.chdir(self.folder)
 
     @staticmethod
     def get_selectors():

@@ -168,9 +168,9 @@ class MountFileDialog(CommonDialog):
         tray, container = self.tray, None
         errs, values = [], {}
         if tray is None:
-            # `LuksTray.singleton` is assigned in LuksTray.__init__; the old
-            # `assert` (stripped by `python -O`) merely deferred the failure
-            # to the first `tray.` dereference below.
+            # The dialog is always built with a tray, so a missing one is a
+            # programming error; the old `assert` (stripped by `python -O`)
+            # merely deferred the failure to the first `tray.` dereference.
             self.alert_errors(['ERR: tray is not initialized'])
             return
 
@@ -204,7 +204,17 @@ class MountFileDialog(CommonDialog):
                     errs.append('ERR: cannot leave password empty')
 
             elif key == 'back_file':
-                path = os.path.abspath(text)
+                # A relative name is refused rather than resolved: the tray
+                # never chdir()s anywhere, so `abspath('vault.luks')` would
+                # silently mean "next to whatever directory the app started in".
+                if not text:
+                    errs.append('ERR: cannot leave the crypt file empty')
+                    continue
+                path = os.path.expanduser(text)
+                if not os.path.isabs(path):
+                    errs.append(f'ERR: Crypt File ({text}) must be an absolute path')
+                    continue
+                path = os.path.abspath(path)
                 values[key] = path
                 dirname = os.path.dirname(path)
                 if not os.path.isdir(dirname):
@@ -216,7 +226,15 @@ class MountFileDialog(CommonDialog):
                     errs.append(f'ERR: Crypt File {path} must be in an existing directory')
 
             elif key == 'upon':
-                path = os.path.abspath(text)
+                # `check_upon()` below rejects a relative mount point, but only
+                # if it sees the raw text: normalizing to an absolute path first
+                # made that check unreachable, so a relative entry slipped
+                # through and resolved against the process working directory.
+                path = os.path.expanduser(text)
+                if not os.path.isabs(path):
+                    errs.append(f'ERR: mount point ({text}) must be absolute path')
+                    continue
+                path = os.path.abspath(path)
                 if 'back_file' in values or container.back_file:
                     back_file = container.back_file if container.back_file else values['back_file']
                     if path == self.vault_dir:

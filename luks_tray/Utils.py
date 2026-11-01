@@ -14,10 +14,17 @@ import shutil
 import inspect
 from datetime import datetime
 from io import StringIO
+from types import SimpleNamespace
 
-prt_kb = 512
-prt_path = ''
-prt_to_init = True
+# Where prt() sends its output, and the size that rotates the log. One private
+# object replaces the pair of bare globals this used to be (`prt_path` plus an
+# "already redirected" flag): the flag could only ever be set, so assigning the
+# path a second time was a silent no-op and the target was decided by whichever
+# prt() call happened to run first. `configure_log()` owns that transition now.
+# `opened_path` is the file *this process* redirected fd 1 onto ('' = never), so
+# a later `configure_log()` may take the stream over again -- while a stdout the
+# caller redirected themselves (a regular file we did not open) stays untouched.
+_log = SimpleNamespace(path='', opened_path='', max_kb=512)
 # Keys already emitted through prt_once(). Bounded, because the tray runs for
 # weeks: when the set fills up it is cleared wholesale, which at worst repeats
 # a warning the user has already seen.
@@ -59,51 +66,87 @@ def where(above=0):
     return f'[{filename.split("/")[-1]}:{line_number}]'
 
 
+def _is_tty():
+    """ True if stdout is a terminal. Silent by design: called from prt(). """
+    try:
+        os.ttyname(sys.stdout.fileno())
+        return True
+    except Exception:                               # pylint: disable=broad-except
+        return False
+
+
+def _is_reg():
+    """ True if stdout is already an open regular file. Silent, same reason. """
+    try:
+        return stat.S_ISREG(os.fstat(sys.stdout.fileno()).st_mode)
+    except Exception:                               # pylint: disable=broad-except
+        return False
+
+
+def _reopen_log():
+    """ Point stdout and stderr at the configured log, in append mode. """
+    try:
+        sys.stdout = open(_log.path, "a+", encoding='utf-8')
+    except OSError:
+        return              # Cannot log there; keep whatever stdout already is.
+    sys.stderr = sys.stdout
+    os.dup2(sys.stdout.fileno(), 1)
+    os.dup2(sys.stderr.fileno(), 2)
+    _log.opened_path = _log.path
+
+
+def configure_log(path, max_kb=512):
+    """ Point prt() at `path` and redirect stdout/stderr onto it.
+
+        Called from `main()` in place of assigning `Utils.prt_path` directly.
+        The redirection happens here rather than lazily on the next prt(), so a
+        message logged while the program is still coming up (the `IniTool`
+        constructor, for instance) reaches the file instead of a stdout a
+        desktop launch has already pointed nowhere.
+
+        A second call *moves* the log: `opened_path` records the file this
+        process opened, so the stream can be taken over again, where the old
+        globals kept the very first decision for the lifetime of the process. A
+        terminal is left alone (prt() keeps printing to it), and so is a stdout
+        the caller redirected to a file of their own. `max_kb <= 0` disables the
+        redirection and the size cap, so prt() just prints.
+    """
+    _log.path = path or ''
+    _log.max_kb = max_kb
+    if not _log.path or _log.max_kb <= 0:
+        return
+    if _is_tty():
+        return
+    if _is_reg() and not _log.opened_path:
+        return              # Someone redirected stdout; not ours to replace.
+    _reopen_log()
+
+
 def prt(*args, **kwargs):
     """ Our custom print routine ...
      - use instead of print() to get time stamps.
      - unless stdout is a tty, say for debugging, ~/.config/luks-tray/debug.log is used for stdout
      - if we create a log file, its size is limited to 512K and then it is truncated
-     """
+    """
     def check_stdout(use_stdout=None):
-        """ Make sure stdout points at a terminal or at the debug log. """
-        global prt_to_init
-        # The two probes below deliberately stay silent: they run *inside*
-        # prt(), so logging a failure here would call prt() again and recurse
-        # until the stack runs out. "Not a tty" / "not a regular file" is also
-        # the normal answer for a tray started by a desktop session.
-        def is_tty():
-            """ True if stdout is a terminal. """
-            try:
-                os.ttyname(sys.stdout.fileno())
-                return True
-            except Exception:                       # pylint: disable=broad-except
-                return False
-        def is_reg():
-            """ True if stdout is already an open regular file (the log). """
-            try:
-                return stat.S_ISREG(os.fstat(sys.stdout.fileno()).st_mode)
-            except Exception:                       # pylint: disable=broad-except
-                return False
-        def reopen():
-            """ Point stdout and stderr at the debug log in append mode. """
-            global prt_to_init
-            sys.stdout = open(prt_path, "a+", encoding='utf-8')
-            sys.stderr = sys.stdout
-            os.dup2(sys.stdout.fileno(), 1)
-            os.dup2(sys.stderr.fileno(), 2)
-            prt_to_init = False
+        """ Make sure stdout points at a terminal or at the debug log.
 
-        if prt_kb > 0 and prt_path: # non-positive disables stdout "tuning"
+            The probes above (`_is_tty()` / `_is_reg()`) stay silent on purpose:
+            they run *inside* prt(), so reporting a failure here would call prt()
+            again and recurse until the stack runs out. "Not a tty" / "not a
+            regular file" is also the normal answer for a tray started by a
+            desktop session.
+        """
+        if _log.max_kb > 0 and _log.path: # non-positive disables stdout "tuning"
             if use_stdout is False:
-                reopen()
-            elif prt_to_init and sys.stdout.closed: # Check if stdout is closed
-                reopen()
-            elif prt_to_init and not is_tty() and not is_reg():
-                reopen()
-            if os.fstat(sys.stdout.fileno()).st_size > prt_kb*1024:
-                shutil.move(prt_path, f'{prt_path}1')
-                reopen()
+                _reopen_log()
+            elif not _log.opened_path and sys.stdout.closed: # stdout is closed
+                _reopen_log()
+            elif not _log.opened_path and not _is_tty() and not _is_reg():
+                _reopen_log()
+            if os.fstat(sys.stdout.fileno()).st_size > _log.max_kb*1024:
+                shutil.move(_log.path, f'{_log.path}1')
+                _reopen_log()
 
     to_stdout = None
     if 'to_stdout' in kwargs:
