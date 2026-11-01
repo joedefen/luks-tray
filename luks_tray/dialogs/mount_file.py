@@ -265,21 +265,17 @@ class MountFileDialog(CommonDialog):
             self.show_progress('Mount file...')
             try:
                 with tray.busy_operation('mount file'):
-                    # `err` has to start out defined: with an existing mount
-                    # point the mkdir branch below is skipped.
-                    err = None
-                    if mount_point and not os.path.exists(mount_point):
-                        err = run_cmd(['mkdir', '-p', mount_point])
-                    if not err:
-                        # The "create new crypt file" layout has no Read-only
-                        # checkbox, so `readonly` is only present for the
-                        # mount/add layouts -- indexing it raised KeyError.
-                        err = mount_luks_container(tray, container,
-                                values['password'], mount_point,
-                                readonly=values.get('readonly', False),
-                                luks_file=back_file,
-                                size=values.get('size_str', None),
-                                dot_vault_dir=self.dot_vault_dir)
+                    # The mount point is created inside mount_luks_container(),
+                    # as the user, so an empty one can be cleaned up later.
+                    # The "create new crypt file" layout has no Read-only
+                    # checkbox, so `readonly` is only present for the
+                    # mount/add layouts -- indexing it raised KeyError.
+                    err = mount_luks_container(tray, container,
+                            values['password'], mount_point,
+                            readonly=values.get('readonly', False),
+                            luks_file=back_file,
+                            size=values.get('size_str', None),
+                            dot_vault_dir=self.dot_vault_dir)
             finally:
                 self.hide_progress()
 

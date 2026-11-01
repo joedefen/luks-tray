@@ -121,6 +121,32 @@ def sudo_run(args, input_str=None, timeout=None):
     return run_cmd_capture(['sudo', '-n'] + args, input_str, timeout)
 
 
+def ensure_dir(path):
+    """ Create `path` (and any missing parents) as the *user*, not as root.
+
+        Auto-mount points live inside the user's own vault area, and the
+        startup cleanup removes the empty ones with a plain `os.rmdir()`, which
+        needs write permission on their *parent*. Creating them with
+        `sudo mkdir -p` therefore left directories the unprivileged tray could
+        never tidy up again -- and the `-p` also created the vault root itself
+        as root, which blocked every later removal below it.
+
+        `mount` does not care who owns the mount point, so the user's own tree
+        is created directly, and sudo is only used as a fallback for a path
+        outside it (e.g. a manual mount point below /mnt).
+    """
+    if os.path.isdir(path):
+        return None
+    try:
+        os.makedirs(path, exist_ok=True)
+        return None
+    except PermissionError:
+        return sudo_cmd(['mkdir', '-p', path])
+    except OSError as exc:
+        # Existing non-directory, read-only parent, bad path component, ...
+        return f'FAIL: cannot create {path!r}: {exc}'
+
+
 def run_unmount(mount_point: str, busy_warns: set) -> str | None:
     """Attempts to unmount the given mount point.
     If it fails due to 'busy', show a popup with the list of processes using it.
@@ -259,6 +285,13 @@ def mount_luks_container(tray, container, password, upon=None, luks_device=None,
         # `assert` would vanish and let a bogus mount point reach `mount`.
         return 'ERR: cannot mount without a mount point'
     try:
+        # Both dialogs come through here, so the mount point is created in one
+        # place and always as the user (see ensure_dir()). Doing this before
+        # the unlock means a failure leaves no open mapper behind.
+        err = ensure_dir(upon)
+        if err:
+            return err
+
         # Determine if this is a file or device container
         is_file_container = luks_file is not None
 

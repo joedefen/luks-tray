@@ -129,11 +129,11 @@ class MountDeviceDialog(CommonDialog):
 
         # Proceed with mounting if no errors
         if not errs:
+            # The mount point is created by mount_luks_container(), as the user:
+            # the startup cleanup removes empty auto-mount folders with a plain
+            # rmdir, and a root-owned directory (what `sudo mkdir -p` left
+            # behind) can never be removed again by the unprivileged tray.
             mount_point = values['upon']
-            if mount_point and not os.path.exists(mount_point):
-                # Through sudo, so the folder has the owner `mount` expects
-                # and survives the close (os.makedirs would run as the user).
-                sudo_cmd(['mkdir', '-p', mount_point])
 
             self.hide_password()
             self.show_progress('Mount device...')

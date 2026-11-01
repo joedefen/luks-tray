@@ -653,8 +653,10 @@ class LuksTray():
             - neither the real user's home nor an ancestor of it, and not inside
               another user's home;
             - if it exists: a plain directory, not a mount point, owned by the
-              real user or by root (the tray creates it as root when run under
-              sudo), and not writable by group/other.
+              real user or by root (an install whose mount points were created
+              with `sudo mkdir` has a root-owned root; the cleanup still works
+              there because it retries `rmdir` via `sudo -n`), and not writable
+              by group/other.
 
             The checks are deliberately conservative: when in doubt, skip the
             cleanup and log why (`remove_unused_automounts` treats any returned
@@ -727,15 +729,53 @@ class LuksTray():
         return None
 
     @staticmethod
+    def ensure_auto_mount_root(auto_root=None):
+        """ Make the auto-mount root exist, and belong to the real user.
+
+            Earlier releases created mount points with `sudo mkdir -p`, which
+            left the *root* root-owned as well (the `-p` creates missing
+            parents). Since `rmdir` needs write permission on the parent, the
+            cleanup could then never remove anything below it, and every new
+            mount point had to be created through sudo again. One non-recursive
+            `chown` of the root repairs that for good: afterwards the user owns
+            the tree, so mount points are created and cleaned up unprivileged.
+
+            The `chown` is deliberately *not* `-R`: that would rewrite the
+            ownership of whatever filesystem is mounted inside. It is also only
+            attempted on a root that [`validate_auto_mount_root()`]
+            (luks_tray/main.py) accepts, so a path read from config.ini cannot
+            turn this into a privileged chown of an arbitrary directory.
+
+            Returns None on success, or a 'FAIL: ...' string.
+        """
+        if auto_root is None:
+            auto_root = LuksTray.get_auto_mount_root()
+        if not os.path.isdir(auto_root):
+            return run_cmd(['mkdir', '-p', auto_root])
+        real_uid, real_gid = LuksTray.get_real_user_ids()
+        try:
+            owner_uid = os.stat(auto_root).st_uid
+        except OSError as exc:
+            return f'FAIL: cannot inspect {auto_root!r}: {exc}'
+        if owner_uid == real_uid:
+            return None                      # Already the user's: nothing to do
+        problem = LuksTray.validate_auto_mount_root(auto_root)
+        if problem:
+            return f'FAIL: not repairing ownership of {auto_root!r}: {problem}'
+        return sudo_cmd(['chown', f'{real_uid}:{real_gid}', auto_root])
+
+    @staticmethod
     def generate_auto_mount_folder():
         """ Return a new, unused mount point below the auto-mount root.
 
-            Creates the root with `sudo mkdir` first when it does not exist,
-            then offers petname-style names: the short suffix alone at first
-            and the full `adjective_name` form after a few tries, skipping
-            anything currently mounted or known to the history. If those run
-            out, a numeric `vaultNNNN` fallback is used; RuntimeError is raised
-            when even that is exhausted.
+            Makes the root exist and belong to the user first (see
+            [`ensure_auto_mount_root()`](luks_tray/main.py)), so the mount point
+            below it can be created unprivileged and cleaned up again. Then
+            offers petname-style names: the short suffix alone at first and the
+            full `adjective_name` form after a few tries, skipping anything
+            currently mounted or known to the history. If those run out, a
+            numeric `vaultNNNN` fallback is used; RuntimeError is raised when
+            even that is exhausted.
         """
 
         def available(basename):
@@ -748,14 +788,18 @@ class LuksTray():
 
         tray = LuksTray.singleton
         auto_root = LuksTray.get_auto_mount_root()
-        if os.path.exists(auto_root):
-            if not os.path.isdir(auto_root):
-                # `assert` is stripped by `python -O`, and the caller would
-                # then hand out mount points inside a non-directory.
-                raise RuntimeError(
-                    f'auto_mount_folder ({auto_root!r}) exists but is not a directory')
-        else:
-            run_cmd(['mkdir', auto_root])
+        if os.path.exists(auto_root) and not os.path.isdir(auto_root):
+            # `assert` is stripped by `python -O`, and the caller would then
+            # hand out mount points inside a non-directory.
+            raise RuntimeError(
+                f'auto_mount_folder ({auto_root!r}) exists but is not a directory')
+        err = LuksTray.ensure_auto_mount_root(auto_root)
+        if err:
+            # Handing out mount points inside a directory that could not be
+            # created only moves the failure to `mount`, with a message that no
+            # longer mentions the configured folder.
+            raise RuntimeError(
+                f'cannot create auto_mount_folder ({auto_root!r}): {err}')
 
         for loop in range(30):
             full = petname.Generate(2, separator='_')   # e.g., 'stoic_turing'
@@ -791,11 +835,17 @@ class LuksTray():
     def remove_empty_dir(path):
         """ rmdir `path` if (and only if) it is an empty, plain directory.
 
-            This is intentionally unprivileged: the caller has validated the
-            auto-mount root (see [`validate_auto_mount_root()`](luks_tray/main.py)), so
-            `os.rmdir` suffices and a failure is simply reported instead of
-            escalating to sudo. `rmdir` itself refuses to delete non-empty
-            directories, and mount points are skipped here as well.
+            The guards below decide whether a directory may go; the credentials
+            used to remove it do not change them -- `rmdir` itself refuses
+            non-empty directories and mount points, and the caller has already
+            restricted `path` to below a validated auto-mount root (see
+            [`validate_auto_mount_root()`](luks_tray/main.py)).
+
+            The first attempt is unprivileged; EACCES/EPERM is retried with
+            `sudo -n`, like the rest of the mount handling. That is what makes
+            the cleanup work on a vault root earlier releases left root-owned
+            (`sudo mkdir -p` created it as root): `rmdir` needs write permission
+            on the *parent*, which the unprivileged tray does not have there.
         """
         if os.path.islink(path) or not os.path.isdir(path):
             return False
@@ -804,11 +854,26 @@ class LuksTray():
         try:
             os.rmdir(path)              # only removes empty dirs
             return True
+        except PermissionError:
+            err = sudo_cmd(['rmdir', path])
+            if err:
+                prt_once(f'rmdir {path}', f'note: not removing {path!r}: {err}')
+            return err is None
         except OSError as exc:
-            # Overwhelmingly "directory not empty", which is a normal outcome
-            # during cleanup -- but it is also what a permission problem looks
-            # like, so report each path once instead of failing invisibly.
+            # Callers only pass folders that were empty a moment ago, so this is
+            # a race (something appeared inside it in between) rather than the
+            # normal "directory not empty" -- report each path once instead of
+            # failing invisibly.
             prt_once(f'rmdir {path}', f'note: not removing {path!r}: {exc}')
+            return False
+
+    @staticmethod
+    def is_empty_dir(path):
+        """ True if `path` is a directory holding no entries at all. """
+        try:
+            with os.scandir(path) as entries:
+                return next(entries, None) is None
+        except OSError:
             return False
 
     @staticmethod
@@ -840,21 +905,12 @@ class LuksTray():
         if problem:
             prt(f'WARN: skipping auto-mount cleanup: {problem}')
             return 0
+        # Give the root back to the user if an older `sudo mkdir -p` left it
+        # root-owned: then the plain rmdir below works without escalating at all.
+        # A failure here is not fatal -- remove_empty_dir() falls back to sudo.
+        LuksTray.ensure_auto_mount_root(parent_dir)
         if not os.path.isdir(parent_dir):
             return 0  # Nothing to clean yet
-        if not os.access(parent_dir, os.W_OK | os.X_OK):
-            # `rmdir` needs write+execute on the *folder*, not ownership of the
-            # child, so when the folder itself is not writable by this process
-            # nothing below it can be removed. That is the normal state of an
-            # unprivileged run: mount points are created with `sudo mkdir -p`,
-            # so `~/Vaults` is root-owned 0755 and every `os.rmdir` below would
-            # fail with EACCES. Say it once and leave the tidying to a run that
-            # has the privileges, instead of logging a permission error per
-            # directory (the old behaviour looked like a bug in the cleanup).
-            prt_once(f'automount root not writable {parent_dir}',
-                     f'note: skipping auto-mount cleanup: {parent_dir!r} is not '
-                     f'writable by this process (euid {os.geteuid()})')
-            return 0
 
         try:
             names = os.listdir(parent_dir)
@@ -885,6 +941,12 @@ class LuksTray():
                 continue
             if stat_info.st_uid not in allowed_uids:
                 continue  # Someone else's directory: not ours to delete
+            # Checked before rmdir is even attempted: a folder holding files is
+            # a normal, in-use vault, and letting `rmdir` report ENOTEMPTY for
+            # it turned every startup into a "note: not removing ..." line.
+            # Only a genuine race still reaches remove_empty_dir()'s reporting.
+            if not LuksTray.is_empty_dir(full_path):
+                continue
             if LuksTray.remove_empty_dir(full_path):
                 removed += 1
                 prt(f'removed unused auto-mount folder {full_path!r}')

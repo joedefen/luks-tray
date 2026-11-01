@@ -63,26 +63,34 @@ class DeviceInfo:
         """ Return the hardware model of `device_name` from /sys ('' if none).
 
             Reads `/sys/class/block/<name>/device/model`, which is what
-            distinguishes real disks in the menu ('Samsung SSD 980 ...'). Loop
-            and device-mapper nodes have no such attribute, so an empty string
-            is the normal answer there and is logged only once.
+            distinguishes real disks in the menu ('Samsung SSD 980 ...'). Most
+            block devices have no such attribute at all and that is normal -- see
+            `get_str()` -- so the empty string is an answer, not a failure.
         """
         def get_str(device_name, suffix):
-            """ Read one /sys attribute; '' when the node does not exist. """
+            """ Read one /sys attribute; '' when the device has no such node. """
+            fullpath = f'/sys/class/block/{device_name}/device/{suffix}'
             try:
-                rv = ''
-                fullpath = f'/sys/class/block/{device_name}/device/{suffix}'
                 with open(fullpath, 'r', encoding='utf-8') as f: # Read information
-                    rv = f.read().strip()
+                    return f.read().strip()
+            except (FileNotFoundError, NotADirectoryError):
+                # The normal case, and not a problem to report: a block device
+                # with no hardware behind it -- zram (swap held in RAM), a
+                # device-mapper node, a loop device, md/raid, nbd -- has no
+                # `device/` node at all, so there is no model to read and '' is
+                # the right answer (the menu then shows 'DISK'). Most partitions
+                # lack it too. This runs for every device on every 3 s refresh,
+                # so it stays quiet.
+                return ''
             except (OSError, UnicodeDecodeError) as e:
-                # Not every block device has a .../device/model node (loops,
-                # dm devices, some partitions). This runs for every device on
-                # every 3 s refresh, so say it once per node: the empty string
-                # is still the right answer, it just is not a silent one.
-                rv = ''
-                prt_once(f'no {suffix} for {device_name}',
-                         f'note: cannot read {fullpath}: {e}')
-            return rv
+                # A node that exists but cannot be read is unusual -- a
+                # locked-down /sys, an I/O error, garbage in the attribute --
+                # and worth exactly one line, because the consequence is
+                # invisible otherwise: the device is listed without a model.
+                prt_once(f'unreadable {fullpath}',
+                         f'WARN: cannot read the model of {device_name!r} '
+                         f'({fullpath}): {e}; listing it without one')
+                return ''
 
         # Only the model: the vendor string adds nothing the user recognises
         # ("Generic", "ATA", ...) and made the menu line too long.
@@ -122,11 +130,11 @@ class DeviceInfo:
                 with open(node, 'r', encoding='utf-8') as f:
                     backing_file = f.read().strip()
                 return backing_file
-            except FileNotFoundError as e:
-                # A loop device set up on a block device (or one created by
-                # systemd) has no backing_file node at all. Expected, but it is
-                # exactly what makes the tray treat the loop as file-less.
-                prt_once(f'no {node}', f'note: {node}: {e}')
+            except FileNotFoundError:
+                # A loop device set up on a block device has no backing_file
+                # node at all, and a detached one loses it. Expected: '' is the
+                # right answer, and it is simply not a file container, so there
+                # is nothing to tell the user.
                 return ''
             except OSError as e:
                 prt_once(f'unreadable {node}', f'WARN: cannot read {node}: {e}')
@@ -176,7 +184,12 @@ class DeviceInfo:
         # Parse each block device and its properties
         for device in parsed_data['blockdevices']:
             parent = eat_one(device)
-            parent.fstype = self.get_device_vendor_model(parent.name)
+            if device.get('children'):
+                # Only a device with children can become a menu entry (see the
+                # loop below), so reading the model for the rest -- zram, dm,
+                # an unattached disk -- was a /sys lookup per device per 3 s
+                # tick whose answer is thrown away.
+                parent.fstype = self.get_device_vendor_model(parent.name)
             for child in device.get('children', []):
                 entry = eat_one(child)
                 entry.parent = parent
