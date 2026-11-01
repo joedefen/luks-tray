@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+""" Development launcher: run `./runner` to start the tray from the source tree.
+
+    The installed entry point (`luks-tray = luks_tray.Main:main`, see
+    pyproject.toml) does the same thing; this script exists so the project can
+    be run without being installed.
+
+    It is a script, not an importable module, so the CamelCase naming rule used
+    for the modules in `luks_tray/` does not apply to it. If the shebang picks
+    an interpreter without the dependencies, name one explicitly:
+    `lt-venv/bin/python runner --check-deps`.
+"""
+
+import sys
+from luks_tray.Main import main
+
+if __name__ == "__main__":
+    # Call the main entry point defined inside your package
+    sys.exit(main())
