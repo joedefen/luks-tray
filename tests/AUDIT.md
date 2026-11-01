@@ -187,7 +187,7 @@ Design points:
 
 **Verified:** `ruff --target-version py311 --select F,E9 luks_tray runner` → **0** `invalid-syntax` findings (was 2); the 6 remaining findings are pre-existing `F401` unused imports (`shlex`, `tempfile`, `pathlib.Path`, `io.StringIO`, `QSizePolicy`, `QFontDatabase`). A sweep for other 3.12-only APIs (`itertools.batched`, `typing.override`, `sys.monitoring`, `Path.walk`, PEP 695 `type` aliases/generics) found none. `py_compile` passes for every module on 3.13.
 
-**Caveat:** only CPython 3.13 is installed in this environment, so 3.11 compatibility is established by ruff's `py311` parser, not by execution — note that `ast.parse(..., feature_version=(3, 11))` does **not** catch PEP 701 quote reuse (it accepts the 3.12 tokenizer), so ruff is the authority here. A CI matrix on 3.11 would settle it.
+**Caveat:** only CPython 3.13 is installed in this environment, so 3.11 compatibility is established by ruff's `py311` parser, not by execution — note that `ast.parse(..., feature_version=(3, 11))` does **not** catch PEP 701 quote reuse (it accepts the 3.12 tokenizer), so ruff is the authority here. **Settled:** the suite now runs on 3.11.17 for real (279 tests, the same 54.1% coverage as on 3.13), and CI runs 3.11, 3.12 and 3.13 on every push and pull request — see medium #11.
 
 ### ✅ 7. No file hardening / non-atomic writes — FIXED (metadata privacy remains by design)
 

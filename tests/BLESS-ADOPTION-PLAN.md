@@ -1,10 +1,12 @@
 # Adopting `bless` in `luks-tray`
 
-**Status: Phase 1 done, Phases 2–4 open.** [`bless`](../bless) is present,
-executable and copied verbatim; the tree now satisfies its assumptions except
-the ones that need a test suite. What is still missing is Phase 2 (the tests),
-Phase 3 (CI) and Phase 4 (the developer documentation). Each phase below says
-what was verified, not what was intended.
+**Status: Phases 1–3 done, Phase 4 open, coverage floor outstanding.** [`bless`](../bless)
+is present, executable and copied verbatim and the full pipeline runs end to end
+(transcript in Phase 2); the tree has **279 tests** across ten modules; CI runs
+the same three gates on 3.11, 3.12 and 3.13. What is left is Phase 4 (the
+developer documentation, under `tests/` as agreed) and the `fail_under` floor,
+which waits for the three remaining coverage targets. Each phase below says what
+was verified, not what was intended.
 
 `bless` is the release gate used by `../pwr-tray`, `../my-snaps` and
 `../vappman` (all three hold the identical file, SHA-256
@@ -55,12 +57,12 @@ then provide"). Status was read from the tree, not assumed.
 | `python -m build` works, from the dev extra | `build` was not installed in `lt-venv` (3.13.5) | **done**: `build 1.6.1` |
 | Dev extra: ruff, pytest, pytest-cov, build, twine>=7, packaging>=26 | no `[project.optional-dependencies]` at all | **done**: `pytest 9.2.0`, `pytest-cov 7.1.0`, `build 1.6.1`, `twine 7.0.0`, `packaging 26.3`, `ruff 0.17.3` |
 | Inspector at `tests/inspect_dist.py` | missing — `tests/` held only `AUDIT.md` | **done**: [`tests/inspect_dist.py`](inspect_dist.py) |
-| A `pytest` suite the gates can run | **none** — `pytest` exits 5, which `bless` reads as a failed gate | **Phase 2** |
+| A `pytest` suite the gates can run | `pytest` exited 5, which `bless` reads as a failed gate | **done**: 279 tests, 54.1% of 1893 statements |
 | Clean working tree | clean; `.ruff_cache/`, `*.whl`, `*.tar.gz`, `.coverage*` were not ignored | **done**: [`.gitignore`](../.gitignore) covers the gate's output |
 | `vX.Y.Z` tag absent | no version tags exist (only `archive/sway`) | ok |
 | `main` and `dev` exist locally **and** as `origin/*` | both do; `dev` is 4 commits ahead of `origin/dev` | push `dev` before the first `bless` run from `dev` |
 | Credentials per index, kept out of the tree | none in the tree | `~/.pypirc` or `TWINE_PASSWORD` / `TWINE_TESTPYPI_PASSWORD` |
-| A GitHub Actions pipeline | none | **Phase 3** |
+| A GitHub Actions pipeline | none | **done**: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) |
 
 Two consequences worth stating plainly:
 
@@ -253,10 +255,15 @@ throwaway virtualenv — pulling real PyQt6 — and ran `luks-tray --version` th
 which is the only way to prove that the console script, the packaged SVGs and
 the version line agree in an installation rather than in the source tree.
 
-## Phase 3 — CI (open)
+## Phase 3 — CI (done, commit `13e2b42`)
 
 `.github/workflows/ci.yml`, modelled on `../pwr-tray/.github/workflows/tests.yml`,
-three jobs:
+three jobs — as planned below, with two additions that only became clear while
+writing it: `libdbus-1-3` alongside the GL libraries (Qt's platform plugin links
+it), and the same apt step in the **package** job, because the installed console
+script imports Qt and would abort without it. There is no publish job and no
+credential anywhere in the file; `tests/test_repo_hygiene.py` asserts both, so a
+future edit cannot quietly add one.
 
 * **lint** — `ruff check --output-format=github .` on the in-repo config only.
 * **test** — matrix `3.11`, `3.12`, `3.13`; `apt-get install -y libgl1 libegl1
@@ -273,6 +280,15 @@ three jobs:
 Triggers: `push` on `main` and `dev`, `pull_request`, `workflow_dispatch`;
 `permissions: contents: read`; a `concurrency` group that cancels superseded
 runs.
+
+**Verified as far as a local machine can.** The YAML was parsed with PyYAML and
+its structure asserted (three jobs, every step has a `run` or a `uses`, the job
+names and the environment); the workflow's commands were run locally one by one,
+which is what `./bless` does anyway. The matrix's lowest version was executed
+for real: a throwaway `python3.11 -m venv` with `-e '.[dev]'` runs the same
+**279 tests** at the same 54.1% coverage as 3.13. That also settles the caveat
+in [`AUDIT.md`](../tests/AUDIT.md) #6, where 3.11 support rested on ruff's
+`py311` parser because no 3.11 interpreter was installed.
 
 ## Phase 4 — documentation (open)
 
