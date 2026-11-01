@@ -137,7 +137,27 @@ Two consequences worth stating plainly:
 version read from the module; `tests/inspect_dist.py` accepts that pair;
 `lt-venv/bin/luks-tray --version` → `luks-tray 3.0.0` and
 `python -m luks_tray.Main --version` → `Main.py 3.0.0`; `ruff check .` →
-*All checks passed* under the pinned selection; `git ls-files deploy` empty.
+*All checks passed* under the pinned selection; `git ls-files deploy` empty;
+link checker 282 links in 16 files, all resolve.
+
+And `lt-venv/bin/python ./bless` at commit `79f16d6` runs as designed and stops
+exactly where this plan says it must:
+
+```
+[bless] luks-tray 3.0.0
+[preflight] clean tree at 79f16d6 on dev
+[index] luks-tray 3.0.0 is not on PyPI (6 versions exist; latest is 2.0.5)
+[gate] lint          → All checks passed!
+[gate] compile       → clean
+[gate] tests         → no tests ran; 0.0% coverage; exit 5
+bless: refused: the tests gate failed (exit 5)
+```
+
+That is the ordering doing its job: the duplicate check ran before anything was
+built, the gates ran before the prompt, and the prompt was never reached. The
+coverage report it printed is the measure of the job ahead — **1893
+statements** across the package, of which `Main.py` (550) and
+`dialogs/Common.py` (247) are the two largest targets.
 
 ## Phase 2 — the test suite (open)
 
