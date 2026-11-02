@@ -476,7 +476,7 @@ def in_systemd_service(env=None):
     return bool((os.environ if env is None else env).get('INVOCATION_ID'))
 
 
-def spawn_detached(command, spawn=None, env=None):
+def spawn_detached(command, spawn=None, env=None, quiet=False):
     """ Start `command` so that it outlives this process.
 
         Under systemd the applet and everything it spawns share one cgroup, and
@@ -487,6 +487,19 @@ def spawn_detached(command, spawn=None, env=None):
         us. `start_new_session=True` is setsid(2): it detaches the child from
         our session and controlling terminal, so the same call also works when
         the applet was started from a terminal or a DE autostart.
+
+        `quiet=True` gives the child `/dev/null` on all three standard streams.
+        It is for the children that are *viewers* rather than workers: by the
+        time we spawn one, `prt()` has already `dup2()`-ed fds 1 and 2 onto
+        debug.log, so an inheriting child writes straight into the log -- and a
+        terminal emulator is itself a Qt application (konsole is Qt6), so it
+        appends its own Qt chatter, palette table and all, in Qt's raw format.
+        `qInstallMessageHandler()` cannot stop that: a message handler filters
+        the messages of *its own* process, and those lines are another process's
+        output. Giving the viewer /dev/null is the only place the leak can be
+        closed, and a viewer has nothing to say that belongs in our log. The
+        applet's own restart deliberately keeps the inherited descriptors: its
+        output *is* this session's log.
     """
     command = [str(part) for part in command]
     if not command:
@@ -496,7 +509,11 @@ def spawn_detached(command, spawn=None, env=None):
     if runner and in_systemd_service(env):
         command = [runner, '--user', '--scope', '--quiet', '--', *command]
     spawn = subprocess.Popen if spawn is None else spawn
-    return spawn(command, start_new_session=True)
+    stdio = {}
+    if quiet:
+        stdio = {'stdin': subprocess.DEVNULL, 'stdout': subprocess.DEVNULL,
+                 'stderr': subprocess.DEVNULL}
+    return spawn(command, start_new_session=True, **stdio)
 
 
 # Terminals that can be asked to run a command, with the flag each one takes.

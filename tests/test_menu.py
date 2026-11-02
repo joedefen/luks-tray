@@ -375,15 +375,21 @@ def test_opening_the_log_spawns_the_viewer_outside_our_process(qapp, monkeypatch
         Main.Utils, 'log_viewer_argv',
         lambda log, old, preferred: asked.append((log, old, preferred))
         or ['foot', '-e', 'less', '+F', log])
-    monkeypatch.setattr(Main.Utils, 'spawn_detached', spawned.append)
+    monkeypatch.setattr(Main.Utils, 'spawn_detached',
+                        lambda command, **kwargs: spawned.append((command, kwargs)))
     instance = menu_builder(qapp, log_viewer='foot -e', bind=('open_log',))
 
     instance.open_log()
 
     assert asked == [(instance.ini_tool.log_path,
                       instance.ini_tool.log_old_path, 'foot -e')]
-    assert spawned == [['foot', '-e', 'less', '+F',
-                        instance.ini_tool.log_path]]
+    # `quiet=True` is the point, not decoration: the viewer inherits fds 1
+    # and 2, which prt() pointed at debug.log, and a Qt terminal emulator
+    # then writes its own Qt chatter (the platform theme's palette table,
+    # QThreadStorage, QLayout) into our log in Qt's raw, unstamped format.
+    # No message handler can filter that -- it is a different process.
+    assert spawned == [(['foot', '-e', 'less', '+F',
+                         instance.ini_tool.log_path], {'quiet': True})]
 
 
 def test_opening_the_log_without_a_viewer_only_complains(qapp, monkeypatch,
@@ -404,7 +410,8 @@ def test_a_viewer_that_cannot_start_is_reported_not_raised(qapp, monkeypatch,
                                                            capsys):
     monkeypatch.setattr(Main.Utils, 'log_viewer_argv',
                         lambda log, old, preferred: ['foot', '-e', 'less'])
-    monkeypatch.setattr(Main.Utils, 'spawn_detached', lambda command:
+    monkeypatch.setattr(Main.Utils, 'spawn_detached',
+                        lambda command, **kwargs:
                         (_ for _ in ()).throw(OSError('no such file')))
     instance = menu_builder(qapp, bind=('open_log',))
 

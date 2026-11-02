@@ -173,6 +173,41 @@ def test_spawn_detached_does_nothing_for_an_empty_command():
     assert Utils.spawn_detached([], spawn=lambda *a, **k: pytest.fail('spawned')) is None
 
 
+def test_spawn_detached_can_keep_a_child_out_of_our_log(tmp_path, monkeypatch):
+    # The log viewer is spawned while fds 1 and 2 are debug.log, and konsole
+    # (the `x-terminal-emulator` alternative) is a Qt6 application: without
+    # this, Qt's raw palette dump is appended to our log, where the Qt message
+    # handler cannot reach it because the lines are another process's.
+    _fake_systemd_run(tmp_path, monkeypatch)
+    seen = {}
+
+    def fake_spawn(command, **kwargs):
+        seen['command'] = command
+        seen.update(kwargs)
+
+    Utils.spawn_detached(['konsole', '-e', 'less'], spawn=fake_spawn,
+                         env={'PATH': '/bin'}, quiet=True)
+
+    assert seen['command'] == ['konsole', '-e', 'less']
+    assert seen['start_new_session'] is True
+    assert seen['stdin'] == Utils.subprocess.DEVNULL
+    assert seen['stdout'] == Utils.subprocess.DEVNULL
+    assert seen['stderr'] == Utils.subprocess.DEVNULL
+
+
+def test_spawn_detached_leaves_the_applet_s_own_streams_alone(tmp_path,
+                                                             monkeypatch):
+    # The restart spawn must keep writing into the session's log; only viewers
+    # are quiet.
+    _fake_systemd_run(tmp_path, monkeypatch)
+    seen = {}
+    Utils.spawn_detached(['true'],
+                         spawn=lambda command, **kw: seen.update(kw, command=command),
+                         env={'PATH': '/bin'})
+
+    assert set(seen) == {'command', 'start_new_session'}
+
+
 # -- a session that is ending ---------------------------------------------
 
 class FakeSignal:

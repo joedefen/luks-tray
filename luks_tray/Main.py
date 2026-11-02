@@ -847,6 +847,15 @@ class LuksTray():
             That call also puts the viewer in its own session -- and, under
             systemd, in a transient scope outside our cgroup -- so restarting or
             stopping the applet does not take the log window down with it.
+
+            `quiet=True` because the viewer's own output is not ours: prt() has
+            pointed fds 1 and 2 at debug.log, and a terminal emulator that
+            inherited them writes its Qt chatter into the file -- `konsole`,
+            the `x-terminal-emulator` alternative on this machine, is a Qt6
+            application and dumps the platform theme's whole palette table
+            there. That is the noise `qt_message_handler()` cannot reach: a
+            message handler filters its own process, and those lines come from
+            the terminal's.
         """
         preferred = self.ini_tool.get_current_val('log_viewer') or ''
         arguments = Utils.log_viewer_argv(self.ini_tool.log_path,
@@ -858,7 +867,7 @@ class LuksTray():
             return
         prt('+', 'running:', arguments)
         try:
-            Utils.spawn_detached(arguments)
+            Utils.spawn_detached(arguments, quiet=True)
         except (OSError, subprocess.SubprocessError) as exce:
             prt(f'ERROR: cannot open the log: {exce}')
 
