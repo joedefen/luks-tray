@@ -18,7 +18,7 @@ UNIT_TEXT = (
     '\n'
     '[Service]\n'
     'ExecStart=%h/.local/bin/luks-tray\n'
-    'Restart=always\n'
+    'Restart=on-failure\n'
     '\n'
     '[Install]\n'
     'WantedBy=graphical-session.target\n'
@@ -124,10 +124,25 @@ def test_each_shipped_unit_keeps_the_sbin_directories_on_path(session):
 @pytest.mark.parametrize('session', ['wayland', 'x11'])
 def test_each_shipped_unit_stops_restarting_on_a_lock_or_a_crash(session):
     text = service.read_unit(service.template_for(session))
-    assert 'Restart=always' in text
     # 3 is another instance holding the lock, 15 is luks-tray's own
     # "unhandled exception" exit; retrying either just fails the same way.
     assert 'RestartPreventExitStatus=3 15' in text
+
+
+@pytest.mark.parametrize('session', ['wayland', 'x11'])
+def test_each_shipped_unit_stays_down_when_a_logout_stops_it(session):
+    # `Restart=always` treated the SIGTERM that ends a logout as a crash and put
+    # the applet back into a session that was waiting for its processes to exit,
+    # so the logout never reached the display manager (black screen).  A stop
+    # signal must therefore be final, while a crash must still be recovered.
+    text = service.read_unit(service.template_for(session))
+    directives = [line for line in text.splitlines() if not line.startswith('#')]
+    assert 'Restart=on-failure' in directives
+    # The comment above the directive names it; the directive itself must be gone.
+    assert 'Restart=always' not in directives
+    prevent = next(line for line in directives
+                   if line.startswith('RestartPreventExitStatus='))
+    assert 'SIGTERM' in prevent
 
 
 @pytest.mark.parametrize('session', ['wayland', 'x11'])
@@ -329,7 +344,7 @@ def test_install_prompts_before_replacing_a_different_unit(env, launcher):
 
 
 def test_install_clears_a_failed_state(env, launcher):
-    plan = service.plan_install(UNIT_TEXT.replace('Restart=always\n', ''),
+    plan = service.plan_install(UNIT_TEXT.replace('Restart=on-failure\n', ''),
                                 make_status(failed=True), env=env)
     assert f'clear the failed state of {service.UNIT_NAME}' in [
         step.describe for step in plan.steps]

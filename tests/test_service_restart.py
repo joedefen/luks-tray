@@ -1,11 +1,18 @@
-"""Restarting and replacing a luks-tray that systemd supervises.
+"""Restarting, replacing and *leaving* a luks-tray that systemd supervises.
 
-Two behaviours keep a supervised applet from fighting its own supervisor:
+Three behaviours keep a supervised applet from fighting its own supervisor:
 
 - `restart_self()` hands the restart to systemd instead of spawning a child
-  that `Restart=always` would then duplicate (or kill with our cgroup);
+  that the unit would then duplicate (or kill with our cgroup);
 - `--replace` refuses to signal a holder that systemd supervises, because the
-  supervisor brings it straight back and the two would ping-pong.
+  supervisor brings it straight back and the two would ping-pong;
+- `install_session_shutdown_handler()` quits the event loop when the session
+  manager asks for it, so a logout is a clean exit rather than a kill the unit
+  would answer by starting the applet again inside the dying session.
+
+The third is what the `Restart=on-failure` in the shipped units rests on: those
+two halves are only useful together, so the unit file's policy is asserted in
+`test_service.py` and the app's half is asserted here.
 """
 import types
 
@@ -164,3 +171,80 @@ def test_spawn_detached_stays_plain_outside_a_unit(tmp_path, monkeypatch):
 
 def test_spawn_detached_does_nothing_for_an_empty_command():
     assert Utils.spawn_detached([], spawn=lambda *a, **k: pytest.fail('spawned')) is None
+
+
+# -- a session that is ending ---------------------------------------------
+
+class FakeSignal:
+    """The one signal of `QApplication` the session handler connects to."""
+
+    def __init__(self, refuse=False):
+        self.slots = []
+        self.refuse = refuse
+
+    def connect(self, slot):
+        if self.refuse:
+            raise TypeError('QObject::connect: no such signal')
+        self.slots.append(slot)
+
+
+class FakeApp:
+    """The `QApplication` surface `install_session_shutdown_handler()` uses."""
+
+    def __init__(self, refuse_signal=False):
+        self.commitDataRequest = FakeSignal(refuse=refuse_signal)
+        self.quits = 0
+
+    def quit(self):
+        self.quits += 1
+
+
+class FakeSessionManager:
+    """Stands in for the `QSessionManager` Qt hands to `commitDataRequest`."""
+
+    def __init__(self, refuse=False):
+        self.restart_hints = []
+        self.refuse = refuse
+
+    def setRestartHint(self, hint):                 # noqa: N802 - Qt's spelling
+        if self.refuse:
+            raise RuntimeError('no session to hint at')
+        self.restart_hints.append(hint)
+
+
+class SessionTray:
+    """A tray with only what the session-shutdown handlers touch."""
+
+    install_session_shutdown_handler = Main.LuksTray.install_session_shutdown_handler
+    _on_commit_data_request = Main.LuksTray._on_commit_data_request
+
+    def __init__(self, app=None):
+        self.app = FakeApp() if app is None else app
+
+
+def test_a_session_manager_shutdown_quits_the_event_loop():
+    tray = SessionTray()
+    tray.install_session_shutdown_handler()
+    assert len(tray.app.commitDataRequest.slots) == 1
+    manager = FakeSessionManager()
+    tray.app.commitDataRequest.slots[0](manager)
+    # Quitting is what turns the logout into a clean exit that
+    # `Restart=on-failure` leaves down; the hint is the protocol's own way of
+    # saying "do not restore this client".
+    assert tray.app.quits == 1
+    assert manager.restart_hints == [Main.QSessionManager.RestartHint.RestartNever]
+
+
+def test_a_qt_without_session_management_still_starts():
+    # No XSMP (Wayland, a bare X session) means the signal never fires -- but a
+    # Qt built without it must not keep the tray from starting at all.
+    tray = SessionTray(app=FakeApp(refuse_signal=True))
+    tray.install_session_shutdown_handler()
+    assert tray.app.commitDataRequest.slots == []
+
+
+def test_a_manager_that_refuses_the_restart_hint_still_quits():
+    tray = SessionTray()
+    tray.install_session_shutdown_handler()
+    tray.app.commitDataRequest.slots[0](FakeSessionManager(refuse=True))
+    assert tray.app.quits == 1

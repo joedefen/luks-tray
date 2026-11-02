@@ -391,8 +391,9 @@ def install_termination_log(name, version, signals=(signal.SIGTERM, signal.SIGHU
         process with a signal, and no atexit handler runs then -- so without this
         the most common way for a tray to go away left no trace at all. The
         handler restores the default disposition and re-raises, so the exit
-        status the supervisor sees is exactly what it was before (`Restart=always`
-        and `RestartPreventExitStatus=` keep working).
+        status the supervisor sees is exactly what it was before: death *by*
+        the signal, which the shipped units' `Restart=on-failure` and
+        `RestartPreventExitStatus=` both read as "do not start me again".
     """
     def handler(signum, _frame):
         log_session_stop(name, version, note=f' (signal {signum})')
@@ -469,9 +470,8 @@ def in_systemd_service(env=None):
 
         systemd sets INVOCATION_ID for every service it launches. The tray uses
         it to know that "restart" means "ask the supervisor", not "spawn a
-        child and exit": under `Restart=always` it is our own exit that systemd
-        reacts to, and a child we spawn shares the cgroup that systemd kills
-        when it stops us.
+        child and exit": the unit's `Restart=` reacts to *our* exit, and a child
+        we spawn shares the cgroup that systemd kills when it stops us.
     """
     return bool((os.environ if env is None else env).get('INVOCATION_ID'))
 

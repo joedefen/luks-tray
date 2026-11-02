@@ -19,12 +19,29 @@
     cannot inherit either from the compositor, so `render()`
     appends what the installing shell exported, after `ExecStart=`, where a
     later `Environment=` line wins.  `XDG_SESSION_TYPE` is *pinned* by each
-    template instead: it selects the template, so it must not be re-derived.
+    template instead: it selects the template, so it is not re-derived here.
 
-    No `ConditionEnvironment=` guard is used.  It would be evaluated against
-    the user manager's environment rather than the unit's, which is exactly the
-    environment that may not have been imported yet on a compositor that does
-    not run `dbus-update-activation-environment --systemd`.
+    That appended copy is a snapshot of one login, and a unit's own
+    `Environment=` wins over what the *next* session exports, so it goes stale
+    the moment the user logs in as the other display server -- which is a thing
+    people do often.  The snapshot is therefore a fallback only:
+    [`luks_tray.Session`](luks_tray/Session.py:1) re-derives `XDG_SESSION_TYPE`,
+    `WAYLAND_DISPLAY` and `DISPLAY` at startup from the socket that is
+    listening (and from `loginctl` when the environment names none), so an
+    installed unit keeps working across a switch and there is nothing to
+    remember.  Re-running `--svc-install` after a switch is optional: it only
+    refreshes the snapshot.
+
+    Two units, one per session, each guarded with
+    `ConditionEnvironment=XDG_SESSION_TYPE=...`, would also work: systemd
+    evaluates conditions against the user manager's environment and *not*
+    against the unit's own `Environment=` -- measured on systemd 257, where a
+    unit that sets `XDG_SESSION_TYPE=x11` itself is still skipped in a Wayland
+    session ("skipped, unmet condition check") -- so the mismatched unit is
+    skipped rather than failed.  It is not done here because it buys nothing
+    the startup repair does not: the guard is only as reliable as the manager's
+    environment having been imported, and each unit would still carry a
+    snapshot of the login that installed it.
 
     The units deliberately do not redirect stdout: `main()` already points
     `prt()` at `~/.config/luks-tray/debug.log` whenever stdout is not a

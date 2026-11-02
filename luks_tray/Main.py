@@ -41,6 +41,7 @@ import petname
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PyQt6.QtWidgets import QWidgetAction, QWidget, QLabel
 from PyQt6.QtGui import QIcon, QCursor, QAction, QFont, QFontInfo
+from PyQt6.QtGui import QSessionManager
 from PyQt6.QtCore import QTimer, Qt, QtMsgType, qInstallMessageHandler
 
 from luks_tray.AppInfo import (APP_NAME, APPLICATION_DISPLAY_NAME,
@@ -49,7 +50,7 @@ from luks_tray import Compositor
 from luks_tray.History import HistoryClass
 from luks_tray.Utils import PyKill, prt, prt_once
 from luks_tray import Utils, __version__
-from luks_tray import service
+from luks_tray import Session, service
 from luks_tray.IniTool import IniTool
 from luks_tray.DeviceInfo import DeviceInfo
 from luks_tray.dialogs import (CommonDialog, MasterPasswordDialog,
@@ -229,6 +230,10 @@ class LuksTray():
         QApplication.setApplicationDisplayName(APPLICATION_DISPLAY_NAME)
         QApplication.setDesktopFileName(DESKTOP_FILE_NAME)
         self.app.setQuitOnLastWindowClosed(False)
+        # A logout has to be able to *ask* the applet to leave.  Without this
+        # the desktop ends the session by killing us, and the unit's supervisor
+        # reacts by starting us again -- see install_session_shutdown_handler().
+        self.install_session_shutdown_handler()
         self.mono_font = QFont("Consolas", 10)
         self.mono_font.setStyleHint(QFont.StyleHint.Monospace)
         self.emoji_font = self.get_emoji_font()
@@ -866,9 +871,9 @@ class LuksTray():
         """ Replace this process with a fresh instance of the applet.
 
             Under a ``systemd --user`` unit the restart is handed to the
-            supervisor instead: ``Restart=always`` reacts to *our* exit, not to
-            a child we spawn, and the child shares the cgroup systemd kills
-            when it stops the unit.  See `_restart_via_systemd()`.
+            supervisor instead: the unit's ``Restart=`` reacts to *our* exit,
+            not to a child we spawn, and the child shares the cgroup systemd
+            kills when it stops the unit.  See `_restart_via_systemd()`.
 
             Elsewhere the replacement is launched as ``python -m luks_tray.Main``
             so that PyKill recognises it via `command_names()`.  The
@@ -918,12 +923,14 @@ class LuksTray():
 
             ``systemctl --user restart`` is spawned through ``systemd-run
             --user --scope`` (see `Utils.spawn_detached()`), so it keeps running
-            while systemd stops us.  We then exit with status 0, which is *not*
-            in the unit's ``RestartPreventExitStatus=``, so ``Restart=always``
-            also schedules a start: if the detached restart never got off the
-            ground, the supervisor still brings the tray back five seconds
-            later.  A failure to schedule anything keeps this instance alive
-            rather than leaving the user with no tray at all.
+            while systemd stops us, and the restart is *its* doing: exiting with
+            status 0 is a clean exit, which the unit's ``Restart=on-failure``
+            does not answer with a start of its own, so one restart request
+            cannot turn into two applets.  If the detached restart never got off
+            the ground, the tray stays down until `--svc-start`; that is the
+            price of not resurrecting the unit on every clean exit, and it is
+            the same trade that lets a logout end the applet (see
+            `install_session_shutdown_handler()`).
 
             The lock is released last, immediately before ``os._exit()``, so the
             restarting unit never finds the lock held by a live process.
@@ -941,6 +948,53 @@ class LuksTray():
             prt(f'note: cannot hide the tray icon before restarting: {exc}')
         Utils.SingleInstance.release_current()
         os._exit(0)
+
+    # -- a session that is ending ------------------------------------------
+
+    def install_session_shutdown_handler(self):
+        """ Leave the event loop, and stay gone, when the desktop ends the session.
+
+            An X11 logout is a conversation, not a kill: ksmserver (the session
+            manager) asks every client registered with it -- and Qt registers as
+            soon as `SESSION_MANAGER` is set, which KDE does -- to save itself
+            and quit, then waits for that client to disappear.  Qt reports the
+            request as `commitDataRequest`, and nothing was connected to it
+            here: the applet said nothing and waited to be killed.  Being killed
+            was the second half of the problem.  The shipped unit answered the
+            death of its main process by starting the applet again five seconds
+            into the teardown, and that fresh process landed in a session that
+            was waiting for its processes to go away -- so the session never
+            emptied, SDDM never got the VT, and the screen stayed black.
+            `--svc-stop` before logging out avoided it for the same reason: a
+            unit that is stopped is not restarted.
+
+            Quitting here answers the request in the protocol's own terms, and
+            answers it as a *clean* exit (`QApplication.exec()` returns 0) that
+            the unit's `Restart=on-failure` leaves down until the next login.
+            Where there is no session manager -- a Wayland session, a bare X
+            session, a terminal -- the signal is simply never emitted, so this
+            is inert rather than conditional.
+        """
+        try:
+            self.app.commitDataRequest.connect(self._on_commit_data_request)
+        except (AttributeError, TypeError) as exc:
+            prt(f'note: no session management in this Qt: {exc}')
+
+    def _on_commit_data_request(self, manager):
+        """ A session manager is ending the session: quit, and do not come back.
+
+            The Qt signal carries the `QSessionManager`; the restart hint rides
+            along with the client's saved state, and says "do not restore me".
+            The unit's `Restart=` is what actually keeps the process from coming
+            back, so a Qt that refuses the hint is not fatal -- documented, and
+            ignored.
+        """
+        prt('session manager is ending the session; quitting')
+        try:
+            manager.setRestartHint(QSessionManager.RestartHint.RestartNever)
+        except (AttributeError, RuntimeError) as exc:
+            prt(f'note: cannot set the session restart hint: {exc}')
+        self.app.quit()
 
     def prompt_master_password(self):
         """ Prompt for master passdword"""
@@ -1809,6 +1863,15 @@ def main():
         devnull_fd = os.open('/dev/null', os.O_RDWR)
         os.dup2(devnull_fd, sys.stdin.fileno())
         os.close(devnull_fd)
+
+        # A unit's `Environment=` lines are a snapshot of the login that ran
+        # `--svc-install`, and a unit's own value wins over the session's, so a
+        # snapshot of a session that has ended is what Qt would otherwise use.
+        # Re-derive the display variables from the server that is really
+        # listening, before QApplication exists: switching between Wayland and
+        # X11 must not need a re-install (see luks_tray/Session.py).
+        for name, before, after in Session.repair_environment(note=prt):
+            prt(f"session: {name} {before or '(unset)'} -> {after or '(unset)'}")
 
         tray = LuksTray(ini_tool, opts)
         sys.exit(tray.app.exec())

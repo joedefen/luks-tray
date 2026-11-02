@@ -13,7 +13,9 @@
 # needs them (Qt picks its platform plugin from them, and the desktop name
 # keeps the session identifiable for diagnostics and `--show-window-rules`).
 # A unit copied by hand from a shell that exports none of them still starts; see
-# "Starting at login" in README.md.
+# "Starting at login" in README.md.  The display variables are a snapshot of
+# that login, so the applet re-derives them at startup rather than trusting
+# them: see "Switching sessions" in README.md.
 [Unit]
 Description=luks-tray (LUKS disk tray applet)
 PartOf=graphical-session.target
@@ -32,14 +34,32 @@ Type=simple
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
 Environment=XDG_RUNTIME_DIR=/run/user/%U
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+# Which display server this is -- and therefore which Qt platform plugin is
+# loaded.  This is a *snapshot* of the login that ran `--svc-install`, because
+# a unit cannot ask the session; it is only a fallback, since the applet
+# re-derives it (and DISPLAY) from the socket that is actually listening before
+# Qt starts (luks_tray/Session.py).  Switching to Wayland and back therefore
+# needs no re-install: a stale value here is corrected at startup instead of
+# starting a tray nobody can see.
 Environment=XDG_SESSION_TYPE=x11
 ExecStart=%h/.local/bin/luks-tray
-Restart=always
+# `on-failure`, *not* `always`.  A logout does not stop this unit with a clean
+# exit; the session ends, and everything in it ends with a signal (SIGTERM from
+# systemd stopping graphical-session.target, or the desktop's session manager
+# killing its clients).  `Restart=always` answered that signal by starting the
+# applet again five seconds later, while the session was still waiting for its
+# processes to disappear -- so it never emptied, the display manager never got
+# the VT, and the logout stopped on a black screen.  `on-failure` still brings
+# the tray back from a crash (SIGSEGV, SIGKILL, a non-zero exit) and lets a stop
+# signal be final, which is also what makes `--svc-stop` stay stopped.
+Restart=on-failure
 RestartSec=5
 # 3 = another instance holds the single-instance lock; 15 = luks-tray exited on
 # an unhandled exception.  Retrying either one fails the same way, so the unit
-# is marked failed (`systemctl --user status`) instead of spinning.
-RestartPreventExitStatus=3 15
+# is marked failed (`systemctl --user status`) instead of spinning.  The four
+# signals are systemd's own "clean stop" set; they are listed explicitly so the
+# intent survives an edit to `Restart=`.
+RestartPreventExitStatus=3 15 SIGTERM SIGHUP SIGINT SIGPIPE
 
 [Install]
 WantedBy=graphical-session.target

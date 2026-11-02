@@ -287,12 +287,59 @@ graphical session, not over `ssh`.
 > to your compositor's config (sway users usually already have it), then
 > `luks-tray --svc-restart`.
 
+#### Switching sessions
+
+You do **not** have to re-run `--svc-install` when you log out of one display
+server and into the other. The display variables a unit pins are a snapshot of
+the login that installed it, and a unit's own `Environment=` wins over what the
+next session exports, so the applet re-derives `XDG_SESSION_TYPE`,
+`WAYLAND_DISPLAY` and `DISPLAY` at startup -- before Qt exists -- from the
+display server that is actually *listening*: a compositor's socket in
+`$XDG_RUNTIME_DIR`, an X server's in `/tmp/.X11-unix`. If the environment names
+no live server at all it asks `loginctl`, which is the case that used to need
+the `dbus-update-activation-environment` line above. A snapshot of a session
+that has ended is dropped, so the tray lands on the right platform in whichever
+session is in front of you. A correct launch changes nothing and says nothing;
+a correction is written to `debug.log`:
+
+```
+session: XDG_SESSION_TYPE wayland -> x11
+session: WAYLAND_DISPLAY wayland-1 -> (unset)
+```
+
+`--svc-status` may still report that the installed file differs from the
+shipped unit after a switch. That difference is the old snapshot, and
+refreshing it with `--svc-install` is optional.
+
+Two units, one per display server, each guarded with
+`ConditionEnvironment=XDG_SESSION_TYPE=...`, would also work -- systemd checks a
+condition against the user manager's environment, not against the unit's own
+`Environment=`, so the mismatched unit is skipped rather than failed. It buys
+nothing here: the guard is only as reliable as the manager's environment having
+been imported, and each unit would still carry a snapshot. One unit plus the
+startup repair covers both sessions.
+
 Under a unit, the `↺ Restart luks-tray` menu entry asks systemd to restart the
 unit instead of spawning a second process, and `--replace` refuses to kill an
 instance systemd supervises (it would come straight back) -- it points you at
 `luks-tray --svc-restart` instead. Start-up failures are logged to
 `~/.config/luks-tray/debug.log`; `systemctl --user status luks-tray.service`
 shows what systemd saw.
+
+### Logging out
+
+The unit uses `Restart=on-failure` and lists the stop signals in
+`RestartPreventExitStatus=`, because a logout must be allowed to *end* the
+applet. On X11 the session manager (ksmserver) asks Qt clients to quit, and Qt
+reports that as `commitDataRequest`; the applet answers it by quitting with
+status 0 and a restart hint of `RestartNever`, so it exits cleanly and the unit
+stays down until the next login. An applet that is instead *killed* at logout
+would be started again by its own unit seconds later, inside a session that is
+waiting for its processes to disappear: the session then never empties, the
+display manager never gets the VT, and the logout stops on a black screen.
+`Restart=on-failure` still restarts the tray after a crash (a signal like
+SIGSEGV/SIGKILL, or a non-zero exit) -- only a clean exit or a stop signal is
+final.
 
 ### Desktop autostart
 
