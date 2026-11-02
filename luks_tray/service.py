@@ -61,7 +61,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from luks_tray.Utils import SingleInstance, spawn_detached
+from luks_tray.Utils import SingleInstance
 
 UNIT_NAME = 'luks-tray.service'
 COMMAND = 'systemctl'
@@ -83,6 +83,11 @@ STATUS_ABSENT = 2
 
 OK = 0
 FAILED = 1
+
+#: How long the applet waits for `systemctl --no-block` to accept a restart.
+#: Called from a Qt action slot, so a wedged user manager must not freeze the
+#: menu for longer than this.
+SYSTEMCTL_TIMEOUT = 10
 
 #: Session variables a unit pins to one value; install-time overrides them.
 #: `XDG_SESSION_TYPE` is absent on purpose: it selects the template.
@@ -140,11 +145,11 @@ def _env(env=None):
     return dict(os.environ if env is None else env)
 
 
-def run_command(argv):
+def run_command(argv, timeout=60):
     """ Run one command and return `(exit status, combined output)`. """
     try:
         completed = subprocess.run(
-            list(argv), capture_output=True, text=True, check=False, timeout=60)
+            list(argv), capture_output=True, text=True, check=False, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 127, str(exc)
     return completed.returncode, (completed.stdout or '') + (completed.stderr or '')
@@ -609,19 +614,38 @@ def supervised_here():
     return supervised_by(os.getpid()) == UNIT_NAME
 
 
-def detached_restart(env=None, spawn=None):
-    """ Ask systemd to restart this unit from outside its own cgroup.
+def request_restart(env=None, run=None):
+    """ Ask systemd to restart this unit, and wait until the job is queued.
 
-        Called from inside the unit, so a plain `systemctl --user restart` would
-        be killed mid-flight together with the process it is restarting; see
-        `Utils.spawn_detached()`.  Returns whatever the spawn call returns.
+        Called from inside the unit, so the request has to reach the manager
+        *before* the applet exits: a restart begins by stopping the unit, and
+        that stop kills the unit's whole cgroup (`KillMode=control-group`).
+
+        `--no-block` is what makes a synchronous call safe.  The job is queued
+        and `systemctl` returns without waiting for the stop it just asked for,
+        so the caller can leave cleanly and the manager carries the job out --
+        stop, then the unit's own `ExecStart=` starts the fresh instance.
+
+        Detaching the request instead (`systemd-run --user --scope`, which is
+        what `Utils.spawn_detached()` does for *viewers*) does not work here,
+        and field-testing showed exactly why: the transient scope is created
+        out of our own cgroup, so the stop job kills the helper before it has
+        asked systemd anything.  The tray went down, the unit stayed inactive,
+        and the menu row behaved like "Quit".
+
+        Returns the exit status of the `systemctl` call (0 = request accepted).
+        Raises ServiceError when this process is not the unit's main process --
+        there is no unit to restart then.
     """
     env = _env(env)
     if not supervised_here():
         raise ServiceError(
             'this process is not running inside the applet\'s unit,'
             ' so there is no unit to restart')
-    return spawn_detached(systemctl('restart', UNIT_NAME), spawn=spawn, env=env)
+    argv = systemctl('--no-block', 'restart', UNIT_NAME)
+    if run is None:
+        return run_command(argv, timeout=SYSTEMCTL_TIMEOUT)[0]
+    return run(argv)[0]
 
 
 def _no_prompt(_question):

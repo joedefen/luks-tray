@@ -882,9 +882,9 @@ class LuksTray():
         """ Replace this process with a fresh instance of the applet.
 
             Under a ``systemd --user`` unit the restart is handed to the
-            supervisor instead: the unit's ``Restart=`` reacts to *our* exit,
-            not to a child we spawn, and the child shares the cgroup systemd
-            kills when it stops the unit.  See `_restart_via_systemd()`.
+            supervisor instead: a child spawned here would share the cgroup
+            systemd kills when it stops the unit, so it would die with us and
+            the row would behave like "quit".  See `_restart_via_systemd()`.
 
             Elsewhere the replacement is launched as ``python -m luks_tray.Main``
             so that PyKill recognises it via `command_names()`.  The
@@ -930,35 +930,47 @@ class LuksTray():
         os._exit(0)
 
     def _restart_via_systemd(self):
-        """ Hand this process's restart to systemd, from outside our cgroup.
+        """ Hand this process's restart to systemd, and wait until it is queued.
 
-            ``systemctl --user restart`` is spawned through ``systemd-run
-            --user --scope`` (see `Utils.spawn_detached()`), so it keeps running
-            while systemd stops us, and the restart is *its* doing: exiting with
-            status 0 is a clean exit, which the unit's ``Restart=on-failure``
-            does not answer with a start of its own, so one restart request
-            cannot turn into two applets.  If the detached restart never got off
-            the ground, the tray stays down until `--svc-start`; that is the
-            price of not resurrecting the unit on every clean exit, and it is
-            the same trade that lets a logout end the applet (see
-            `install_session_shutdown_handler()`).
+            ``systemctl --user --no-block restart`` is run *synchronously*
+            (see `service.request_restart()`): the request has to be in the
+            manager's hands before this process exits, because the restart job
+            begins by stopping us, and that stop kills the unit's whole cgroup.
+            Detaching the helper instead -- ``systemd-run --user --scope``, the
+            tool `Utils.spawn_detached()` uses for viewers -- looked like the
+            safe way to outlive the stop and is not: the transient scope is
+            created out of our own cgroup, so it died with us before it had
+            asked systemd anything, the tray went down and the unit stayed
+            inactive.  That is the bug this method's first version shipped.
 
-            The lock is released last, immediately before ``os._exit()``, so the
-            restarting unit never finds the lock held by a live process.
+            Once the job is queued, the applet leaves through the Qt event loop
+            rather than ``os._exit()``, so the lock is released by the normal
+            exit path, and the unit's ``ExecStart=`` starts the fresh instance.
+            The stop job signals us as it runs, so the stop line is written by
+            ``atexit`` or -- as observed -- by the termination handler, whichever
+            wins that race; either way the process is gone before systemd starts
+            its replacement.  A clean exit is also what ``Restart=on-failure``
+            does *not* answer on its own, so one restart request cannot turn
+            into two applets.  If the request cannot be made, the applet stays
+            up: a working tray with an unchanged menu row beats a dead one.
         """
         prt('+', 'restarting applet via systemd...')
         try:
-            service.detached_restart()
+            status = service.request_restart()
         except (service.ServiceError, OSError) as exc:
             prt(f'FAIL: cannot restart the unit: {exc}')
             Utils.error_print(f'FAIL: cannot restart the unit: {exc}')
+            return
+        if status != 0:
+            message = f'FAIL: systemctl refused the restart request (status {status})'
+            prt(message)
+            Utils.error_print(message)
             return
         try:
             self.tray_icon.hide()
         except (AttributeError, RuntimeError) as exc:
             prt(f'note: cannot hide the tray icon before restarting: {exc}')
-        Utils.SingleInstance.release_current()
-        os._exit(0)
+        self.app.quit()
 
     # -- a session that is ending ------------------------------------------
 

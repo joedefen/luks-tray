@@ -468,10 +468,13 @@ def error_print(message):
 def in_systemd_service(env=None):
     """ True when a systemd unit started this process.
 
-        systemd sets INVOCATION_ID for every service it launches. The tray uses
-        it to know that "restart" means "ask the supervisor", not "spawn a
-        child and exit": the unit's `Restart=` reacts to *our* exit, and a child
-        we spawn shares the cgroup that systemd kills when it stops us.
+        systemd sets INVOCATION_ID for every service it launches.  The tray
+        reads it for two things, neither of which is "am I the applet's own
+        unit?": where the log goes (inside a unit, `-o` is ignored because
+        stdout is systemd's own redirect) and whether a spawned child has to be
+        moved into a transient scope to outlive us (see `spawn_detached()`).
+        The other question is asked of the cgroup, by
+        `service.supervised_here()`.
     """
     return bool((os.environ if env is None else env).get('INVOCATION_ID'))
 
@@ -482,11 +485,17 @@ def spawn_detached(command, spawn=None, env=None, quiet=False):
         Under systemd the applet and everything it spawns share one cgroup, and
         systemd kills that whole cgroup on stop/restart (the default
         `KillMode=control-group`). `systemd-run --user --scope` puts the command
-        into a transient scope of its own, outside ours, which is what lets
-        `systemctl --user restart luks-tray.service` finish while it is stopping
-        us. `start_new_session=True` is setsid(2): it detaches the child from
-        our session and controlling terminal, so the same call also works when
-        the applet was started from a terminal or a DE autostart.
+        into a transient scope of its own, a sibling of our unit, so a viewer
+        opened from the menu survives the applet being restarted or stopped.
+        `start_new_session=True` is setsid(2): it detaches the child from our
+        session and controlling terminal, so the same call also works when the
+        applet was started from a terminal or a DE autostart.
+
+        This is for *viewers*.  A control request must not be detached: the
+        transient scope is created out of our cgroup, so a stop job that begins
+        at once kills the helper before it has asked systemd anything.  The
+        menu's restart therefore runs `systemctl --no-block` synchronously
+        (see `service.request_restart()`).
 
         `quiet=True` gives the child `/dev/null` on all three standard streams.
         It is for the children that are *viewers* rather than workers: by the

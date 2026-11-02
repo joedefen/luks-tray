@@ -2,8 +2,10 @@
 
 Three behaviours keep a supervised applet from fighting its own supervisor:
 
-- `restart_self()` hands the restart to systemd instead of spawning a child
-  that the unit would then duplicate (or kill with our cgroup);
+- `restart_self()` asks systemd to restart the unit, and waits until the request
+  is queued (`systemctl --no-block`, run synchronously) instead of spawning a
+  child that the cgroup teardown would kill; detaching the request with
+  `systemd-run --scope` does not work and is pinned against below;
 - `--replace` refuses to signal a holder that systemd supervises, because the
   supervisor brings it straight back and the two would ping-pong;
 - `install_session_shutdown_handler()` quits the event loop when a session
@@ -37,14 +39,19 @@ class FakeLock:
 
 
 class FakeTray:
-    """The two attributes `restart_self()` touches."""
+    """The attributes `restart_self()` touches."""
 
     def __init__(self):
         self.hidden = 0
+        self.quits = 0
         self.tray_icon = types.SimpleNamespace(hide=self._hide)
+        self.app = types.SimpleNamespace(quit=self._quit)
 
     def _hide(self):
         self.hidden += 1
+
+    def _quit(self):
+        self.quits += 1
 
     restart_self = Main.LuksTray.restart_self
     _restart_via_systemd = Main.LuksTray._restart_via_systemd
@@ -98,28 +105,47 @@ def test_a_plain_start_never_looks_for_a_holder_to_kill(monkeypatch):
 
 def test_restart_under_systemd_asks_the_supervisor(supervised):
     calls = []
-    supervised.setattr(service, 'detached_restart',
-                       lambda env=None, spawn=None: calls.append('restart'))
-    supervised.setattr(Utils.SingleInstance, 'release_current',
-                       classmethod(lambda cls: calls.append('release')))
-    supervised.setattr(Main.os, '_exit', lambda code: calls.append(('exit', code)))
+
+    def request_restart(env=None, run=None):
+        calls.append('restart')
+        return 0
+
+    supervised.setattr(service, 'request_restart', request_restart)
+    # Leaving through the event loop is what lets the normal exit path release
+    # the lock (and write the stop line, unless systemd's stop signal gets
+    # there first); os._exit() would skip that, and spawning a child would put
+    # it in the cgroup the restart is about to kill.
+    supervised.setattr(Main.os, '_exit',
+                       lambda code: pytest.fail('must leave through the event loop'))
     supervised.setattr(Main.subprocess, 'Popen',
                        lambda *args, **kwargs: pytest.fail('must not spawn a child'))
     tray = FakeTray()
     tray.restart_self()
-    assert calls == ['restart', 'release', ('exit', 0)]
+    assert calls == ['restart']
     assert tray.hidden == 1
+    assert tray.quits == 1
 
 
 def test_restart_under_systemd_keeps_running_when_the_handoff_fails(supervised):
-    def boom(env=None, spawn=None):
+    def boom(env=None, run=None):
         raise service.ServiceError('no unit to restart')
 
-    supervised.setattr(service, 'detached_restart', boom)
+    supervised.setattr(service, 'request_restart', boom)
     supervised.setattr(Main.os, '_exit', lambda code: pytest.fail('must not exit'))
     tray = FakeTray()
     tray.restart_self()
     assert tray.hidden == 0
+    assert tray.quits == 0
+
+
+def test_restart_under_systemd_stays_up_when_systemd_refuses(supervised):
+    # A refused request leaves us with a working tray and an unchanged menu
+    # row; emptying the cgroup "anyway" would leave neither.
+    supervised.setattr(service, 'request_restart', lambda env=None, run=None: 5)
+    tray = FakeTray()
+    tray.restart_self()
+    assert tray.hidden == 0
+    assert tray.quits == 0
 
 
 def test_restart_outside_systemd_still_spawns_a_child(monkeypatch):
@@ -153,14 +179,17 @@ def _fake_systemd_run(tmp_path, monkeypatch):
 
 
 def test_spawn_detached_moves_the_command_out_of_our_cgroup(tmp_path, monkeypatch):
+    # For viewers (the log window), not for control requests: a restart asks
+    # systemd synchronously, because a detached helper is created out of our
+    # cgroup and dies with the stop it is trying to request.
     runner = _fake_systemd_run(tmp_path, monkeypatch)
     spawned = []
-    Utils.spawn_detached(['systemctl', '--user', 'restart', 'luks-tray.service'],
+    Utils.spawn_detached(['konsole', '-e', 'less'],
                          spawn=lambda command, start_new_session=False: spawned.append(
                              (command, start_new_session)),
                          env={'INVOCATION_ID': 'abc', 'PATH': '/bin'})
     assert spawned == [([str(runner), '--user', '--scope', '--quiet', '--',
-                         'systemctl', '--user', 'restart', 'luks-tray.service'], True)]
+                         'konsole', '-e', 'less'], True)]
 
 
 def test_spawn_detached_stays_plain_outside_a_unit(tmp_path, monkeypatch):

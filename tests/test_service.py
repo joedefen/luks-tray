@@ -511,7 +511,7 @@ def test_execute_reports_a_failed_command_with_its_hint():
     assert 'journalctl --user -xeu luks-tray.service' in str(info.value)
 
 
-# -- applet_holder(), unit_in_cgroup() and detached_restart() -------------
+# -- applet_holder(), unit_in_cgroup() and request_restart() -------------
 
 def test_applet_holder_is_none_without_a_lock_file(tmp_path):
     assert service.applet_holder(tmp_path) is None
@@ -555,26 +555,36 @@ def test_supervised_here_is_false_for_this_test_process():
     assert service.supervised_here() is False
 
 
-def test_detached_restart_refuses_outside_a_unit(monkeypatch):
+def test_request_restart_refuses_outside_a_unit(monkeypatch):
     monkeypatch.setattr(service, 'supervised_here', lambda: False)
     with pytest.raises(service.ServiceError) as info:
-        service.detached_restart({})
+        service.request_restart({})
     assert "not running inside the applet's unit" in str(info.value)
 
 
-def test_detached_restart_asks_systemd_from_outside_the_cgroup(monkeypatch):
+def test_request_restart_queues_the_job_before_returning(monkeypatch):
+    # The whole point: `systemctl` has to have accepted the request *before*
+    # the caller exits, because the restart begins by killing our cgroup.  So
+    # the call is synchronous and carries --no-block: the job is queued, and
+    # systemctl does not wait for the stop it just asked for.
     monkeypatch.setattr(service, 'supervised_here', lambda: True)
-    spawned = []
+    ran = []
 
-    def spawn(command, start_new_session=False):
-        spawned.append((command, start_new_session))
-        return 'handle'
+    def run(argv):
+        ran.append(argv)
+        return 0, ''
 
-    # An empty PATH keeps `systemd-run` out of the argv, so the assertion pins
-    # the command itself rather than whatever this machine happens to have.
-    assert service.detached_restart({'INVOCATION_ID': 'abc', 'PATH': ''},
-                                    spawn=spawn) == 'handle'
-    assert spawned == [([service.COMMAND, '--user', 'restart', service.UNIT_NAME], True)]
+    assert service.request_restart({'INVOCATION_ID': 'abc'}, run=run) == 0
+    assert ran == [(service.COMMAND, '--user', '--no-block', 'restart',
+                    service.UNIT_NAME)]
+
+
+def test_request_restart_reports_a_refused_request(monkeypatch):
+    # A non-zero status is the applet's cue to stay up rather than empty its
+    # own cgroup; nothing else can undo the exit once it has happened.
+    monkeypatch.setattr(service, 'supervised_here', lambda: True)
+    assert service.request_restart({'INVOCATION_ID': 'abc'},
+                                   run=lambda argv: (5, 'denied')) == 5
 
 
 # -- dispatch() ----------------------------------------------------------

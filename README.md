@@ -320,9 +320,15 @@ been imported, and each unit would still carry a snapshot. One unit plus the
 startup repair covers both sessions.
 
 Under a unit, the `↺ Restart luks-tray` menu entry asks systemd to restart the
-unit instead of spawning a second process, and `--replace` refuses to kill an
-instance systemd supervises (it would come straight back) -- it points you at
-`luks-tray --svc-restart` instead. Start-up failures are logged to
+unit instead of spawning a second process: `systemctl --user --no-block restart`
+is run and allowed to return *before* the applet leaves its event loop, so the
+request is already the manager's job when the stop it asks for kills the unit's
+cgroup, and the unit's own `ExecStart=` starts the fresh instance.  Detaching
+that request -- the trick used for the log window -- does not work here: a
+`systemd-run --scope` helper is created out of the same cgroup and dies with
+it, which is what once made the row behave like Quit.  `--replace` refuses to
+kill an instance systemd supervises (it would come straight back) and points
+you at `luks-tray --svc-restart` instead.  Start-up failures are logged to
 `~/.config/luks-tray/debug.log`; `systemctl --user status luks-tray.service`
 shows what systemd saw.
 
