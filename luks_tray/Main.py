@@ -230,9 +230,11 @@ class LuksTray():
         QApplication.setApplicationDisplayName(APPLICATION_DISPLAY_NAME)
         QApplication.setDesktopFileName(DESKTOP_FILE_NAME)
         self.app.setQuitOnLastWindowClosed(False)
-        # A logout has to be able to *ask* the applet to leave.  Without this
-        # the desktop ends the session by killing us, and the unit's supervisor
-        # reacts by starting us again -- see install_session_shutdown_handler().
+        # On a Qt with X11 session management a logout *asks* the applet to
+        # leave, and this is where it answers.  Where Qt has none the applet is
+        # terminated instead, and the unit's Restart=* keeps it down: the
+        # handler is the second line of defence either way -- see
+        # install_session_shutdown_handler().
         self.install_session_shutdown_handler()
         self.mono_font = QFont("Consolas", 10)
         self.mono_font.setStyleHint(QFont.StyleHint.Monospace)
@@ -961,25 +963,46 @@ class LuksTray():
     # -- a session that is ending ------------------------------------------
 
     def install_session_shutdown_handler(self):
-        """ Leave the event loop, and stay gone, when the desktop ends the session.
+        """ Answer a session manager that asks the applet to leave -- when Qt can.
 
-            An X11 logout is a conversation, not a kill: ksmserver (the session
-            manager) asks every client registered with it -- and Qt registers as
-            soon as `SESSION_MANAGER` is set, which KDE does -- to save itself
-            and quit, then waits for that client to disappear.  Qt reports the
-            request as `commitDataRequest`, and nothing was connected to it
-            here: the applet said nothing and waited to be killed.  Being killed
-            was the second half of the problem.  The shipped unit answered the
-            death of its main process by starting the applet again five seconds
-            into the teardown, and that fresh process landed in a session that
-            was waiting for its processes to go away -- so the session never
-            emptied, SDDM never got the VT, and the screen stayed black.
-            `--svc-stop` before logging out avoided it for the same reason: a
-            unit that is stopped is not restarted.
+            This is a *second* line of defence, and a build-dependent one.  The
+            guarantee is the shipped unit: `Restart=on-failure` together with
+            `RestartPreventExitStatus=3 15 SIGTERM SIGHUP SIGINT SIGPIPE` lets a
+            logout end the applet for good.  With `Restart=always` it did not:
+            the unit started the applet again five seconds into the teardown,
+            into a session that was waiting for its processes to disappear -- so
+            the session never emptied, SDDM never got the VT, and the screen
+            stayed black.  That is the fix, and it holds whatever ends the
+            process.
 
-            Quitting here answers the request in the protocol's own terms, and
-            answers it as a *clean* exit (`QApplication.exec()` returns 0) that
-            the unit's `Restart=on-failure` leaves down until the next login.
+            Whether this handler ever runs depends on how Qt was built.  An X11
+            logout is a conversation only with clients registered with the
+            session manager (ksmserver): Qt's xcb plugin registers by opening an
+            ICE connection while `SESSION_MANAGER` is set, and reports the save
+            phase as `commitDataRequest`.  The distribution's Qt 6 does that --
+            `SmcOpenConnection` is linked into libQt6XcbQpa.  The PyQt6 wheel
+            ships a Qt *without* X11 session management, so the connect below
+            succeeds against a signal that never fires: no session management,
+            no handler, and the applet is simply terminated at logout.  That is
+            fine, because `Restart=on-failure` keeps it down; it is also why
+            this is an extra rather than the mechanism that makes a logout
+            finish.
+
+            Observed, not our doing: an installed build with no handler
+            connected (3.0.0.99.2, whose Main.py has no `commitDataRequest`)
+            still wrote a clean `=== luks-tray ... stopped, pid N ===` at a KDE
+            logout, with no `(signal 15)` that `install_termination_log()` would
+            have appended -- the interpreter returned from its event loop on its
+            own.  The distro Qt's xcb plugin answers the session manager's die
+            phase itself: the `SmcDieProc` it registers (read from Qt 6.8.2 on
+            this machine) calls
+            `QWindowSystemInterface::handleApplicationTermination()`, whose
+            synchronous delivery reaches
+            `QGuiApplicationPrivate::processApplicationTermination()` and sends
+            `QEvent::Quit` to the application.  What this handler adds is an
+            explicit, earlier answer in the protocol's terms -- quit with status
+            0 and the `RestartNever` hint -- not the clean exit itself.
+
             Where there is no session manager -- a Wayland session, a bare X
             session, a terminal -- the signal is simply never emitted, so this
             is inert rather than conditional.
@@ -994,9 +1017,12 @@ class LuksTray():
 
             The Qt signal carries the `QSessionManager`; the restart hint rides
             along with the client's saved state, and says "do not restore me".
-            The unit's `Restart=` is what actually keeps the process from coming
-            back, so a Qt that refuses the hint is not fatal -- documented, and
-            ignored.
+            Quitting leaves the event loop normally, so this slot exits 0 -- but
+            it is not what made the logout complete: the unit's
+            `Restart=on-failure` / `RestartPreventExitStatus=` are, and an
+            installed build with no handler connected still stopped cleanly (see
+            `install_session_shutdown_handler()`).  A Qt that refuses the hint
+            is not fatal either -- documented, and ignored.
         """
         prt('session manager is ending the session; quitting')
         try:

@@ -6,13 +6,15 @@ Three behaviours keep a supervised applet from fighting its own supervisor:
   that the unit would then duplicate (or kill with our cgroup);
 - `--replace` refuses to signal a holder that systemd supervises, because the
   supervisor brings it straight back and the two would ping-pong;
-- `install_session_shutdown_handler()` quits the event loop when the session
-  manager asks for it, so a logout is a clean exit rather than a kill the unit
-  would answer by starting the applet again inside the dying session.
+- `install_session_shutdown_handler()` quits the event loop when a session
+  manager asks for it -- on the Qt builds that answer that request at all.
 
-The third is what the `Restart=on-failure` in the shipped units rests on: those
-two halves are only useful together, so the unit file's policy is asserted in
-`test_service.py` and the app's half is asserted here.
+The third is an extra, not the fix: what keeps a terminated applet down is the
+units' `Restart=on-failure` / `RestartPreventExitStatus=` pair, asserted in
+`test_service.py`.  A build with no handler still stops cleanly at logout (the
+distro Qt ends the session itself), so the slots are asserted here for what
+they do -- connect once, quit, set `RestartNever` -- and not as the reason a
+logout completes.
 """
 import types
 
@@ -263,16 +265,17 @@ def test_a_session_manager_shutdown_quits_the_event_loop():
     assert len(tray.app.commitDataRequest.slots) == 1
     manager = FakeSessionManager()
     tray.app.commitDataRequest.slots[0](manager)
-    # Quitting is what turns the logout into a clean exit that
-    # `Restart=on-failure` leaves down; the hint is the protocol's own way of
-    # saying "do not restore this client".
+    # Quitting here returns exec() with 0; that the applet *stays* down is the
+    # unit's doing (`Restart=on-failure`), not this slot's.  The hint is the
+    # protocol's own way of saying "do not restore this client".
     assert tray.app.quits == 1
     assert manager.restart_hints == [Main.QSessionManager.RestartHint.RestartNever]
 
 
 def test_a_qt_without_session_management_still_starts():
-    # No XSMP (Wayland, a bare X session) means the signal never fires -- but a
-    # Qt built without it must not keep the tray from starting at all.
+    # A PyQt wheel ships a Qt with no XSMP at all, and a session without a
+    # manager (Wayland, a bare X session) never emits the signal: in both cases
+    # it is inert.  It must not keep the tray from starting, either.
     tray = SessionTray(app=FakeApp(refuse_signal=True))
     tray.install_session_shutdown_handler()
     assert tray.app.commitDataRequest.slots == []

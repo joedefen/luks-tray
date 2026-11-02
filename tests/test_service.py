@@ -146,6 +146,21 @@ def test_each_shipped_unit_stays_down_when_a_logout_stops_it(session):
 
 
 @pytest.mark.parametrize('session', ['wayland', 'x11'])
+def test_no_shipped_unit_unsets_the_session_manager(session):
+    # pwr-tray sets UnsetEnvironment=SESSION_MANAGER deliberately: its Qt never
+    # registers with a session manager, and it leaves of its own accord because
+    # Actions.exit_wm() quits once the desktop accepts its logoff command.
+    # luks-tray has no logoff action, so the session manager's request is what
+    # ends an installed applet at a DE-initiated logout on a distro Qt; clearing
+    # the variable would take that away and re-create the black-screen hang.
+    # The directive is *named* in a comment above [Install], hence `directives`.
+    text = service.read_unit(service.template_for(session))
+    directives = [line for line in text.splitlines() if not line.startswith('#')]
+    assert not any('UnsetEnvironment=SESSION_MANAGER' in line
+                   for line in directives)
+
+
+@pytest.mark.parametrize('session', ['wayland', 'x11'])
 def test_each_shipped_unit_asks_to_be_started_at_login(session):
     text = service.read_unit(service.template_for(session))
     assert 'PartOf=graphical-session.target' in text

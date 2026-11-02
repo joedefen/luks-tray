@@ -328,18 +328,46 @@ shows what systemd saw.
 
 ### Logging out
 
-The unit uses `Restart=on-failure` and lists the stop signals in
+The guarantee is the unit: `Restart=on-failure` plus the stop signals listed in
 `RestartPreventExitStatus=`, because a logout must be allowed to *end* the
-applet. On X11 the session manager (ksmserver) asks Qt clients to quit, and Qt
-reports that as `commitDataRequest`; the applet answers it by quitting with
-status 0 and a restart hint of `RestartNever`, so it exits cleanly and the unit
-stays down until the next login. An applet that is instead *killed* at logout
-would be started again by its own unit seconds later, inside a session that is
-waiting for its processes to disappear: the session then never empties, the
-display manager never gets the VT, and the logout stops on a black screen.
-`Restart=on-failure` still restarts the tray after a crash (a signal like
-SIGSEGV/SIGKILL, or a non-zero exit) -- only a clean exit or a stop signal is
-final.
+applet. An applet that is *killed* at logout by a unit that restarts it is
+started again seconds later, inside a session that is waiting for its processes
+to disappear: the session then never empties, the display manager never gets the
+VT, and the logout stops on a black screen. `Restart=on-failure` still restarts
+the tray after a crash (a signal like SIGSEGV/SIGKILL, or a non-zero exit) --
+only a clean exit or a stop signal is final.
+
+On top of that, the applet answers the session manager when its Qt can. On X11 a
+Qt built with X11 session management (XSMP) registers with ksmserver once
+`SESSION_MANAGER` is set, is asked to quit at logout, and reports that as
+`commitDataRequest`; the applet quits with status 0 and a restart hint of
+`RestartNever`. That handler is an *extra*, and it only exists on such a Qt: the
+PyQt6 wheels ship a Qt whose xcb plugin has no XSMP at all (`SmcOpenConnection`
+is not even linked in), so there the signal never fires and the applet is simply
+terminated at logout -- and that is still a clean `stopped` line, because the
+distro Qt ends the event loop itself in its die phase. What is certain on every
+install is the unit; the Qt side is observed behaviour that agrees with it.
+
+Evidence for that split: an installed build with no `commitDataRequest` handler
+at all stopped cleanly at a KDE logout -- `=== luks-tray ... stopped, pid N ===`
+with no `(signal 15)` that `install_termination_log()` appends -- so the
+interpreter returned from its event loop by itself.
+
+Two readings that help with `~/.config/luks-tray/debug.log*` (its stamps are
+`MM-DD^HH:MM:SS`). A stopped line *without* `(signal N)` means the interpreter
+returned normally; a signal that ends it gets `(signal 15)` from
+`install_termination_log()`. And before calling a `SESSION_MANAGER` value stale,
+read the pid in its ICE path (`unix:path=/tmp/.ICE-unix/<pid>`): that pid
+belongs to the session manager, so check that process and its socket rather than
+the age of the string.
+
+Do not add `UnsetEnvironment=SESSION_MANAGER` to these units. pwr-tray sets it
+deliberately: its Qt never registers, and it leaves of its own accord because
+`Actions.exit_wm()` quits once the desktop accepts its logoff command. luks-tray
+has no logoff action, so clearing that variable here would take away the session
+manager's request -- the one thing besides a stop signal that ends an installed
+applet at a DE-initiated logout -- and re-create the black-screen hang.
+`tests/test_service.py` refuses the directive.
 
 ### Desktop autostart
 

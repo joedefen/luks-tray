@@ -60,6 +60,14 @@ RestartSec=5
 # signals are systemd's own "clean stop" set; they are listed explicitly so the
 # intent survives an edit to `Restart=`.
 RestartPreventExitStatus=3 15 SIGTERM SIGHUP SIGINT SIGPIPE
+# Never add `UnsetEnvironment=SESSION_MANAGER` here.  pwr-tray sets it on
+# purpose: its Qt never registers with a session manager, and it leaves of its
+# own accord because `Actions.exit_wm()` quits once the desktop accepts its
+# logoff command.  luks-tray has no logoff action, so clearing this variable
+# would take away the session manager's request at a DE-initiated logout -- the
+# one thing besides a stop signal that ends an installed applet on a distro Qt
+# -- and the black-screen hang above would come back.  tests/test_service.py
+# refuses the directive.
 
 [Install]
 WantedBy=graphical-session.target
