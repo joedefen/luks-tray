@@ -214,9 +214,9 @@ class FakeIniTool:
 def menu_builder(qapp, status='locked', log_viewer='', bind=(), **overrides):
     """A `LuksTray` stand-in carrying only what `update_menu_items()` reads.
 
-    The locked state keeps the list short -- master password, Options, Exit,
-    Restart -- so the assertions are about the fixed entries at the bottom of
-    the menu rather than about containers. `overrides` replaces any of the
+    The locked state keeps the list short -- master password, Exit, Restart --
+    so the assertions are about the fixed entries at the bottom of the menu
+    rather than about containers. `overrides` replaces any of the
     callbacks, so a test can watch what an entry triggers instead.
 
     `log_viewer_available` is inert by default: the answer depends on which
@@ -234,6 +234,7 @@ def menu_builder(qapp, status='locked', log_viewer='', bind=(), **overrides):
     instance.replace_menu_if_different = lambda actions, icon_key: actions
     instance.exit_app = lambda: None
     instance.handle_options_click = lambda: None
+    instance.handle_master_password_click = lambda: None
     instance.open_log = lambda: None
     instance.log_viewer_available = lambda: False
     instance.restart_self = lambda *args: None
@@ -265,6 +266,21 @@ def test_the_restart_entry_restarts_the_applet(qapp):
     assert called == [True]
 
 
+def test_the_restart_entry_says_it_locks_a_readable_history(qapp):
+    """A restart *is* a lock -- the password lives in memory only -- so it is
+    also the manual way to lock without leaving."""
+    texts = menu_texts(menu_builder(qapp, status='unlocked').update_menu_items())
+
+    assert texts[-1] == f'↺ Restart luks-tray v{__version__} (locks history)'
+
+
+@pytest.mark.parametrize('status', ['locked', 'clear_text'])
+def test_the_restart_entry_says_nothing_extra_without_a_key(qapp, status):
+    texts = menu_texts(menu_builder(qapp, status=status).update_menu_items())
+
+    assert texts[-1] == f'↺ Restart luks-tray v{__version__}'
+
+
 def test_the_unlocked_menu_lists_create_add_and_the_shared_tail(qapp):
     texts = menu_texts(menu_builder(qapp, status='unlocked').update_menu_items())
 
@@ -273,19 +289,21 @@ def test_the_unlocked_menu_lists_create_add_and_the_shared_tail(qapp):
         '✚ Add Existing Crypt File',
         None,
         '⚙ Options…',
+        '✎ Update Master Password…',
         None,
         '☓ Exit',
-        f'↺ Restart luks-tray v{__version__}',
+        f'↺ Restart luks-tray v{__version__} (locks history)',
     ]
 
 
-def test_the_locked_menu_offers_the_password_and_options(qapp):
+def test_the_locked_menu_offers_only_the_password(qapp):
+    # A locked history is the one state in which the master password can be
+    # neither proved nor rewritten, so the prompt is the whole of what the menu
+    # offers -- no Options, and no create/update entry.
     texts = menu_texts(menu_builder(qapp, status='locked').update_menu_items())
 
     assert texts == [
         '✎ Click to enter master password',
-        None,
-        '⚙ Options…',
         None,
         '☓ Exit',
         f'↺ Restart luks-tray v{__version__}',
@@ -301,15 +319,78 @@ def test_every_fixed_entry_starts_with_a_symbol(qapp, status):
         assert not text[0].isalnum() and not text[0].isspace(), text
 
 
-def test_the_master_password_is_reached_through_options(qapp):
+def test_the_master_password_entry_creates_one_when_there_is_none(qapp):
+    texts = menu_texts(
+        menu_builder(qapp, status='clear_text').update_menu_items())
+
+    assert '✎ Create Master Password…' in texts
+
+
+def test_the_master_password_entry_updates_one_that_is_set(qapp):
     texts = menu_texts(menu_builder(qapp, status='unlocked').update_menu_items())
 
-    assert not [text for text in texts if text and 'Master Password' in text]
+    assert '✎ Update Master Password…' in texts
+    assert not [text for text in texts if text and 'Create Master' in text]
+
+
+def test_the_master_password_entry_sits_below_options(qapp):
+    """One flat list: the key guards the whole file, it is not one of its settings."""
+    texts = menu_texts(menu_builder(qapp, status='unlocked').update_menu_items())
+
+    assert texts.index('✎ Update Master Password…') == texts.index('⚙ Options…') + 1
+
+
+def test_the_master_password_entry_opens_the_create_dialog_for_clear_text(
+        qapp, monkeypatch):
+    opened = []
+    monkeypatch.setattr(
+        Main, 'MasterPasswordSetupDialog',
+        lambda tray, create=False: SimpleNamespace(
+            exec=lambda: opened.append(create)))
+    instance = menu_builder(qapp, status='clear_text',
+                            bind=('handle_master_password_click',))
+
+    instance.handle_master_password_click()
+
+    assert opened == [True]
+
+
+def test_the_master_password_entry_opens_the_update_dialog_for_a_set_password(
+        qapp, monkeypatch):
+    opened = []
+    monkeypatch.setattr(
+        Main, 'MasterPasswordSetupDialog',
+        lambda tray, create=False: SimpleNamespace(
+            exec=lambda: opened.append(create)))
+    instance = menu_builder(qapp, status='unlocked',
+                            bind=('handle_master_password_click',))
+
+    instance.handle_master_password_click()
+
+    assert opened == [False]
+
+
+def test_a_stale_master_password_click_on_a_locked_history_asks_for_the_password(
+        qapp, monkeypatch):
+    """The entry is gone from the locked menu, but a menu can be one tick old."""
+    opened = []
+    monkeypatch.setattr(
+        Main, 'MasterPasswordSetupDialog',
+        lambda tray, create=False: SimpleNamespace(
+            exec=lambda: opened.append('setup')))
+    instance = menu_builder(qapp, status='locked',
+                            bind=('handle_master_password_click',))
+    instance.prompt_master_password = lambda: opened.append('password')
+
+    instance.handle_master_password_click()
+
+    assert opened == ['password']
 
 
 def test_the_options_entry_opens_the_options_dialog(qapp):
     called = []
-    instance = menu_builder(qapp, handle_options_click=lambda: called.append(True))
+    instance = menu_builder(qapp, status='unlocked',
+                            handle_options_click=lambda: called.append(True))
 
     actions = instance.update_menu_items()
     options = [action for action in actions
@@ -317,6 +398,116 @@ def test_the_options_entry_opens_the_options_dialog(qapp):
     options[0].trigger()
 
     assert called == [True]
+
+
+def test_the_options_click_opens_the_dialog_for_a_readable_history(
+        qapp, monkeypatch):
+    opened = []
+    monkeypatch.setattr(Main, 'OptionsDialog', lambda tray: SimpleNamespace(
+        exec=lambda: opened.append('options')))
+    instance = menu_builder(qapp, status='unlocked',
+                            bind=('handle_options_click',))
+
+    instance.handle_options_click()
+
+    assert opened == ['options']
+
+
+def test_a_stale_options_click_on_a_locked_history_asks_for_the_password(
+        qapp, monkeypatch):
+    """The entry is gone from the locked menu, but a menu can be one tick old.
+
+    Doing nothing would leave a click on a dead entry; opening the dialog would
+    be the form-over-an-unreadable-file this change exists to prevent. Asking
+    for the password is the action the user was reaching for anyway.
+    """
+    opened = []
+    monkeypatch.setattr(Main, 'OptionsDialog', lambda tray: SimpleNamespace(
+        exec=lambda: opened.append('options')))
+    instance = menu_builder(qapp, status='locked',
+                            bind=('handle_options_click',))
+    instance.prompt_master_password = lambda: opened.append('password')
+
+    instance.handle_options_click()
+
+    assert opened == ['password']
+
+
+# --- locking on a session event --------------------------------------------
+#
+# `SessionLockWatch` turns logind's Lock / Active / PrepareForSleep events into
+# `lock_history()`.  The watch itself is asserted in `test_lock_watch.py`; what
+# matters here is the tray's half: the history really loses its key, the menu is
+# rebuilt so the state is visible, and the second and third event of one screen
+# lock cost nothing.
+
+
+class FakeHistory:
+    """The one method `lock_history()` calls, plus the state it reports."""
+
+    def __init__(self, status='unlocked'):
+        self.status = status
+        self.locked = 0
+
+    def lock(self):
+        if self.status != 'unlocked':
+            return False
+        self.status = 'locked'
+        self.locked += 1
+        return True
+
+
+def lockable_tray(qapp, status='unlocked'):
+    """A tray carrying only a history and a menu rebuild, both recorded."""
+    instance = LuksTray.__new__(LuksTray)
+    instance.history = FakeHistory(status)
+    instance.menus = []
+    instance.update_menu = lambda: instance.menus.append(True)
+    return instance
+
+
+def test_a_session_event_locks_the_history(qapp):
+    tray = lockable_tray(qapp)
+
+    assert tray.lock_history('screen lock') is True
+
+    assert tray.history.status == 'locked'
+    assert tray.history.locked == 1
+    assert tray.menus == [True]
+
+
+def test_one_screen_lock_costs_one_menu_rebuild(qapp):
+    """The Lock signal and LockedHint both arrive; the second is not a change."""
+    tray = lockable_tray(qapp)
+    tray.lock_history()
+
+    assert tray.lock_history() is False
+    assert tray.menus == [True]
+
+
+def test_a_history_with_no_key_is_not_locked_by_an_event(qapp):
+    tray = lockable_tray(qapp, status='clear_text')
+
+    assert tray.lock_history() is False
+    assert tray.history.status == 'clear_text'
+    assert tray.menus == []
+
+
+def test_a_locked_history_skips_the_container_merge(qapp):
+    """A mid-session lock must not make the poller write what it cannot read."""
+    instance = LuksTray.__new__(LuksTray)
+    instance.refreshing = False
+    instance.operation = None
+    instance.history = SimpleNamespace(status='locked')
+    instance.ini_tool = SimpleNamespace(update_config=lambda: None)
+    called = []
+    instance.update_menu_items = lambda: called.append('items')
+    instance.update_mounts = lambda: called.append('mounts')
+    instance.merge_containers_history = lambda: called.append('merge')
+
+    instance.update_menu()
+
+    assert called == ['items']
 
 
 # --- the log entry ---------------------------------------------------------
@@ -334,10 +525,13 @@ def test_the_log_entry_is_offered_only_when_something_can_show_it(qapp):
 
 def test_the_log_entry_sits_below_options_and_above_the_separator(qapp):
     texts = menu_texts(
-        menu_builder(qapp, log_viewer_available=lambda: True).update_menu_items())
+        menu_builder(qapp, status='unlocked',
+                     log_viewer_available=lambda: True).update_menu_items())
 
-    assert texts[-5:] == ['⚙ Options…', '≡ Open Log', None, '☓ Exit',
-                          f'↺ Restart luks-tray v{__version__}']
+    assert texts[-6:] == ['⚙ Options…', '✎ Update Master Password…',
+                          '≡ Open Log', None, '☓ Exit',
+                          f'↺ Restart luks-tray v{__version__}'
+                          ' (locks history)']
 
 
 def test_the_log_entry_opens_the_log(qapp):

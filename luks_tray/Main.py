@@ -54,13 +54,14 @@ from luks_tray import Session, service
 from luks_tray.IniTool import IniTool
 from luks_tray.DeviceInfo import DeviceInfo
 from luks_tray.dialogs import (CommonDialog, MasterPasswordDialog,
-                               MountDeviceDialog, MountFileDialog,
-                               OptionsDialog)
+                               MasterPasswordSetupDialog, MountDeviceDialog,
+                               MountFileDialog, OptionsDialog)
 from luks_tray.LuksOps import (generate_uuid_for_file_path,
                                 get_container_identity,
                                 get_luks_uuid_for_file, run_cmd,
                                 run_cmd_capture, run_unmount, sudo_cmd,
                                 sudo_run)
+from luks_tray.LockWatch import SessionLockWatch
 from luks_tray.TrayWatch import STATUS_NOTIFIER_WATCHER, TrayWatch
 
 # The command/discovery/dialog helpers used to be module-level API of this
@@ -73,6 +74,7 @@ __all__ = [
     'IniTool',
     'LuksTray',
     'MasterPasswordDialog',
+    'MasterPasswordSetupDialog',
     'MountDeviceDialog',
     'MountFileDialog',
     'OptionsDialog',
@@ -320,6 +322,16 @@ class LuksTray():
                                     on_lost=self._on_tray_host_lost)
         if not self.tray_watch.start() and tray_present is not None:
             prt('WARN: cannot watch for a tray host that starts later')
+        # The history locks when the session stops being ours: the screen
+        # locking, a VT or user switch, a suspend. Best effort on purpose -- a
+        # bare WM publishes none of these, and losing the events must not cost
+        # the applet its start-up. There is deliberately no idle timer behind
+        # it: an idle guess cannot see a screen lock either, so it would add
+        # prompts to the ordinary case without covering the one that matters.
+        self.lock_watch = SessionLockWatch(on_lock=self.lock_history)
+        if not self.lock_watch.start():
+            prt('Note: this session publishes no lock events; the master'
+                ' password stays in memory until the applet exits.')
         self._install_tray_icon()
         if tray_present is True:
             prt('tray host detected.')
@@ -584,10 +596,13 @@ class LuksTray():
             decides whether the popup has to be replaced at all.
 
             Every fixed entry starts with one symbol from the same small set
-            (`✚` add, `✦` create, `⚙` options, `≡` log, `☓` exit, `↺` restart),
-            the way the containers already carry `▣ ⧈ ▽ ‼`: they are basic
-            dingbats that the monospace font itself has, so the list reads at a
-            glance without depending on an emoji font being installed.
+            (`✚` add, `✦` create, `⚙` options, `✎` master password, `≡` log,
+            `☓` exit, `↺` restart), the way the containers already carry
+            `▣ ⧈ ▽ ‼`: they are basic dingbats that the monospace font itself
+            has, so the list reads at a glance without depending on an emoji
+            font being installed. `✎` is the password symbol in both states --
+            the prompt of a locked history and the create/change entry of a
+            readable one -- and those two never appear in the same menu.
 
             "Open Log" is offered only when something can actually show it --
             a terminal emulator, or the `log_viewer` prefix from `config.ini` --
@@ -687,16 +702,34 @@ class LuksTray():
             action.triggered.connect(self.handle_add_file_click)
             actions.append(action)
 
-        # The tail below is identical in both states, which is why the master
-        # password is no longer a top-level entry: setting, changing and
-        # clearing it are all reachable from the options dialog, and the line
-        # above is the only password action the *locked* state needs.
-        actions.append(None)
+        # The tail below is what both states share: the log, if anything can
+        # show it, and the two entries that end every menu. The settings entries
+        # are *not* shared: a locked history is the one state where the master
+        # password can be neither proved nor rewritten, so its branch above
+        # offers the password prompt and that is all it offers.
+        def separate():
+            """ Start a new group, without stacking two separators. """
+            if actions and actions[-1] is not None:
+                actions.append(None)
 
-        action = QAction('⚙ Options…', self.app)
-        action.setFont(self.mono_font)
-        action.triggered.connect(self.handle_options_click)
-        actions.append(action)
+        separate()
+
+        if self.history.status != 'locked':
+            action = QAction('⚙ Options…', self.app)
+            action.setFont(self.mono_font)
+            action.triggered.connect(self.handle_options_click)
+            actions.append(action)
+
+            # One entry, and its wording is the state: with no password the only
+            # meaningful action is to set one, with one the only meaningful
+            # action is to change or clear it. It sits *below* Options rather
+            # than inside it -- the key that guards the whole file is not one of
+            # the file's settings, and a submenu would put the action two clicks
+            # away from the menu that exists to hold it.
+            action = QAction(self.master_password_entry_text(), self.app)
+            action.setFont(self.mono_font)
+            action.triggered.connect(self.handle_master_password_click)
+            actions.append(action)
 
         if self.log_viewer_available():
             action = QAction(self.log_entry_text(), self.app)
@@ -704,7 +737,7 @@ class LuksTray():
             action.triggered.connect(self.open_log)
             actions.append(action)
 
-        actions.append(None)
+        separate()
 
         action = QAction('☓ Exit', self.app)
         action.setFont(self.mono_font)
@@ -715,7 +748,14 @@ class LuksTray():
         # label: the log says the same thing at start-up, but "which build am I
         # running?" is a question asked from the menu, usually about a desktop
         # that behaves differently from what the reader expects.
-        action = QAction(f'↺ Restart luks-tray v{__version__}', self.app)
+        label = f'↺ Restart luks-tray v{__version__}'
+        if self.history.status == 'unlocked':
+            # A restart *is* a lock -- the password lives in memory only -- so
+            # it is also the manual way to lock without leaving. Said only while
+            # there is something to lock: a clear-text history has no key, and a
+            # locked one is already locked.
+            label += ' (locks history)'
+        action = QAction(label, self.app)
         action.setFont(self.mono_font)
         action.triggered.connect(self.restart_self)
         actions.append(action)
@@ -813,8 +853,42 @@ class LuksTray():
         dialog.exec()
 
     def handle_options_click(self):
-        """ Open the options dialog: the `[ui]` settings and the master password. """
+        """ Open the options dialog: the four `[ui]` settings.
+
+            Never on a locked history. The menu does not offer either settings
+            entry there, and the reason is the master password rather than the
+            settings themselves: both of those dialogs write the history file
+            from the namespaces in memory, and a locked history has none -- which
+            is how an empty password once turned into a clear-text history. A
+            stale menu (one rebuilt before the history locked itself) asks for
+            the password instead, because the entry the user was reaching for is
+            the one that guards the file.
+        """
+        if self.history.status == 'locked':
+            self.prompt_master_password()
+            return
         dialog = OptionsDialog(self)
+        dialog.exec()
+
+    def master_password_entry_text(self):
+        """ The master-password menu line, worded by the state it is in. """
+        if self.history.status == 'clear_text':
+            return '✎ Create Master Password…'
+        return '✎ Update Master Password…'
+
+    def handle_master_password_click(self):
+        """ Open the create-or-change dialog for the master password.
+
+            Refused while locked for the same reason as the options dialog: the
+            write re-encrypts the file from the namespaces in memory, and a
+            locked history has none. A stale click asks for the password, which
+            is the step that makes the entry usable.
+        """
+        if self.history.status == 'locked':
+            self.prompt_master_password()
+            return
+        dialog = MasterPasswordSetupDialog(
+            self, create=self.history.status == 'clear_text')
         dialog.exec()
 
     def log_viewer_available(self):
@@ -1043,8 +1117,32 @@ class LuksTray():
             prt(f'note: cannot set the session restart hint: {exc}')
         self.app.quit()
 
+    def lock_history(self, reason='session event'):
+        """ Forget the master password and everything it decrypted.
+
+            Called by `SessionLockWatch` when the session stops being ours, and
+            deliberately quiet: no dialog can be shown over a lock screen, and
+            none is needed, because the rebuilt menu *is* the report -- it
+            becomes `✎ Click to enter master password` and the shield turns
+            orange. Unlocking is then the entry that always unlocks.
+
+            Idempotent, because one screen lock produces two or three of these
+            events and the log should say so once. Returns True only when this
+            call is what locked a readable history.
+        """
+        if not self.history.lock():
+            return False
+        prt(f'history locked ({reason}).')
+        self.update_menu()
+        return True
+
     def prompt_master_password(self):
-        """ Prompt for master passdword"""
+        """ Ask for the master password that unlocks the history.
+
+            The dialog only unlocks; setting, changing and clearing the password
+            are in the master-password entry of the menu, which needs a history
+            it can already read.
+        """
         dialog = MasterPasswordDialog(self)
         dialog.exec()
 

@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog,
                              QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                              QProgressBar, QPushButton, QVBoxLayout)
 from PyQt6.QtGui import QCursor
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QTimer, Qt
 
 from luks_tray.AppInfo import heading_text, window_title
 from luks_tray.Utils import note_problem, prt_once
@@ -64,6 +64,10 @@ class CommonDialog(QDialog):
         self.button_layout = QHBoxLayout()
         self.password_toggle = None
         self.password_input = None
+        # key -> (line edit, eye button), in the order they were added. A
+        # dialog may hold more than one masked field (the options dialog asks
+        # for a new password twice), and each eye has to drive its own field.
+        self.password_fields = {}
         self.items = []
         self.inputs = {}
         self.progress_label = None
@@ -139,23 +143,41 @@ class CommonDialog(QDialog):
         super().showEvent(event)
 
     def hide_password(self):
-        """Hide the password programmatically."""
-        if self.password_toggle and self.password_input:
-            self.password_toggle.setChecked(False)
-            self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
-            self.password_toggle.setText("👁️")
+        """Hide every password field, and point its eye the right way."""
+        for input_field, toggle in self.password_fields.values():
+            toggle.setChecked(False)
+            toggle.setText("👁️")
+            self.set_password_visibility(input_field, False)
 
     def show_password(self):
-        """Show the password programmatically."""
-        if self.password_toggle and self.password_input:
-            self.password_toggle.setChecked(True)
-            self.password_input.setEchoMode(QLineEdit.EchoMode.Normal)
-            self.password_toggle.setText("●")
+        """Show every password field, and point its eye the right way."""
+        for input_field, toggle in self.password_fields.values():
+            toggle.setChecked(True)
+            toggle.setText("●")
+            self.set_password_visibility(input_field, True)
+
+    @staticmethod
+    def set_password_visibility(input_field, exposed):
+        """ Set one field's echo mode, whatever its eye button says.
+
+            The one place that knows which `QLineEdit` mode means "readable":
+            the toggles, the helpers above and `add_input_field()` all end up
+            here, so a field can never be shown while its button says hidden.
+        """
+        input_field.setEchoMode(
+            QLineEdit.EchoMode.Normal if exposed else QLineEdit.EchoMode.Password)
 
 
-    def add_line(self, text):
-        """ Append a read-only text line to the main layout. """
+    def add_line(self, text, wrap=False):
+        """ Append a read-only text line to the main layout.
+
+            `wrap` is for the paragraphs that explain a consequence: a label
+            without word wrap makes the whole dialog as wide as its longest
+            sentence, which on a small screen is a dialog wider than the screen.
+        """
         label = QLabel(text)
+        if wrap:
+            label.setWordWrap(True)
         self.main_layout.addWidget(label)
 
     def add_push_button(self, label, method, arg=None):
@@ -163,11 +185,15 @@ class CommonDialog(QDialog):
 
             `arg` keeps the callbacks one-argument (`self.mount_device(uuid)`,
             `self.cancel(_)`), which is also the signature Qt's `clicked`
-            hands over when a button is connected directly.
+            hands over when a button is connected directly. The button is
+            returned so a dialog whose buttons describe a state (the master
+            password dialog enables "Clear" and "Change" as the two fields
+            change) can keep hold of it instead of searching the layout.
         """
         button = QPushButton(label)
         button.clicked.connect(lambda: method(arg))
         self.button_layout.addWidget(button)
+        return button
 
     def add_input_field(self, keys, label_texts, placeholder_texts, char_width=5,
                        field_type='text', add_on=''):
@@ -235,18 +261,28 @@ class CommonDialog(QDialog):
 
             if add_on == 'password':
                 exposed = tray.ini_tool.get_current_val('show_passwords_by_default')
-                exposed = False if placeholder_text else exposed # don't show existing passwords
-                self.password_input = input_field
-                self.password_toggle = QPushButton("●")
-                self.password_toggle.setFixedWidth(30)
-                self.password_toggle.setCheckable(True)
-                if exposed:
-                    self.show_password()
-                else:
-                    self.hide_password()
-                self.password_toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-                self.password_toggle.clicked.connect(self.toggle_password_visibility)
-                field_layout.addWidget(self.password_toggle)
+                exposed = bool(exposed) and not placeholder_text # don't show existing passwords
+                self.set_password_visibility(input_field, exposed)
+                toggle = QPushButton("●")
+                toggle.setFixedWidth(30)
+                toggle.setCheckable(True)
+                toggle.setChecked(exposed)
+                toggle.setText("●" if exposed else "👁️")
+                toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                # The field and its button are bound here, not looked up later:
+                # the callback used to read `self.password_*`, which is only
+                # ever the *last* masked field of the dialog.
+                toggle.clicked.connect(
+                    partial(self.toggle_password_visibility, input_field, toggle))
+                field_layout.addWidget(toggle)
+                self.password_fields[key] = (input_field, toggle)
+                # The plain attributes stay pointed at the first field, which
+                # is what `hide_password()`/`show_password()` and the dialogs
+                # that hold a single password mean; `password_fields` is the
+                # answer for everything else.
+                if self.password_input is None:
+                    self.password_input = input_field
+                    self.password_toggle = toggle
 
             if add_on == 'folder': # Create a Browse button
                 button = QPushButton("Browse...", self)
@@ -327,12 +363,31 @@ class CommonDialog(QDialog):
         if file_path[0]:
             input_field.setText(file_path[0])  # Update the input field with the selected folder path
 
-    def toggle_password_visibility(self):
-        """Toggle password visibility."""
-        if self.password_toggle.isChecked(): # password to be exposed
-            self.show_password()
-        else: # password is to be hidden
-            self.hide_password()
+    def toggle_password_visibility(self, input_field=None, toggle=None):
+        """Toggle the visibility of one password field.
+
+            `add_input_field()` binds each eye button to the field next to it,
+            so a dialog can ask for a new password twice without the two boxes
+            fighting over one switch. Called with no arguments -- as the tests
+            and any older caller do -- it drives the dialog's first password
+            field.
+        """
+        input_field = input_field if input_field is not None else self.password_input
+        toggle = toggle if toggle is not None else self.password_toggle
+        if not input_field or not toggle:
+            return
+        exposed = toggle.isChecked() # password to be exposed
+        self.set_password_visibility(input_field, exposed)
+        toggle.setText("●" if exposed else "👁️")
+
+    def clear_passwords(self):
+        """ Empty every password field of the dialog.
+
+            Called on the way out: a widget that keeps a typed password alive
+            after the dialog is gone is a copy nobody is watching.
+        """
+        for input_field, _toggle in self.password_fields.values():
+            input_field.clear()
 
     def cancel(self, _=None):
         """ null function"""
@@ -364,6 +419,43 @@ class CommonDialog(QDialog):
                     # Ensure the parent dialog regains focus
             self.raise_()
             self.activateWindow()
+
+    #: How long a self-closing notice stays up. Long enough to read a sentence,
+    #: short enough that it never becomes the thing the user is fighting.
+    NOTICE_TIMEOUT_MS = 3000
+
+    def show_timed_message(self, text, success=True, informative=''):
+        """ Say what happened in a box that closes itself, and carry on.
+
+            For answers rather than questions: "the master password was
+            changed" / "that password did not open the file". A message with a
+            single Ok button asks for a click that decides nothing, so it goes
+            away on its own after `NOTICE_TIMEOUT_MS`.
+
+            A failure still reaches `note_problem()`, exactly as
+            `alert_errors()` reports one, because the user was told about it and
+            the menu's "Open Log [n errors]" marker counts what the user was
+            told, not what was written to the file.
+
+            The box runs its own event loop, so the timer fires inside it and
+            there is nothing to poll; the timeout is a class attribute so a test
+            can set it to 0 instead of sleeping.
+        """
+        if not success:
+            note_problem(text)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information if success
+                    else QMessageBox.Icon.Warning)
+        box.setWindowTitle(window_title('Done' if success else 'Not Done'))
+        box.setText(text)
+        if informative:
+            box.setInformativeText(informative)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        QTimer.singleShot(self.NOTICE_TIMEOUT_MS, box.accept)
+        box.exec()
+        # Ensure the parent dialog regains focus
+        self.raise_()
+        self.activateWindow()
 
     def show_progress(self, message):
         """Show progress indicator and disable buttons."""

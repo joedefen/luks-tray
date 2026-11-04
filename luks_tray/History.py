@@ -27,9 +27,30 @@ import tempfile
 from types import SimpleNamespace
 import hashlib
 import base64
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from luks_tray.ContainerType import salt_identity
 from luks_tray.Utils import prt, prt_once, PROBE_TIMEOUT
+
+
+def _describe(exc):
+    """ `exc` as a phrase a log line can end with, never just ''.
+
+        `cryptography` raises InvalidToken with no arguments on purpose: the
+        library will not say whether the MAC or the padding was wrong, so a
+        wrong password and a damaged file stay indistinguishable to whoever
+        might be guessing. `str()` on it is therefore the empty string, so a
+        line that interpolated `{exc}` ended at the colon -- "decryption
+        failed: " with nothing after it, which reads like a bug in the logger.
+
+        The type name is what is left, and it is the fact the reader needs: a
+        typo (InvalidToken) looks different from a truncated or re-formatted
+        file (ValueError from the header split, JSONDecodeError, ...).
+    """
+    if str(exc).strip():
+        return f'{type(exc).__name__}: {exc}'
+    if isinstance(exc, InvalidToken):
+        return 'InvalidToken (wrong master password, or a damaged file)'
+    return type(exc).__name__
 
 class HistoryClass:
     """
@@ -263,13 +284,26 @@ class HistoryClass:
                     # but it means the write failed *and* its cleanup failed.
                     prt(f'WARN: cannot remove leftover {tmp_path!r}: {exc}')
 
-    def save(self, force=False):
+    def save(self, force=False, drop_encryption=False):
         """
         Saves the history file. Encrypts with the master password if set,
         otherwise saves as plain text.
+
+        A clear-text write is refused while the file on disk is encrypted and
+        this process holds no password: that is the one combination in which a
+        save destroys data nobody can read back, and it used to be reachable
+        from a "Remove Password" button while the history was locked (the empty
+        password looked like a deliberate choice, and `history.json` was
+        replaced with `{}`). Dropping the encryption is a decision, not a
+        side effect, so the caller that has just proved it can read the file --
+        which means `master_password` was set when the content was loaded --
+        asks for it with `drop_encryption=True`.
         """
         if not self.dirty and not force:
             return None
+        if not self.master_password and not drop_encryption and self.disk_is_encrypted():
+            return ('refusing to save clear text over the encrypted history '
+                    f'file {self.path!r}')
         try:
             entries = self._namespaces_to_json_data()
             if self.master_password:
@@ -290,6 +324,42 @@ class HistoryClass:
         self.file_existed = os.path.exists(self.path)
         self.status = 'unlocked' if self.master_password else 'clear_text'
         return None
+
+    def disk_is_encrypted(self):
+        """ True when the file on disk still starts with the encrypted header.
+
+            Only the header is read. The question this answers is "would a
+            clear-text write destroy something this process cannot read?", not
+            "is the payload valid" -- a corrupt encrypted file is exactly the
+            kind that must not be overwritten either.
+        """
+        try:
+            with open(self.path, 'rb') as file:
+                return file.read(len(self.ENCRYPTED_HEADER)) == self.ENCRYPTED_HEADER
+        except OSError:
+            return False
+
+    def verify_password_on_disk(self):
+        """ True when the file on disk decrypts with `self.master_password`.
+
+            `restore()` cannot answer this right after a save: it short-cuts on
+            an unchanged file stamp, which the save just set. The password is
+            the only key to the history and there is no recovery, so the caller
+            that changes it checks the round trip before telling the user the
+            new password is in effect.
+        """
+        try:
+            with open(self.path, 'rb') as file:
+                data = file.read()
+            if not data.startswith(self.ENCRYPTED_HEADER):
+                return False
+            decrypted, _used_legacy_kdf = self._decrypt_payload(
+                data[len(self.ENCRYPTED_HEADER):])
+            json.loads(decrypted)
+        except Exception as exc:                        # pylint: disable=broad-except
+            prt(f'Warning: cannot read back {self.path!r}: {_describe(exc)}')
+            return False
+        return True
 
     @staticmethod
     def _file_stamp(path):
@@ -434,6 +504,34 @@ class HistoryClass:
 
 # ... (inside HistoryClass)
 
+    def lock(self):
+        """ Forget the master password and everything decrypted with it.
+
+            The second line is the point of this method. A lock that only flips
+            `status` would leave every container password sitting in `vitals`,
+            one attribute read away from any later caller -- the menu would look
+            locked while the secrets it exists to protect stayed in memory. So
+            the decrypted namespaces go too, and the next `restore()` with the
+            right password rebuilds them from the file (the whole point of the
+            file being the only copy).
+
+            Nothing is written: a locked history has nothing this version is
+            willing to write, and the file on disk is already the encrypted one.
+            `dirty` is dropped with the entries it described, so a later `save()`
+            cannot claim there is something to write.
+
+            Returns True only when *this* call is what locked the history, so a
+            caller can tell a real transition from the second and third session
+            event of the same screen lock.
+        """
+        if self.status != 'unlocked':
+            return False
+        self.master_password = ''
+        self.vitals = {}
+        self.dirty = False
+        self.status = 'locked'
+        return True
+
     def restore(self):
         """
         Loads the history file from disk. It handles:
@@ -472,7 +570,10 @@ class HistoryClass:
 
             if not self.master_password:
                 # State 4: Encrypted but no master_password provided (locked)
-                prt("Warning: History file is encrypted, but no master password was provided.")
+                # A note, not a warning: on a desktop start the tray has no
+                # password to offer until the user unlocks it, so this is the
+                # expected state, not a failure worth counting.
+                prt("Note: History file is encrypted, but no master password was provided.")
                 self.status = 'locked'
                 return False
 
@@ -490,10 +591,12 @@ class HistoryClass:
                 return True
             except Exception as exc:                    # pylint: disable=broad-except
                 # Decryption failed (wrong password or corrupt encrypted data).
-                # The exception is part of the message because "failed" alone
-                # cannot tell a typo (InvalidToken) from a truncated file.
+                # The exception type is part of the message because "failed"
+                # alone cannot tell a typo (InvalidToken) from a truncated
+                # file; `_describe()` is needed because InvalidToken's own text
+                # is empty.
                 prt("Warning: History file appears encrypted, but decryption"
-                    f" failed: {exc}")
+                    f" failed: {_describe(exc)}")
                 self.status = 'locked'
                 return False
 

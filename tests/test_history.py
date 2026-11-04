@@ -166,6 +166,60 @@ def test_an_encrypted_file_without_a_password_is_locked(tmp_path):
     assert locked.status == 'locked'
 
 
+def test_a_clear_text_save_cannot_overwrite_an_encrypted_file(tmp_path):
+    """The wipe that used to be one button away from a locked history.
+
+    A save with no password while the file on disk is encrypted is the single
+    combination in which a write destroys data nobody can read back. It has to
+    refuse, whatever the caller believes about the state it is in.
+    """
+    history = make_history(tmp_path, master_password='right')
+    add_vital(history)
+    history.save()
+    before = (tmp_path / 'history.json').read_bytes()
+
+    locked = make_history(tmp_path)
+    assert locked.restore() is False
+    locked.dirty = True
+    message = locked.save(force=True)
+
+    assert message.startswith('refusing to save clear text')
+    assert (tmp_path / 'history.json').read_bytes() == before
+
+
+def test_dropping_the_encryption_has_to_be_asked_for(tmp_path):
+    # What "Remove Master Password" does once the history is unlocked: the
+    # caller holds the decrypted content, and the flag is what makes the
+    # clear-text write a decision instead of an accident.
+    history = make_history(tmp_path, master_password='right')
+    add_vital(history)
+    history.save()
+
+    opened = make_history(tmp_path, master_password='right')
+    assert opened.restore() is True
+    opened.master_password = ''
+    assert opened.save(force=True, drop_encryption=True) is None
+    assert opened.status == 'clear_text'
+
+    raw = (tmp_path / 'history.json').read_bytes()
+    assert not raw.startswith(HistoryClass.ENCRYPTED_HEADER)
+    stored = json.loads(raw.decode('utf-8'))
+    assert stored['1234-abcd']['upon'] == '/home/joe/Vaults/test'
+
+
+def test_the_read_back_checks_the_password_that_is_on_disk(tmp_path):
+    # `restore()` short-cuts on an unchanged file stamp, so it cannot answer
+    # "does the file I just wrote open with this password?".
+    history = make_history(tmp_path, master_password='hunter2')
+    add_vital(history)
+    history.save()
+
+    assert history.verify_password_on_disk() is True
+
+    history.master_password = 'a-typo'
+    assert history.verify_password_on_disk() is False
+
+
 def test_a_legacy_file_opens_and_is_scheduled_for_rewrite(tmp_path):
     entries = {HistoryClass.make_ns('legacy-uuid').uuid: {
         'uuid': 'legacy-uuid', 'password': 'old-secret', 'upon': '/mnt/old',
@@ -462,6 +516,90 @@ def test_the_probe_cache_is_bounded(tmp_path, monkeypatch):
     history._probe_back_file_identity(str(extra))
     # Full cache is dropped wholesale rather than maintained as an LRU.
     assert list(history._back_file_identity_cache) == [str(extra)]
+
+
+# --- locking while the applet runs -----------------------------------------
+#
+# The history used to become 'locked' only at start-up, where nothing had been
+# decrypted yet.  A session event can lock it *after* it was read, so these pin
+# the two things that decision depends on: the decrypted entries really go, and
+# the file on disk is not touched by forgetting them.
+
+
+def test_lock_forgets_the_password_and_the_decrypted_entries(tmp_path):
+    """A lock that kept `vitals` would keep every container password in reach."""
+    history = make_history(tmp_path, master_password='hunter2')
+    add_vital(history, password='volume-secret')
+    assert history.save() is None
+    assert history.status == 'unlocked'
+
+    assert history.lock() is True
+
+    assert history.status == 'locked'
+    assert history.master_password == ''
+    assert history.vitals == {}
+    assert history.dirty is False
+
+
+def test_lock_leaves_the_encrypted_file_alone(tmp_path):
+    history = make_history(tmp_path, master_password='hunter2')
+    add_vital(history)
+    history.save()
+    before = (tmp_path / 'history.json').read_bytes()
+
+    history.lock()
+
+    assert (tmp_path / 'history.json').read_bytes() == before
+    assert history.save() is None  # nothing dirty, so nothing is attempted
+
+
+def test_a_locked_history_cannot_write_clear_text(tmp_path):
+    """The save() guard is what makes a lock real rather than a menu state."""
+    history = make_history(tmp_path, master_password='hunter2')
+    add_vital(history)
+    history.save()
+    history.lock()
+    history.dirty = True
+
+    message = history.save(force=True)
+
+    assert message.startswith('refusing to save clear text')
+
+
+def test_unlocking_after_a_lock_reads_the_file_again(tmp_path):
+    """The file is the only copy, so a lock is recoverable and nothing else."""
+    history = make_history(tmp_path, master_password='hunter2')
+    add_vital(history, password='volume-secret')
+    history.save()
+    history.lock()
+
+    history.master_password = 'hunter2'
+    history.restore()
+
+    assert history.status == 'unlocked'
+    assert history.vitals['1234-abcd'].password == 'volume-secret'
+
+
+def test_lock_is_a_no_op_for_a_clear_text_history(tmp_path):
+    """There is no key to forget, and the entries are the file's own content."""
+    history = make_history(tmp_path)
+    add_vital(history)
+    history.save()
+    assert history.status == 'clear_text'
+
+    assert history.lock() is False
+    assert history.status == 'clear_text'
+    assert '1234-abcd' in history.vitals
+
+
+def test_lock_is_idempotent(tmp_path):
+    """A screen lock sends two or three events; only the first is a change."""
+    history = make_history(tmp_path, master_password='hunter2')
+    add_vital(history)
+    history.save()
+
+    assert history.lock() is True
+    assert history.lock() is False
 
 
 # --- vitals ----------------------------------------------------------------

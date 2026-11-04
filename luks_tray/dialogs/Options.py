@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-""" Options dialog: the `[ui]` settings, and the way to the master password.
+""" Options dialog: the `[ui]` settings of `config.ini`, and nothing else.
 
     `config.ini` stays the single source of truth -- this dialog is a typing aid
     for it, not a second store -- so the one thing it must get right is that
@@ -10,42 +10,31 @@
     message box; a hand-typed typo used to be replaced silently by the default
     at mount time, which is exactly the failure a form can prevent.
 
-    The master password keeps its own dialog
-    ([`MasterPasswordDialog`](luks_tray/dialogs/MasterPassword.py)): that class
-    knows the three history states and how to move between them, and it is also
-    reachable from the menu's "Click to enter master password" line when the
-    history is locked. Moving the menu entry here only means this dialog has to
-    answer "is my history encrypted?" itself, which is what the state line under
-    the fields is for.
+    The master password used to be the second half of this form, with its own
+    status line, two masked fields and a "Remove Master Password" button. It is
+    now a menu entry of its own ([`MasterPasswordSetup`](luks_tray/dialogs/MasterPassword.py)),
+    because it is not a setting: it guards the whole file rather than one key in
+    it, and its buttons describe a state ("nothing typed" / "a password typed
+    twice") that has nothing to do with the four settings here. Keeping it out
+    of this dialog also keeps Save meaning one thing.
 """
 # pylint: disable=broad-exception-caught, invalid-name
 
 import os
 import shlex
 
-from PyQt6.QtWidgets import QLabel
-
 from luks_tray.dialogs.Common import CommonDialog
-from luks_tray.dialogs.MasterPassword import MasterPasswordDialog
 
 
 class OptionsDialog(CommonDialog):
-    """ Edit the `[ui]` settings; reach the master-password dialog.
+    """ Edit the four `[ui]` settings of `config.ini`.
 
-        The four settings are the whole of `config.ini`. Two are checkboxes, one
-        is a path and one is a command prefix, so `add_input_field()` covers
-        every shape and the dialog stays a thin layer over the file:
+        The four settings are the whole file. Two are checkboxes, one is a path
+        and one is a command prefix, so `add_input_field()` covers every shape
+        and the dialog stays a thin layer over `config.ini`:
         `read_settings()` is the form as a dict, and the same dict is what
         `IniTool.set_values()` writes back.
     """
-    #: `HistoryClass.status` in the words of this dialog. Anything else (a
-    #: future state, or a stub in a test) is shown verbatim rather than hidden.
-    HISTORY_STATES = {
-        'clear_text': 'History: stored in clear text (no master password)',
-        'unlocked': 'History: unlocked with a master password',
-        'locked': 'History: locked until the master password is entered',
-    }
-
     def __init__(self, tray):
         super().__init__(tray)
         self.set_title('Options')
@@ -74,30 +63,10 @@ class OptionsDialog(CommonDialog):
         self.add_input_field('log_viewer', 'Log viewer command', log_viewer,
                              char_width=32)
 
-        self.history_label = QLabel(self.history_state_text())
-        self.main_layout.addWidget(self.history_label)
-
-        self.add_push_button('Master Password…', self.open_master_password)
         self.add_push_button('Cancel', self.cancel)
         self.add_push_button('Save', self.save)
         self.main_layout.addLayout(self.button_layout)
         self.setLayout(self.main_layout)
-
-    def history_state_text(self):
-        """ The one-line description of the history state shown in the dialog. """
-        status = self.tray.history.status
-        return self.HISTORY_STATES.get(status, f'History: unknown state {status!r}')
-
-    def open_master_password(self, _=None):
-        """ Open the master-password dialog on top, then show the new state.
-
-            Only an accepted dialog can have changed anything, and the change
-            reaches the menu (the "Click to enter master password" line, the
-            container list and the shield icon) through `update_menu()`.
-        """
-        if MasterPasswordDialog(self.tray).exec():
-            self.history_label.setText(self.history_state_text())
-            self.tray.update_menu()
 
     def read_settings(self):
         """ The form as `{key: value}`, in the shape `set_values()` expects. """
@@ -153,9 +122,9 @@ class OptionsDialog(CommonDialog):
     def save(self, _=None):
         """ Validate, persist, rebuild the menu and close.
 
-            Errors come from two places -- the checks above and the write itself
-            -- and both keep the dialog open: the values the user just typed are
-            the only copy of their intent until the file accepts them.
+            Errors come from two places -- the settings checks and the write
+            itself -- and both keep the dialog open: the values the user just
+            typed are the only copy of their intent until the file accepts them.
         """
         values = self.read_settings()
         errors = self.validate(values)

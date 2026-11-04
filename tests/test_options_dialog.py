@@ -1,4 +1,4 @@
-"""`OptionsDialog`: the `[ui]` settings, and the way to the master password.
+"""`OptionsDialog`: the four `[ui]` settings of `config.ini`.
 
 The dialog is a typing aid for `config.ini`, so the tests are about the two
 directions: what it shows (the values the tray is actually using) and what it
@@ -8,9 +8,10 @@ keep the dialog open with the reason, which is the failure the raw-ini route
 could not report: a hand-edited typo was silently replaced by the default at
 mount time.
 
-The password half is a hand-off, not a re-implementation: the dialog opens
-`MasterPasswordDialog` (which owns the three history states) and then shows the
-state that came back.
+The master password is no longer part of this form; it has its own dialog and
+its own tests (see `test_master_password_dialog.py`). What is pinned here is
+that this dialog has *nothing* to do with the history: it never reads its
+state and never writes it.
 """
 
 from types import SimpleNamespace
@@ -18,7 +19,6 @@ from types import SimpleNamespace
 import pytest
 from PyQt6.QtWidgets import QDialog, QWidget
 
-from luks_tray.dialogs import Options
 from luks_tray.dialogs.Options import OptionsDialog
 
 # Qt takes ownership of the dialog's parent widget; keep the Python wrapper.
@@ -51,29 +51,24 @@ class FakeIniTool:
         return []
 
 
-class FakePasswordDialog:
-    """Stands in for `MasterPasswordDialog`: records the call, returns `result`."""
+class ExplodingHistory:
+    """A history that fails the test if this dialog so much as looks at it.
 
-    def __init__(self, opened, result=True):
-        self.opened = opened
-        self.result = result
+    The password half moved out of this form; a dialog that still reached for
+    the history would be reading a file it has no business writing.
+    """
 
-    def __call__(self, tray):
-        self.opened.append(tray)
-        return self
-
-    def exec(self):
-        return self.result
+    def __getattr__(self, name):
+        raise AssertionError(f'OptionsDialog touched history.{name}')
 
 
-def make_tray(qapp, status='clear_text', values=None, refuse=(),
-              folder_error=None):
+def make_tray(qapp, values=None, refuse=(), folder_error=None):
     """A tray stand-in: only what `OptionsDialog` reaches for."""
     parent = QWidget()
     KEEP_ALIVE.append(parent)
     tray = SimpleNamespace(
         dialog_parent=parent,
-        history=SimpleNamespace(status=status),
+        history=ExplodingHistory(),
         ini_tool=FakeIniTool(values, refuse),
         menus=[],
     )
@@ -123,18 +118,33 @@ def test_the_log_viewer_field_shows_the_configured_prefix(dialog):
     assert instance.inputs['log_viewer'].text() == 'xterm -maximized -e'
 
 
-@pytest.mark.parametrize('status, words', [
-    ('clear_text', 'clear text'),
-    ('unlocked', 'unlocked'),
-    ('locked', 'locked'),
-])
-def test_the_history_line_describes_each_state(dialog, status, words):
-    assert words in dialog(status=status).history_label.text()
+def test_the_form_holds_only_the_four_settings(dialog):
+    """The password fields are gone, and nothing took their place."""
+    instance = dialog()
+
+    assert set(instance.inputs) == {
+        'show_passwords_by_default', 'show_anomaly_alerts',
+        'auto_mount_folder', 'log_viewer'}
 
 
-def test_an_unknown_history_state_is_shown_verbatim(dialog):
-    # A state added later (or a stub) is reported, not hidden behind a guess.
-    assert "'mystery'" in dialog(status='mystery').history_label.text()
+def test_there_is_no_password_action_left_in_the_form(dialog):
+    # The button row itself, not `findChildren()`: the folder field carries its
+    # own "Browse…" and the count would hide a stray password button.
+    instance = dialog()
+    labels = [instance.button_layout.itemAt(index).widget().text()
+              for index in range(instance.button_layout.count())]
+
+    assert labels == ['Cancel', 'Save']
+
+
+def test_the_dialog_never_touches_the_history(dialog):
+    # `ExplodingHistory` raises on any attribute access, so building the
+    # dialog and saving it is the assertion.
+    instance = dialog()
+
+    instance.save()
+
+    assert instance.result() == QDialog.DialogCode.Accepted
 
 
 # --- what it writes --------------------------------------------------------
@@ -255,40 +265,3 @@ def test_a_refused_write_keeps_the_dialog_open(dialog):
 
     assert instance.errors == ['cannot write config.ini']
     assert instance.result() != QDialog.DialogCode.Accepted
-
-
-# --- the master-password hand-off -----------------------------------------
-
-
-def test_the_password_button_opens_the_master_password_dialog(dialog, monkeypatch):
-    opened = []
-    monkeypatch.setattr(Options, 'MasterPasswordDialog', FakePasswordDialog(opened))
-    instance = dialog()
-
-    instance.open_master_password()
-
-    assert opened == [instance.tray]
-
-
-def test_an_accepted_password_change_updates_the_state_and_the_menu(
-        dialog, monkeypatch):
-    monkeypatch.setattr(Options, 'MasterPasswordDialog', FakePasswordDialog([]))
-    instance = dialog(status='clear_text')
-    instance.tray.history.status = 'unlocked'
-
-    instance.open_master_password()
-
-    assert 'unlocked' in instance.history_label.text()
-    assert instance.tray.menus == [True]
-
-
-def test_a_cancelled_password_dialog_changes_nothing(dialog, monkeypatch):
-    fake = FakePasswordDialog([], result=False)
-    monkeypatch.setattr(Options, 'MasterPasswordDialog', fake)
-    instance = dialog(status='clear_text')
-    before = instance.history_label.text()
-
-    instance.open_master_password()
-
-    assert instance.history_label.text() == before
-    assert instance.tray.menus == []

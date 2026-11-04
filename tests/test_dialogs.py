@@ -302,16 +302,19 @@ class FakeBox:
 
     class Icon:
         Critical = 'critical'
+        Information = 'information'
+        Warning = 'warning'
 
     class StandardButton:
         Ok = 'ok'
 
     def __init__(self, _parent=None):
         self.texts = []
+        self.icon = None
         FakeBox.instances.append(self)
 
-    def setIcon(self, _icon):
-        pass
+    def setIcon(self, icon):
+        self.icon = icon
 
     def setWindowTitle(self, title):
         self.texts.append(title)
@@ -327,6 +330,9 @@ class FakeBox:
 
     def exec(self):
         self.texts.append('shown')
+
+    def accept(self):
+        self.texts.append('accepted')
 
 
 def test_alert_errors_shows_one_box_for_the_whole_list(dialog, monkeypatch):
@@ -344,6 +350,45 @@ def test_alert_errors_does_nothing_for_an_empty_list(dialog, monkeypatch):
     monkeypatch.setattr(Common, 'QMessageBox', FakeBox)
     dialog.alert_errors([])
     assert FakeBox.instances == []
+
+
+def test_a_timed_message_says_what_happened(qapp, monkeypatch):
+    # The answer boxes ("the master password was set") go away by themselves:
+    # a single Ok button asks for a click that decides nothing.
+    FakeBox.instances = []
+    scheduled = []
+    monkeypatch.setattr(Common, 'QMessageBox', FakeBox)
+    monkeypatch.setattr(Common, 'QTimer', SimpleNamespace(
+        singleShot=lambda delay, callback: scheduled.append(delay)))
+    dialog = CommonDialog(FakeTray(None))
+
+    dialog.show_timed_message('The master password was changed.',
+                              informative='Enter it again from the menu.')
+
+    assert scheduled == [CommonDialog.NOTICE_TIMEOUT_MS]
+    assert CommonDialog.NOTICE_TIMEOUT_MS == 3000
+    box = FakeBox.instances[0]
+    assert box.icon == 'information'
+    assert 'The master password was changed.' in box.texts
+    assert 'Enter it again from the menu.' in box.texts
+    assert 'shown' in box.texts
+
+
+def test_a_timed_failure_is_counted_for_the_log_marker(qapp, monkeypatch):
+    # `alert_errors()` counts what the user was told, so the marker agrees with
+    # the dialogs; a notice that reports a failure has to do the same.
+    FakeBox.instances = []
+    noted = []
+    monkeypatch.setattr(Common, 'QMessageBox', FakeBox)
+    monkeypatch.setattr(Common, 'QTimer', SimpleNamespace(singleShot=lambda *a: None))
+    monkeypatch.setattr(Common, 'note_problem', noted.append)
+    dialog = CommonDialog(FakeTray(None))
+
+    dialog.show_timed_message('That password did not open the history.',
+                              success=False)
+
+    assert noted == ['That password did not open the history.']
+    assert FakeBox.instances[0].icon == 'warning'
 
 
 def test_show_progress_disables_the_buttons_and_reuses_its_widgets(dialog):
