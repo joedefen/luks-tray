@@ -60,14 +60,25 @@ RestartSec=5
 # signals are systemd's own "clean stop" set; they are listed explicitly so the
 # intent survives an edit to `Restart=`.
 RestartPreventExitStatus=3 15 SIGTERM SIGHUP SIGINT SIGPIPE
-# Never add `UnsetEnvironment=SESSION_MANAGER` here.  pwr-tray sets it on
-# purpose: its Qt never registers with a session manager, and it leaves of its
-# own accord because `Actions.exit_wm()` quits once the desktop accepts its
-# logoff command.  luks-tray has no logoff action, so clearing this variable
-# would take away the session manager's request at a DE-initiated logout -- the
-# one thing besides a stop signal that ends an installed applet on a distro Qt
-# -- and the black-screen hang above would come back.  tests/test_service.py
-# refuses the directive.
+# The stop itself is bounded.  systemd's default is 90s, and a logout cannot
+# finish until this process is gone: a wedged Qt event loop, an open modal
+# dialog, anything that keeps the interpreter from leaving would hold the
+# session open for a minute and a half.  3s is ample for a signal handler that
+# writes one log line, and `SendSIGKILL` makes the end unconditional.  This is
+# the backstop under every other mechanism: whatever asks the applet to leave
+# (systemd stopping graphical-session.target, `--svc-stop`, or a session
+# manager's save-and-quit request on a Qt that has XSMP), the process is gone
+# within 3s.
+TimeoutStopSec=3
+SendSIGKILL=yes
+# Never add `UnsetEnvironment=SESSION_MANAGER` here.  pwr-tray does, because its
+# Qt (the PyQt6 wheels) has no X11 session management at all and its own Log Off
+# row quits the applet as soon as the desktop accepts the logout.  luks-tray has
+# no logoff action, so on a *distro* Qt -- which does link `SmcOpenConnection` --
+# this variable is the only way ksmserver can ask the applet to leave before the
+# session's stop reaches it.  On a *wheel* Qt it is inert either way (Qt opens
+# no ICE connection), which is why it cannot be the guarantee: the bounded stop
+# above is.  tests/test_service.py refuses the directive.
 
 [Install]
 WantedBy=graphical-session.target

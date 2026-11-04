@@ -1052,14 +1052,16 @@ class LuksTray():
         """ Answer a session manager that asks the applet to leave -- when Qt can.
 
             This is a *second* line of defence, and a build-dependent one.  The
-            guarantee is the shipped unit: `Restart=on-failure` together with
-            `RestartPreventExitStatus=3 15 SIGTERM SIGHUP SIGINT SIGPIPE` lets a
-            logout end the applet for good.  With `Restart=always` it did not:
-            the unit started the applet again five seconds into the teardown,
-            into a session that was waiting for its processes to disappear -- so
-            the session never emptied, SDDM never got the VT, and the screen
-            stayed black.  That is the fix, and it holds whatever ends the
-            process.
+            guarantee is the shipped unit, in two halves: `Restart=on-failure`
+            together with `RestartPreventExitStatus=3 15 SIGTERM SIGHUP SIGINT
+            SIGPIPE` lets a logout end the applet for good -- with `Restart=always`
+            it did not: the unit started the applet again five seconds into the
+            teardown, into a session that was waiting for its processes to
+            disappear, so the session never emptied, SDDM never got the VT, and
+            the screen stayed black -- and `TimeoutStopSec=3` with `SendSIGKILL`
+            bounds how long the stop may take, so a wedged event loop or an open
+            modal dialog cannot hold a session open for systemd's default 90s.
+            That pair holds whatever ends the process.
 
             Whether this handler ever runs depends on how Qt was built.  An X11
             logout is a conversation only with clients registered with the
@@ -1069,10 +1071,11 @@ class LuksTray():
             `SmcOpenConnection` is linked into libQt6XcbQpa.  The PyQt6 wheel
             ships a Qt *without* X11 session management, so the connect below
             succeeds against a signal that never fires: no session management,
-            no handler, and the applet is simply terminated at logout.  That is
-            fine, because `Restart=on-failure` keeps it down; it is also why
-            this is an extra rather than the mechanism that makes a logout
-            finish.
+            no handler, and the applet is not in the session manager's
+            conversation at all -- it simply waits for the stop, which the unit's
+            bounded `TimeoutStopSec=` then guarantees.  That is fine, because
+            `Restart=on-failure` keeps it down; it is also why this is an extra
+            rather than the mechanism that makes a logout finish.
 
             Observed, not our doing: an installed build with no handler
             connected (3.0.0.99.2, whose Main.py has no `commitDataRequest`)

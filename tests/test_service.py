@@ -147,17 +147,33 @@ def test_each_shipped_unit_stays_down_when_a_logout_stops_it(session):
 
 @pytest.mark.parametrize('session', ['wayland', 'x11'])
 def test_no_shipped_unit_unsets_the_session_manager(session):
-    # pwr-tray sets UnsetEnvironment=SESSION_MANAGER deliberately: its Qt never
-    # registers with a session manager, and it leaves of its own accord because
-    # Actions.exit_wm() quits once the desktop accepts its logoff command.
-    # luks-tray has no logoff action, so the session manager's request is what
-    # ends an installed applet at a DE-initiated logout on a distro Qt; clearing
-    # the variable would take that away and re-create the black-screen hang.
-    # The directive is *named* in a comment above [Install], hence `directives`.
+    # pwr-tray sets UnsetEnvironment=SESSION_MANAGER deliberately: its Qt has no
+    # X11 session management, and it leaves of its own accord because its Log Off
+    # row quits once the desktop accepts the command.  luks-tray has no logoff
+    # action, so on a distro Qt (which does link SmcOpenConnection) this variable
+    # is the only way ksmserver can ask the applet to leave early; on a wheel Qt
+    # it is inert either way, which is why the unit's bounded stop is the real
+    # guarantee.  The directive is *named* in a comment above [Install], hence
+    # `directives`.
     text = service.read_unit(service.template_for(session))
     directives = [line for line in text.splitlines() if not line.startswith('#')]
     assert not any('UnsetEnvironment=SESSION_MANAGER' in line
                    for line in directives)
+
+
+@pytest.mark.parametrize('session', ['wayland', 'x11'])
+def test_each_shipped_unit_bounds_how_long_a_stop_may_take(session):
+    # systemd's default is 90s, and a logout cannot finish until this process is
+    # gone: a wedged Qt event loop or an open modal dialog would hold the session
+    # open that long.  A short TimeoutStopSec plus SendSIGKILL is the backstop
+    # under every other mechanism -- whatever asks the applet to leave, it is
+    # gone within seconds.
+    text = service.read_unit(service.template_for(session))
+    directives = [line for line in text.splitlines() if not line.startswith('#')]
+    timeout = next(line for line in directives
+                   if line.startswith('TimeoutStopSec='))
+    assert 0 < float(timeout.split('=', 1)[1]) <= 5
+    assert 'SendSIGKILL=yes' in directives
 
 
 @pytest.mark.parametrize('session', ['wayland', 'x11'])
