@@ -143,6 +143,13 @@ def test_each_shipped_unit_stays_down_when_a_logout_stops_it(session):
     prevent = next(line for line in directives
                    if line.startswith('RestartPreventExitStatus='))
     assert 'SIGTERM' in prevent
+    # The two ways a *dead session* ends this process have to be final as well.
+    # SIGKILL is what SendSIGKILL=yes falls back to when TimeoutStopSec expires,
+    # and SIGABRT is what Qt raises when it finds the X11 connection already
+    # gone.  Either one left out is a restart into a session that is still
+    # emptying -- the black screen above, one level down.
+    assert 'SIGKILL' in prevent
+    assert 'SIGABRT' in prevent
 
 
 @pytest.mark.parametrize('session', ['wayland', 'x11'])

@@ -42,7 +42,8 @@ from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PyQt6.QtWidgets import QWidgetAction, QWidget, QLabel
 from PyQt6.QtGui import QIcon, QCursor, QAction, QFont, QFontInfo
 from PyQt6.QtGui import QSessionManager
-from PyQt6.QtCore import QTimer, Qt, QtMsgType, qInstallMessageHandler
+from PyQt6.QtCore import (QSocketNotifier, QTimer, Qt, QtMsgType,
+                          qInstallMessageHandler)
 
 from luks_tray.AppInfo import (APP_NAME, APPLICATION_DISPLAY_NAME,
                                DESKTOP_FILE_NAME)
@@ -157,6 +158,67 @@ def install_qt_messages():
     qInstallMessageHandler(qt_message_handler)
 
 
+#: How many bytes one wakeup drain may read.  The pipe holds one byte per
+#: signal, and signals are rare on this path -- the drain only has to leave it
+#: empty so the notifier stops firing.
+_WAKEUP_CHUNK = 64
+#: The pipe behind `install_signal_wakeup()`: `(notifier, read fd, write fd)`.
+#: Module level on purpose: a collected `QSocketNotifier` stops waking the
+#: event loop, and the handlers would go back to waiting for a poll tick.
+_signal_wakeup = None
+
+
+def _drain_signal_pipe(fd):
+    """ Empty the wakeup pipe; the pending handler runs as soon as we return. """
+    try:
+        while os.read(fd, _WAKEUP_CHUNK):
+            pass
+    except (BlockingIOError, OSError):
+        pass
+
+
+def install_signal_wakeup(app):
+    """ Wake the Qt event loop when a signal arrives, so its handler runs at once.
+
+        CPython runs a signal handler only between bytecodes, and only in the
+        main thread.  A tray applet spends its life parked inside
+        `QApplication.exec()`, so a SIGTERM -- a `systemctl --user stop`, or the
+        stop at the end of a logout -- has to wait for the event loop to hand
+        control back to Python, and on a quiet tray the only thing that does
+        that is the 3 s refresh timer.  That latency is visible against
+        journald: a stop job accepted at 13:16:48 produced its `(signal 15)`
+        line in debug.log at 13:16:50.  It is also the only reason the unit
+        needs a `TimeoutStopSec=` at all, and a tick that is busy (one
+        `cryptsetup` call outlives several of them) can push the handler past
+        the deadline -- so SIGKILL, not the handler, ends up stopping the
+        applet.
+
+        `signal.set_wakeup_fd()` writes the signal number into a pipe, and a
+        `QSocketNotifier` on the read end makes the loop notice it at once: it
+        returns to Python and runs the pending handler in the same millisecond.
+        The notifier only drains the pipe -- what the handler *does* is still
+        `Utils.install_termination_log()`'s business (log the stop line, then
+        die of the signal, which is what the unit's `RestartPreventExitStatus=`
+        reads as "stay stopped").
+
+        Main thread only, after the `QApplication` exists.  A second call
+        returns the first call's pipe and otherwise does nothing.
+    """
+    global _signal_wakeup
+    if _signal_wakeup is not None:
+        return _signal_wakeup
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(read_fd, False)
+    os.set_blocking(write_fd, False)
+    # A pipe that is somehow full must not turn a stop signal into a write
+    # error inside the C handler, so the warning is off; one wake is enough.
+    signal.set_wakeup_fd(write_fd, warn_on_full_buffer=False)
+    notifier = QSocketNotifier(read_fd, QSocketNotifier.Type.Read, app)
+    notifier.activated.connect(lambda *_: _drain_signal_pipe(read_fd))
+    _signal_wakeup = (notifier, read_fd, write_fd)
+    return _signal_wakeup
+
+
 # Paths that must never be accepted as `auto_mount_folder`. The startup cleanup
 # pass deletes (empty) subdirectories below that path, so a careless config value
 # such as `/home` or `/` would otherwise turn a typo into an `rmdir` sweep over
@@ -238,6 +300,11 @@ class LuksTray():
         # handler is the second line of defence either way -- see
         # install_session_shutdown_handler().
         self.install_session_shutdown_handler()
+        # A stop is a signal, and a signal reaches its Python handler only when
+        # the event loop gives the interpreter control again -- on an idle tray,
+        # at the next 3 s poll.  This makes that immediate; see
+        # install_signal_wakeup().
+        install_signal_wakeup(self.app)
         self.mono_font = QFont("Consolas", 10)
         self.mono_font.setStyleHint(QFont.StyleHint.Monospace)
         self.emoji_font = self.get_emoji_font()

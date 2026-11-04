@@ -347,24 +347,48 @@ shows what systemd saw.
 
 The unit is the guarantee, and it has two halves.
 
-**A logout may end the applet.** `Restart=on-failure` plus the stop signals in
-`RestartPreventExitStatus=` mean only a clean exit or a stop signal (SIGTERM,
-SIGHUP, SIGINT, SIGPIPE) is final, while a crash is still recovered. An applet
+**A logout may end the applet, and nothing may bring it back.**
+`Restart=on-failure` plus `RestartPreventExitStatus=` means a clean exit, a stop
+signal (SIGTERM, SIGHUP, SIGINT, SIGPIPE), a forced kill (SIGKILL) and a Qt
+abort (SIGABRT) are all final, while a real crash is still recovered. An applet
 that is *restarted* seconds after a logout began is started into a session that
 is waiting for its processes to disappear: the session never empties, the
-display manager never gets the VT, and the logout stops on a black screen.
+display manager never gets the VT, and the logout stops on a black screen. The
+last two statuses are how a *dead session* ends this process, so leaving them
+out would have reopened that hole one level down -- the sledgehammer below is a
+SIGKILL.
 
-**It ends within seconds.** `TimeoutStopSec=3` with `SendSIGKILL=yes` bounds the
-stop, whoever asks for it. systemd's default is 90s, and a logout cannot finish
-until the process is gone, so a wedged Qt event loop or an open modal dialog
-would otherwise hold a session open for a minute and a half. This is the
-sledgehammer: it does not care *why* the applet has to go, only that it does.
+**It ends in milliseconds, and never takes longer than 3 s.**
+`TimeoutStopSec=3` with `SendSIGKILL=yes` bounds the stop, whoever asks for it.
+systemd's default is 90s, and a logout cannot finish until the process is gone,
+so a wedged Qt event loop or an open modal dialog would otherwise hold a session
+open for a minute and a half. This is the sledgehammer: it does not care *why*
+the applet has to go, only that it does.
+
+The applet also answers promptly now. Python runs a signal handler only between
+bytecodes in the main thread, and a tray spends its life inside
+`QApplication.exec()`; on a quiet tray the only thing that handed control back
+to Python was the 3 s refresh timer, so a stop job accepted at `13:16:48`
+produced its `(signal 15)` line in the log at `13:16:50`.
+`install_signal_wakeup()` puts a `QSocketNotifier` on the pipe behind
+`signal.set_wakeup_fd()`, so the loop wakes when SIGTERM arrives and the handler
+runs in the same millisecond. The handler still does the minimal thing on
+purpose: log, restore the default disposition, re-raise. It deliberately does
+*not* call `app.quit()`, which would run Qt's teardown -- XCB round-trips to a
+display server that may already be gone.
 
 What asks it to leave depends on the session and on the Qt underneath:
 
-- Under the unit, stopping `graphical-session.target` stops the applet with it
+- Under the unit, the applet goes when `graphical-session.target` goes
   (`PartOf=`/`BindsTo=`). Every desktop has that target, and it is what ends an
-  installed applet at a DE-initiated logout.
+  installed applet at a DE-initiated logout. The applet is also the last X
+  client standing here, so it dies with the session's final sweep rather than
+  on an earlier request: in both measured logouts *no* `Stopping
+  luks-tray.service` job appears at all -- the SIGTERM arrives in the same
+  second `graphical-session.target` stops, from the teardown rather than from a
+  systemd stop job. That is precisely the case the guarantees below exist for:
+  the signal is answered in milliseconds, `RestartPreventExitStatus=` makes it
+  final, and the 3 s bound covers a sender that does not wait for an answer.
 - On a Qt built with X11 session management (XSMP) -- the distribution's Qt 6,
   whose xcb plugin links `SmcOpenConnection` -- the applet also registers with
   ksmserver when `SESSION_MANAGER` is set, is asked to quit *before* the session
@@ -374,13 +398,37 @@ What asks it to leave depends on the session and on the Qt underneath:
   session manager's conversation and simply waits for the stop, which the
   bounded timeout above then guarantees.
 
-Two readings that help with `~/.config/luks-tray/debug.log*` (its stamps are
+**What this cannot do is make the desktop ask earlier.** Measured on one KDE/X11
+logout: the desktop's shutdown service was called at `14:03:06`, Plasma's own
+targets stopped at `14:03:07`, and `graphical-session.target` -- the target this
+unit is bound to -- only stopped at `14:04:08`. The applet was gone in that same
+second, and the new session started at `14:04:12`. That minute belongs to the
+desktop's teardown, not to this applet: the running process holds no ICE socket
+at all (`ls -l /proc/<pid>/fd` shows only the X11 and D-Bus sockets, the lock
+file and the log), so ksmserver is not waiting for it, and a client that never
+joined the XSMP conversation cannot be asked to leave at the start of one. That
+is why the guarantee here is about the *end* of the applet, not the start of the
+logout.
+
+Readings that help with `~/.config/luks-tray/debug.log*` (its stamps are
 `MM-DD^HH:MM:SS`). A stopped line *without* `(signal N)` means the interpreter
 returned normally; a signal that ends it gets `(signal 15)` from
 `install_termination_log()`. And before calling a `SESSION_MANAGER` value stale,
 read the pid in its ICE path (`unix:path=/tmp/.ICE-unix/<pid>`): that pid
 belongs to the session manager, so check that process and its socket rather than
 the age of the string.
+
+The third reading settles "it keeps coming back". `Restart=on-failure` never
+restarts quietly: it logs `Scheduled restart job` and waits `RestartSec=5`, and
+it is suppressed for every status listed in `RestartPreventExitStatus=`. So a
+`Stopping`/`Stopped`/`Started` triple -- the stop finishing in milliseconds and
+the start following 2-40 ms later, with no `Scheduled restart job` anywhere --
+is a *start job submitted from outside*, i.e. a terminal running
+`systemctl --user stop` and `start` in a loop. `systemctl --user show
+luks-tray.service -p NRestarts -p Result` reads `NRestarts=0` and
+`Result=success` through a logout that behaves, and pwr-tray's log settles
+whether a logout was requested at all: its Log Off row records
+`qdbus6 org.kde.Shutdown /Shutdown org.kde.Shutdown.logout` with its own stamp.
 
 Do not add `UnsetEnvironment=SESSION_MANAGER` to these units. pwr-tray sets it
 deliberately: its Qt has no XSMP, and its Log Off row quits the applet as soon

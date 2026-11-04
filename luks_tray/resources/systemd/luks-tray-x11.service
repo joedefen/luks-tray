@@ -59,16 +59,23 @@ RestartSec=5
 # is marked failed (`systemctl --user status`) instead of spinning.  The four
 # signals are systemd's own "clean stop" set; they are listed explicitly so the
 # intent survives an edit to `Restart=`.
-RestartPreventExitStatus=3 15 SIGTERM SIGHUP SIGINT SIGPIPE
+# The last two are how a *dead session* ends this process, and leaving them out
+# was a bug: `SIGKILL` is what `SendSIGKILL=yes` falls back to when the timeout
+# below expires, and `SIGABRT` is what Qt raises when it finds the X11
+# connection already gone.  Either one would have been read as a crash, and the
+# applet restarted *while the session was still emptying* -- the same
+# black-screen loop `Restart=always` caused, one level down.
+RestartPreventExitStatus=3 15 SIGTERM SIGHUP SIGINT SIGPIPE SIGKILL SIGABRT
 # The stop itself is bounded.  systemd's default is 90s, and a logout cannot
 # finish until this process is gone: a wedged Qt event loop, an open modal
 # dialog, anything that keeps the interpreter from leaving would hold the
-# session open for a minute and a half.  3s is ample for a signal handler that
-# writes one log line, and `SendSIGKILL` makes the end unconditional.  This is
-# the backstop under every other mechanism: whatever asks the applet to leave
-# (systemd stopping graphical-session.target, `--svc-stop`, or a session
-# manager's save-and-quit request on a Qt that has XSMP), the process is gone
-# within 3s.
+# session open for a minute and a half.  The applet answers SIGTERM in
+# milliseconds -- `install_signal_wakeup()` in Main.py wakes the event loop so
+# the handler does not wait for the next 3s poll -- so 3s here is only the
+# backstop for a process that cannot answer at all.  This is the backstop under
+# every other mechanism: whatever asks the applet to leave (systemd stopping
+# graphical-session.target, `--svc-stop`, or a session manager's save-and-quit
+# request on a Qt that has XSMP), the process is gone within 3s.
 TimeoutStopSec=3
 SendSIGKILL=yes
 # Never add `UnsetEnvironment=SESSION_MANAGER` here.  pwr-tray does, because its
