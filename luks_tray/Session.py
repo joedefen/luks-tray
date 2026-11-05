@@ -3,14 +3,14 @@
 """ Which display server this login is really on, and the variables for it.
 
     `systemd --user` cannot hand a unit the session's display, so
-    [`service.render()`](luks_tray/service.py:277) copies `WAYLAND_DISPLAY` (or
-    `DISPLAY`) and the desktop name out of the installing shell and into the
-    unit file.  That copy is a *snapshot of one login*: log out of niri and into
-    Plasma on X11, and the unit still says `XDG_SESSION_TYPE=wayland`,
-    `WAYLAND_DISPLAY=wayland-1`.  A unit's own `Environment=` wins over what the
-    session exports, so Qt reads the snapshot and either dies ("could not
-    connect to display") or lands on a platform whose tray host is not there.
-    Until now the remedy was to remember `--svc-install` after every switch.
+    `service.render()` copies `WAYLAND_DISPLAY` (or `DISPLAY`) and the desktop
+    name out of the installing shell and into the unit file.  That copy is a
+    *snapshot of one login*: log out of a Wayland session and into one on X11,
+    and the unit still says `WAYLAND_DISPLAY=wayland-1`.  A unit's own
+    `Environment=` wins over what the session exports, so Qt reads the snapshot
+    and either dies ("could not connect to display") or lands on a platform
+    whose tray host is not there.  Until now the remedy was to remember
+    `--svc-install` after every switch.
 
     The machine knows the answer, so it is asked instead:
 
@@ -25,8 +25,20 @@
     `repair_environment()` applies that to `os.environ`, and `main()` calls it
     before `QApplication` exists, so one installed unit works in both sessions
     and switching needs no re-install.
+
+    Naming a listening X11 server is not the same as being allowed to talk to
+    it: an X11 login authenticates with a cookie, and the cookie file of an
+    sddm/gdm login lives at a path (`$XAUTHORITY`) that a unit only has when the
+    session imported it.  When it is missing, Qt's xcb plugin prints
+    "Authorization required, but no authorization protocol specified" and
+    "could not connect to display", and then *aborts* -- a core dump in
+    `coredumpctl`, and a SIGABRT that the unit reads as a crash.  So the module
+    also answers the question Qt is about to ask, by doing the same connection
+    setup the plugin does (`display_problem()`), and `main()` turns a refusal
+    into a log line and a retryable exit status instead.
 """
 import os
+import socket
 import stat
 import subprocess
 
@@ -40,6 +52,23 @@ SESSION_VARIABLES = ('XDG_SESSION_TYPE', 'WAYLAND_DISPLAY', 'DISPLAY')
 
 WAYLAND = 'wayland'
 X11 = 'x11'
+
+#: How long the start-up probe waits for an X server to answer its connection
+#: setup.  A server that cannot answer in two seconds cannot serve a tray
+#: either, and this runs on the way into `QApplication`.
+X11_PROBE_TIMEOUT = 2.0
+
+#: The auth protocol every local X11 login uses for its cookie.
+COOKIE_NAME = b'MIT-MAGIC-COOKIE-1'
+
+#: Xauthority's "any host" family: what `xauth add :0 ...` writes when it stores
+#: a cookie for the machine rather than for one hostname.
+FAMILY_WILD = 0xffff
+
+#: The three answers an X server can give to a connection setup request.
+SETUP_FAILED = 0        # the server refused the connection outright
+SETUP_SUCCESS = 1       # accepted; Qt's xcb plugin will be accepted as well
+SETUP_AUTHENTICATE = 2  # the cookie we sent was missing or wrong
 
 
 def _is_socket(path):
@@ -111,6 +140,21 @@ def _named_kind(env, wayland, display):
     if display:
         return X11
     return ''
+
+
+def display_server(env=None):
+    """ Return `'wayland'`, `'x11'`, or '' when no display server is listening.
+
+        Judged from the sockets, with `XDG_SESSION_TYPE` trusted only when both
+        are live -- which is what an Xwayland login looks like -- and `loginctl`
+        never asked, so this answers from an environment alone.  That is what
+        `service.render()` needs to decide which display variable a unit should
+        pin, and it is deliberately stricter than trusting the marker: a
+        snapshot naming a server that is not listening is a snapshot of a
+        session that has ended.
+    """
+    env = os.environ if env is None else env
+    return _named_kind(env, live_wayland(env), live_x11(env))
 
 
 def _loginctl(*args):
@@ -225,3 +269,175 @@ def repair_environment(env=None, query=None, note=None):
             env[name] = new
             changes.append((name, old, new))
     return changes
+
+
+def authority_file(env=None):
+    """ Return the Xauthority file Qt will read, or '' when none is named.
+
+        `$XAUTHORITY` first -- sddm, gdm and lightdm each write a per-session
+        file under `/tmp` or `/run/user` and export its path -- and then
+        `~/.Xauthority`, which is where `xauth` writes by default and what
+        libxcb falls back to when the variable is absent.
+    """
+    env = os.environ if env is None else env
+    named = (env.get('XAUTHORITY') or '').strip()
+    if named:
+        return named
+    home = (env.get('HOME') or '').strip()
+    return os.path.join(home, '.Xauthority') if home else ''
+
+
+def _field(blob, at):
+    """ Read one length-prefixed Xauthority field: `CARD16` length, then data.
+
+        There is no padding: the four-byte alignment people remember belongs to
+        the X11 *connection setup* on the wire, not to this file.  `xauth add :0
+        . <cookie>` writes `CARD16 family, CARD16 address_length, address,
+        CARD16 number_length, number, CARD16 name_length, name, CARD16
+        data_length, data` straight through.
+    """
+    if at + 2 > len(blob):
+        raise ValueError('truncated')
+    length = int.from_bytes(blob[at:at + 2], 'big')
+    start = at + 2
+    if start + length > len(blob):
+        raise ValueError('truncated')
+    return blob[start:start + length], start + length
+
+
+def _authority_records(blob):
+    """ Yield `(family, number, name, cookie)` from an Xauthority file's bytes.
+
+        The format is a flat sequence of records with no header and no count, so
+        the only way to read it is to walk it.  The address is skipped: it is
+        only meaningful for `FamilyLocal`, and a cookie stored for another
+        hostname simply fails at the server, which is the answer the probe
+        reports anyway.
+    """
+    at = 0
+    while at < len(blob):
+        if at + 2 > len(blob):
+            raise ValueError('truncated')
+        family = int.from_bytes(blob[at:at + 2], 'big')
+        at += 2
+        _address, at = _field(blob, at)
+        number, at = _field(blob, at)
+        name, at = _field(blob, at)
+        cookie, at = _field(blob, at)
+        yield family, number, name, cookie
+
+
+def authority_cookie(display, env=None):
+    """ Return `(cookie, known)` for `display`: the bytes to send, and whether
+        "there were none" is a fact rather than a guess.
+
+        The cookie libxcb would send is the one whose Xauthority record names
+        this display number, or an `FamilyWild` record, and whose name is
+        `MIT-MAGIC-COOKIE-1`.  `known` is False when the file could not be read
+        or parsed at all: then "no cookie found" says nothing about what Qt will
+        send, and the caller must not turn it into a refusal.
+    """
+    path = authority_file(env)
+    if not path:
+        return b'', True
+    try:
+        with open(path, 'rb') as handle:
+            blob = handle.read()
+    except FileNotFoundError:
+        return b'', True       # an empty file and no file are the same to libxcb
+    except OSError:
+        return b'', False
+    try:
+        records = list(_authority_records(blob))
+    except ValueError:
+        return b'', False
+    number = display.partition(':')[2].split('.')[0].encode()
+    for family, record_number, name, cookie in records:
+        if name != COOKIE_NAME:
+            continue
+        if family == FAMILY_WILD or record_number == number:
+            return cookie, True
+    return b'', True
+
+
+def x11_setup_status(socket_path, cookie=b''):
+    """ Return the answer an X server gives to a connection setup request.
+
+        This is the whole of what libxcb does before Qt declares the display
+        unusable: a 12-byte header carrying the protocol version and the
+        lengths of the auth name and data, then the two padded blobs.  The
+        reply's first byte is the status -- accepted, refused, or "authenticate
+        again with a cookie you do not have".
+    """
+    name = COOKIE_NAME
+    request = (b'l\x00' + (11).to_bytes(2, 'little') + (0).to_bytes(2, 'little')
+               + len(name).to_bytes(2, 'little')
+               + len(cookie).to_bytes(2, 'little') + b'\x00\x00'
+               + name + b'\x00' * (-len(name) % 4)
+               + cookie + b'\x00' * (-len(cookie) % 4))
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(X11_PROBE_TIMEOUT)
+        conn.connect(socket_path)
+        conn.sendall(request)
+        answer = b''
+        while len(answer) < 8:
+            chunk = conn.recv(64)
+            if not chunk:
+                break
+            answer += chunk
+    return answer[0] if answer else SETUP_FAILED
+
+
+def display_problem(env=None):
+    """ Return why Qt could not use this session's display, '' when it can.
+
+        Called by `main()` after `repair_environment()` and before
+        `QApplication` exists, because the alternative is Qt's own ending: a
+        fatal "no Qt platform plugin could be initialized", an `abort()` and a
+        core dump -- which is what an X11 login produces when the unit has no
+        `$XAUTHORITY` (a systemd user unit does not inherit the display *or* its
+        cookie, and only the session's own
+        `dbus-update-activation-environment` gives them to the manager).
+
+        Only positive evidence is reported: a server that cannot be reached,
+        refuses the connection, or asks for a cookie the readable authority file
+        does not contain.  Anything the probe cannot judge -- a Wayland session,
+        a TCP display, an authority file it failed to parse -- is left to Qt,
+        so a host that authenticates some other way is never refused a start.
+    """
+    env = os.environ if env is None else env
+    if (env.get('XDG_SESSION_TYPE') or '').strip().lower() != X11:
+        return ''
+    display = (env.get('DISPLAY') or '').strip()
+    path = x11_socket_path(display)
+    if not path:
+        return ''
+    cookie, known = authority_cookie(display, env)
+    try:
+        status = x11_setup_status(path, cookie)
+    except OSError as error:
+        # libxcb also tries the *abstract* socket for the same name (Linux
+        # publishes it there next to the file), so a path that cannot be opened
+        # is not a verdict on its own.
+        try:
+            status = x11_setup_status('\0' + path, cookie)
+        except OSError:
+            return (f'the X server named by DISPLAY={display} cannot be reached'
+                    f' ({error.strerror or error}): the session is not up yet,'
+                    f' or it has just ended')
+    if status == SETUP_SUCCESS:
+        return ''
+    if status == SETUP_AUTHENTICATE:
+        if not known:
+            return ''       # our reading of the authority file is in doubt
+        named = authority_file(env) or '(no authority file)'
+        return (f'the X server on {display} refused the connection: it wants an'
+                f' authority cookie and {named} holds none for that display.'
+                f' Qt reports this as "could not connect to display" and then'
+                f' aborts, so the applet leaves first. An X11 login keeps its'
+                f' cookie in $XAUTHORITY; a systemd --user unit only has that'
+                f' variable if the session exported the environment to the'
+                f' manager (dbus-update-activation-environment --systemd'
+                f' XAUTHORITY DISPLAY)')
+    return (f'the X server on {display} refused the connection (setup status'
+            f' {status})')

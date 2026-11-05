@@ -392,7 +392,7 @@ def install_termination_log(name, version, signals=(signal.SIGTERM, signal.SIGHU
         the most common way for a tray to go away left no trace at all. The
         handler restores the default disposition and re-raises, so the exit
         status the supervisor sees is exactly what it was before: death *by*
-        the signal, which the shipped units' `Restart=on-failure` and
+        the signal, which the shipped unit's `Restart=on-failure` and
         `RestartPreventExitStatus=` both read as "do not start me again".
     """
     def handler(signum, _frame):

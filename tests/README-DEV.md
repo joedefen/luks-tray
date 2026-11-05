@@ -39,18 +39,18 @@ appears.  Bumping a release means editing that one line, committing, and running
 ## 2. Set up a tree
 
 ```sh
-python3 -m venv lt-venv
-lt-venv/bin/python -m pip install -e '.[dev]'
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
 ```
 
 The `dev` extra is exactly what the gate needs — `pytest`, `pytest-cov`, `ruff`,
 `build`, `twine>=7`, `packaging>=26` — on top of the runtime dependencies.  `-e`
-also installs the console script, so `lt-venv/bin/luks-tray` works from the tree.
+also installs the console script, so `.venv/bin/luks-tray` works from the tree.
 
 To run the tray from the source tree without installing anything at all:
 
 ```sh
-./runner                     # or: lt-venv/bin/python runner
+./runner                     # or: .venv/bin/python runner
 ```
 
 Name the interpreter explicitly if the shebang picks a `python3` that has no
@@ -70,9 +70,9 @@ that is the `apt-get` line the CI jobs install.
 nothing else counts as "green":
 
 ```sh
-lt-venv/bin/python -m ruff check .
-lt-venv/bin/python -m compileall -q luks_tray conftest.py tests
-lt-venv/bin/python -m pytest -q --cov=luks_tray --cov-report=term-missing
+.venv/bin/python -m ruff check .
+.venv/bin/python -m compileall -q luks_tray conftest.py tests
+.venv/bin/python -m pytest -q --cov=luks_tray --cov-report=term-missing
 ```
 
 * `ruff check .` takes **no flags** in the gate.  The rule selection is pinned in
@@ -118,7 +118,7 @@ from that table, so a developer and CI cannot enforce different floors.
 | [`test_tray_watch.py`](test_tray_watch.py) | Tray (re-)registration: `tray_watcher_present()` answers True/False/None instead of blocking, `TrayWatch` re-registers the item when the StatusNotifierWatcher appears or restarts, and the item is re-created (not duplicated) against a fake bus. |
 | [`test_lock_watch.py`](test_lock_watch.py) | The session events that lock the history, against a fake bus: `Lock`, `LockedHint` true, `Active` false and `PrepareForSleep(true)` each call the one callback, the harmless half of each pair does not, another interface's properties are ignored, one published event is enough to be worth watching, and a session with no logind — or no QtDBus — gets no watch instead of a start-up failure. |
 | [`test_single_instance.py`](test_single_instance.py) | The single-instance lock, `--replace` as the only takeover path (and only for a verified pid), `main()` exiting 3 without signalling, and `restart_self()` releasing (and, on a failed spawn, retaking) the lock. |
-| [`test_service.py`](test_service.py) | The `systemd --user` unit: the two shipped templates (launcher path, pinned session type, `RestartPreventExitStatus=` naming every final status — including the SIGKILL that `SendSIGKILL=yes` uses and the SIGABRT Qt raises when the display connection is already gone — a bounded `TimeoutStopSec=` with `SendSIGKILL=yes`, no `UnsetEnvironment=SESSION_MANAGER`, no `StandardOutput=`), `render()` appending only the variables the installing shell exported, and every `--svc-*` verb as a `Step` list -- install is the only verb that writes, `start`/`restart` refuse a unit that runs another executable, `stop`/`uninstall` keep working on a broken install, and `status` returns 0/1/2. |
+| [`test_service.py`](test_service.py) | The `systemd --user` unit: the one shipped template (launcher path, no pinned display server or session type, `RestartPreventExitStatus=` naming every final status — including the SIGKILL that `SendSIGKILL=yes` uses and the SIGABRT Qt raises when the display connection is already gone — a bounded `TimeoutStopSec=` with `SendSIGKILL=yes`, no `UnsetEnvironment=SESSION_MANAGER`, no `StandardOutput=`), `display_keys()` choosing the display variable from the socket that is listening, `render()` appending only the variables the installing shell exported, and every `--svc-*` verb as a `Step` list -- install is the only verb that writes, `start`/`restart` refuse a unit that runs another executable, `stop`/`uninstall` keep working on a broken install, and `status` returns 0/1/2.  The unit itself carries almost no prose; why each directive is there is §13. |
 | [`test_service_restart.py`](test_service_restart.py) | The supervisor-aware paths: `restart_self()` asks systemd (`systemctl --user --no-block restart`, run synchronously so the job is queued before the applet exits) instead of spawning a child the cgroup teardown would kill, stays up when the request cannot be made, and `--replace` refuses to signal a holder that a unit supervises.  Also `Utils.in_systemd_service()` and `spawn_detached()` (viewers only -- a detached control request is what made the menu row behave like Quit). |
 | [`test_metadata.py`](test_metadata.py) | One version location, one console script, and a `--version` that agrees with both. |
 | [`test_repo_hygiene.py`](test_repo_hygiene.py) | Repository invariants the gate relies on: the sdist manifest, the inspector, the workflow's gates matrix, `QT_QPA_PLATFORM`, branch triggers, `permissions`, and that CI holds no credential and cannot publish. |
@@ -148,12 +148,12 @@ distribution looks like.
 ## 5. The release gate
 
 ```sh
-lt-venv/bin/python ./bless
+.venv/bin/python ./bless
 ```
 
 [`bless`](../bless) is the only path to an upload.  It takes **no argument and no
 flag** — any stage you could name on the command line is a stage you could skip.
-Use the `lt-venv` interpreter: the gates run `sys.executable`, and the system
+Use the `.venv` interpreter: the gates run `sys.executable`, and the system
 `python3` has no PyQt6 for the tests to import.
 
 The stages run in this order, and each one refuses rather than warns:
@@ -304,7 +304,7 @@ withdrawn, and a second attempt would only trip the duplicate check.
    commit it.
 3. Push, so `origin/dev` and `origin/main` both exist and neither push is a
    fast-forward violation — the branch plan refuses otherwise.
-4. `lt-venv/bin/python ./bless` and read the checklist it prints.
+4. `.venv/bin/python ./bless` and read the checklist it prints.
 5. Answer `test` first if this is a new machine or a new token; install the
    rehearsal build (§8) if the change is worth trying.
 6. Answer `publish`, then confirm the index wait completes.
@@ -478,7 +478,7 @@ No signature and no UUID, which is why the identity falls back to the 64-byte
 salt in [`ContainerType.py`](../luks_tray/ContainerType.py):
 
 ```sh
-lt-venv/bin/python -c "from luks_tray.LuksOps import get_container_identity as g; print(g('$HOME/.Vaults/test-only-tcrypt.img'))"
+.venv/bin/python -c "from luks_tray.LuksOps import get_container_identity as g; print(g('$HOME/.Vaults/test-only-tcrypt.img'))"
 # salt-17a9cbd25b840999bf5859ce99b47880
 ```
 
@@ -567,7 +567,150 @@ assumes about a tree, is §5 above.
 
 ---
 
-## 13. Removed documents
+## 13. Running as a systemd Service Notes
+
+The shipped unit — [`luks-tray.service`](../luks_tray/resources/systemd/luks-tray.service) —
+carries only the comments a systemd-aware end user needs, at most two lines per
+directive and nothing about the applet's internals.  The reasoning that decided
+each directive lives here instead, because a unit file is read by people who
+want to adjust it, not by people debugging a logout.  What a *user* needs is in
+[`README.md`](../README.md) → "Starting at Login" and "Logging out"; this
+section is the Why behind the file and the traps for a future edit.
+
+### One file, and it names no display server
+
+The applet runs in any desktop or window manager, on Wayland or X11, and the
+unit is the same file in all of them.  Nothing in it names a compositor, a
+desktop environment or a display server: there is no `XDG_SESSION_TYPE=` and no
+`ConditionEnvironment=`, and [`test_service.py`](test_service.py) fails if one
+is added back.
+
+`XDG_SESSION_TYPE` is a freedesktop variable with exactly two values — `x11`
+and `wayland` — that every session sets: niri, sway, Hyprland, KDE and GNOME
+all export `wayland`; i3, XFCE and Openbox all export `x11`.  It names the
+*display server*, and it was pinned in the file while the package shipped two
+templates for it.  That pair is gone: one template plus
+[`Session.display_server()`](../luks_tray/Session.py) covers both sessions, and
+a value pinned at install time was only ever a snapshot of the login that ran
+`--svc-install`.
+
+The alternative that was measured and rejected is one unit per session guarded
+with `ConditionEnvironment=XDG_SESSION_TYPE=...`.  It does work — systemd
+evaluates the condition against the *user manager's* environment, not the unit's
+own `Environment=` — but it buys nothing: the guard is only as good as the
+manager's environment having been imported, and each unit would still carry a
+display snapshot.
+
+What *is* compositor-specific lives in the lines `--svc-install` appends below
+`ExecStart=`, for example `Environment=XDG_CURRENT_DESKTOP=niri` — a snapshot of
+the shell that ran the installer.  Only [`Compositor.detect()`](../luks_tray/Compositor.py)
+reads it, to print `--show-window-rules` and to label the log; no behaviour of
+the unit depends on it, so a unit carried to another desktop is not wrong, just
+less informative.
+
+### `--svc-install` renders, it does not template
+
+A user unit cannot inherit the display from the compositor, so
+[`service.render()`](../luks_tray/service.py) appends, *after* `ExecStart=`, the
+variables the installing shell exported: the display variable the live server
+uses, plus `XDG_CURRENT_DESKTOP` and `DESKTOP_SESSION`.  `after ExecStart=` is
+safe because systemd collects every `Environment=` line and the last assignment
+to a name wins.
+
+Which display variable that is comes from `display_keys()`, which asks
+`Session.display_server()` — the sockets, not the marker — so:
+
+* a Wayland login pins `WAYLAND_DISPLAY` and never `DISPLAY`, although XWayland
+  leaves `DISPLAY` set in that session; an X11 login pins `DISPLAY` and never a
+  stale `WAYLAND_DISPLAY`;
+* with both sockets live, the marker decides which is the session, and with no
+  marker at all Wayland wins — the same order `Session._named_kind()` applies at
+  startup, so install time and every later start agree;
+* an empty or missing variable is skipped, and nothing listening (a bare `ssh`
+  login) pins no display at all.  The unit still starts: the applet asks
+  `loginctl` and reads the socket itself.
+
+The appended values are a snapshot of one login.  That is why the applet
+re-derives `XDG_SESSION_TYPE`, `WAYLAND_DISPLAY` and `DISPLAY` from the socket
+that is actually listening before Qt starts ([`Session.py`](../luks_tray/Session.py)):
+switching display servers needs no re-install, and a stale line here is
+corrected rather than obeyed.
+
+### `Environment=PATH=` must keep sbin
+
+`cryptsetup`, `losetup`, `mkfs.ext4` and `blkid` live in `/usr/sbin` on a
+non-usrmerged or Debian-style host, and `check_dependencies()` finds them with
+`shutil.which()`.  A unit that pinned `PATH` without the sbin directories made
+the applet exit at startup with "missing system commands" while the same shell
+found every one of them.  `test_the_shipped_unit_keeps_the_sbin_directories_on_path`
+holds the three directories in place.
+
+### `Restart=on-failure`, never `always`
+
+A logout does not stop this unit with a clean exit: the session ends, and
+everything in it ends with a signal.  `Restart=always` answered that signal by
+starting the applet again five seconds later, while the session was still
+waiting for its processes to disappear — so it never emptied, the display
+manager never got the VT, and the logout stopped on a black screen.
+`on-failure` still recovers from a crash, and lets a stop signal be final,
+which is also what makes `--svc-stop` stay stopped.
+
+### `RestartPreventExitStatus=` is a list of decisions
+
+| Value | Why it is final | Why it is *not* in the list |
+| --- | --- | --- |
+| `3` | another instance holds the single-instance lock | retrying fails identically |
+| `15` | unhandled exception in [`Main.py`](../luks_tray/Main.py) | retrying fails identically |
+| `1` | Xlib's own status for "the X server is gone" | see below |
+| `4` | — | `Session.display_problem()` found no usable display *yet*: a login race, and a retry is exactly right |
+| `SIGTERM` `SIGHUP` `SIGINT` `SIGPIPE` | systemd's clean-stop set, restated so the intent survives an edit to `Restart=` | — |
+| `SIGKILL` `SIGABRT` | how a *dead session* ends this process | — |
+
+`1` is the one that took a measurement to find.  When the session's final
+sweep takes the X server first, Xlib ends the process with `XIO: fatal IO error
+0 (Success) on X server ":0"` and exit status 1 — no signal, so a signal-only
+list never saw it.  Five seconds later the unit started again, into the *next*
+login, where the only cookie this process had was the previous session's: Qt
+answered `could not connect to display :0`, aborted, and dumped core.  That is
+the whole of "a login core-dumps the tray although `--svc-start` works" — by
+hand the user manager's environment is already complete.
+
+`SIGKILL` is what `SendSIGKILL=yes` falls back to when `TimeoutStopSec`
+expires, and `SIGABRT` is what Qt raises when it finds the connection already
+gone.  Either one left out is read as a crash, and the applet restarts *while
+the session is still emptying* — the black screen above, one level down.
+
+### `TimeoutStopSec=3` is the backstop under everything else
+
+systemd's default is 90 s, and a logout cannot finish until this process is
+gone: a wedged Qt event loop or an open modal dialog would hold the session
+open that long.  The applet answers SIGTERM in milliseconds —
+`install_signal_wakeup()` puts a `QSocketNotifier` on the pipe behind
+`signal.set_wakeup_fd()`, so the handler does not wait for the next 3 s poll —
+which makes 3 s a backstop for a process that cannot answer at all, not a
+budget the normal path spends.
+
+### Never add `UnsetEnvironment=SESSION_MANAGER`
+
+On a distribution Qt (whose xcb plugin links `SmcOpenConnection`),
+`SESSION_MANAGER` is the only way ksmserver can ask the applet to leave
+*before* the session's stop reaches it; the applet has no logoff action of its
+own, so it relies on that request rather than racing it.  On a PyQt6-wheel Qt
+the variable is inert either way (that Qt opens no ICE connection), which is
+why it cannot be the guarantee — `TimeoutStopSec=` is.
+[`test_service.py`](test_service.py) refuses the directive, scanning
+directives only so the reasoning above can still name it.
+
+### No `StandardOutput=`
+
+`prt()` points itself at `~/.config/luks-tray/debug.log`; a
+`StandardOutput=` line gives systemd a destination it refuses to create and the
+unit dies with `EXIT_STDOUT` (status 209).  `test_no_shipped_unit_redirects_stdout`
+refuses the directive.
+
+---
+
+## 14. Removed documents
 
 `tests/AUDIT.md` was the audit of v2.0.5 that produced the v3.0.0 remediation.
 It was removed once every item had been either fixed or carried over to the

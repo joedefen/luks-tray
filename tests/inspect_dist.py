@@ -32,7 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # What the wheel must contain besides metadata: the tray icons `LuksTray`
-# loads through importlib.resources at run time, and the `systemd --user` units
+# loads through importlib.resources at run time, and the `systemd --user` unit
 # `--svc-install` copies.  A wheel without them installs and then fails on the
 # first refresh -- or on `luks-tray --svc-install` -- which the metadata alone
 # would not reveal.
@@ -42,8 +42,7 @@ REQUIRED_RESOURCES = (
     'luks_tray/resources/orange-shield-v04.svg',
     'luks_tray/resources/white-shield-v04.svg',
     'luks_tray/resources/yellow-shield-v04.svg',
-    'luks_tray/resources/systemd/luks-tray-wayland.service',
-    'luks_tray/resources/systemd/luks-tray-x11.service',
+    'luks_tray/resources/systemd/luks-tray.service',
 )
 
 # The files an sdist must carry for a downstream packager to run this project's

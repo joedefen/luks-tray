@@ -6,13 +6,23 @@ snapshot is what Qt reads -- in whichever session the unit is started next.
 These tests pin down the two properties that make a switch harmless: a snapshot
 of an *ended* session is replaced, and an environment that already names a
 listening server is left exactly as it is.
+
+The second half covers `display_problem()`, the probe `main()` runs before
+`QApplication` exists: a display that answers "authenticate" is the case that
+used to end in Qt's `abort()` and a core dump, so it is worth pinning down which
+answers count as a refusal and which are left to Qt.
 """
 import os
 import socket
+import threading
 
 import pytest
 
 from luks_tray import Session
+
+#: One MIT-MAGIC-COOKIE-1 payload, as an Xauthority record carries it.
+COOKIE = bytes.fromhex('9d200ef0aa1d70dc0d4effc19dd122d6')
+MIT_MAGIC_COOKIE = b'MIT-MAGIC-COOKIE-1'
 
 
 @pytest.fixture
@@ -38,6 +48,74 @@ def listen(path):
     server.bind(str(path))
     server.close()
     return path
+
+
+def authority_record(path, cookie, number=b'0', family=0xffff, address=b'',
+                     name=MIT_MAGIC_COOKIE):
+    """Write one Xauthority record, in the format `xauth add` writes.
+
+        `xauth add :0 . <cookie>` stores `CARD16 family` and then four
+        length-prefixed fields -- address, number, name, cookie -- with no
+        padding (the four-byte alignment belongs to the wire protocol, not to
+        this file).  `family=0xffff` is the `#ffff##:0` record `xauth` writes
+        for "any host".
+    """
+    def field(value):
+        return len(value).to_bytes(2, 'big') + value
+    path.write_bytes(family.to_bytes(2, 'big') + field(address) + field(number)
+                     + field(name) + field(cookie))
+    return path
+
+
+def read_setup(conn):
+    """Read one X11 connection setup request: `(auth name, auth data)`."""
+    head = b''
+    while len(head) < 12:
+        chunk = conn.recv(64)
+        if not chunk:
+            return b'', b''
+        head += chunk
+    name_length = int.from_bytes(head[6:8], 'little')
+    data_length = int.from_bytes(head[8:10], 'little')
+    body = head[12:]
+    at = -name_length % 4 + name_length
+    while len(body) < at + -data_length % 4 + data_length:
+        chunk = conn.recv(64)
+        if not chunk:
+            break
+        body += chunk
+    return body[:name_length], body[at:at + data_length]
+
+
+class FakeXServer:
+    """A unix socket that answers one connection setup with `status`.
+
+        The probe is only useful if it sends what libxcb sends, so the fake
+        server reads the request properly instead of assuming a shape: `auth`
+        is the `(name, data)` pair the applet offered.
+    """
+
+    def __init__(self, path, status):
+        self.status = status
+        self.auth = None
+        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.socket.bind(str(path))
+        self.socket.listen(1)
+        self.thread = threading.Thread(target=self._answer, daemon=True)
+        self.thread.start()
+
+    def _answer(self):
+        with self.socket:
+            conn, _address = self.socket.accept()
+            with conn:
+                self.auth = read_setup(conn)
+                conn.sendall(bytes([self.status]) + b'\x00' * 7)
+
+    def done(self):
+        """Wait for the answer to be sent and return self, for the assertions."""
+        self.thread.join(5)
+        assert not self.thread.is_alive(), 'the probe never connected'
+        return self
 
 
 def env_for(runtime, **values):
@@ -73,6 +151,35 @@ def test_x11_socket_path_refuses_a_display_it_cannot_check(x11_dir):
     assert Session.x11_socket_path('host:0') == ''
     assert Session.x11_socket_path('') == ''
     assert Session.x11_socket_path('nonsense') == ''
+
+
+# --- which display server is live ------------------------------------------
+
+
+def test_display_server_names_the_live_compositor(runtime, x11_dir):
+    listen(runtime / 'wayland-1')
+    assert Session.display_server(env_for(runtime, WAYLAND_DISPLAY='wayland-1',
+                                          XDG_SESSION_TYPE='wayland')) == 'wayland'
+
+
+def test_display_server_names_the_live_x_server(runtime, x11_dir):
+    listen(x11_dir / 'X0')
+    assert Session.display_server(env_for(runtime, DISPLAY=':0')) == 'x11'
+
+
+def test_display_server_answers_nothing_when_nothing_listens(runtime, x11_dir):
+    # A unit rendered over ssh gets '' and pins no display at all; the applet
+    # asks the machine at startup instead.  The marker alone is not enough.
+    assert Session.display_server(env_for(runtime, XDG_SESSION_TYPE='wayland',
+                                          WAYLAND_DISPLAY='wayland-1')) == ''
+
+
+def test_display_server_uses_the_marker_only_when_both_are_live(runtime, x11_dir):
+    listen(runtime / 'wayland-1')
+    listen(x11_dir / 'X1')
+    both = env_for(runtime, WAYLAND_DISPLAY='wayland-1', DISPLAY=':1')
+    assert Session.display_server(both) == 'wayland'
+    assert Session.display_server({**both, 'XDG_SESSION_TYPE': 'x11'}) == 'x11'
 
 
 # --- an environment that is already right ----------------------------------
@@ -192,3 +299,104 @@ def test_a_repair_reports_the_value_it_replaced(runtime, x11_dir):
     environment = env_for(runtime, XDG_SESSION_TYPE='wayland', DISPLAY=':0')
     changes = Session.repair_environment(env=environment, query=loginctl_unused)
     assert changes == [('XDG_SESSION_TYPE', 'wayland', 'x11')]
+
+
+# --- the start-up probe: may Qt actually use this display? ------------------
+
+
+def x11_env(**values):
+    """The environment of a unit that landed in an X11 session."""
+    environment = {'XDG_SESSION_TYPE': 'x11', 'DISPLAY': ':0'}
+    environment.update(values)
+    return environment
+
+
+def test_the_authority_file_is_xauthority_first_then_the_home_default(tmp_path):
+    assert Session.authority_file({'XAUTHORITY': '/run/user/1000/xauth'}) == (
+        '/run/user/1000/xauth')
+    assert Session.authority_file({'HOME': str(tmp_path)}) == str(
+        tmp_path / '.Xauthority')
+    assert Session.authority_file({}) == ''
+
+
+def test_the_cookie_of_the_display_is_what_the_probe_offers(x11_dir, tmp_path):
+    # The one thing that must match libxcb: the record for this display number,
+    # sent as MIT-MAGIC-COOKIE-1, or the server answers "authenticate" and Qt
+    # calls it "could not connect to display".
+    file = authority_record(tmp_path / 'auth', COOKIE)
+    server = FakeXServer(x11_dir / 'X0', Session.SETUP_SUCCESS)
+    assert Session.display_problem(x11_env(XAUTHORITY=str(file))) == ''
+    assert server.done().auth == (MIT_MAGIC_COOKIE, COOKIE)
+
+
+def test_a_wild_family_record_matches_any_display(x11_dir, tmp_path):
+    # `#ffff##:0` is the record `xauth` writes for "any host"; its number is
+    # ignored by libxcb, so the probe must ignore it as well.
+    file = authority_record(tmp_path / 'auth', COOKIE, number=b'7',
+                            family=Session.FAMILY_WILD)
+    server = FakeXServer(x11_dir / 'X0', Session.SETUP_SUCCESS)
+    assert Session.display_problem(x11_env(XAUTHORITY=str(file))) == ''
+    assert server.done().auth == (MIT_MAGIC_COOKIE, COOKIE)
+
+
+def test_a_cookie_for_another_display_is_not_offered(x11_dir, tmp_path):
+    file = authority_record(tmp_path / 'auth', COOKIE, number=b'1',
+                            family=0x0100, address=b'ofc')
+    server = FakeXServer(x11_dir / 'X0', Session.SETUP_AUTHENTICATE)
+    problem = Session.display_problem(x11_env(XAUTHORITY=str(file)))
+    assert server.done().auth == (MIT_MAGIC_COOKIE, b'')
+    assert 'XAUTHORITY' in problem
+
+
+def test_a_refusal_with_no_cookie_is_reported_as_the_reason(x11_dir, tmp_path):
+    # The measured login: no `$XAUTHORITY` in the unit's environment, an empty
+    # `~/.Xauthority`, and a server that wants a cookie.  Qt aborted here.
+    server = FakeXServer(x11_dir / 'X0', Session.SETUP_AUTHENTICATE)
+    problem = Session.display_problem(
+        x11_env(HOME=str(tmp_path), XAUTHORITY=str(tmp_path / 'none')))
+    assert server.done().auth == (MIT_MAGIC_COOKIE, b'')
+    assert 'could not connect to display' in problem
+    assert str(tmp_path / 'none') in problem
+
+
+def test_a_refused_connection_is_reported(x11_dir):
+    server = FakeXServer(x11_dir / 'X0', Session.SETUP_FAILED)
+    problem = Session.display_problem(x11_env())
+    server.done()
+    assert 'refused the connection' in problem
+
+
+def test_a_socket_that_is_not_there_is_reported(x11_dir):
+    # No server at all: Qt would abort the same way, and this is the login race
+    # the unit's `Restart=on-failure` is expected to retry.
+    problem = Session.display_problem(x11_env())
+    assert 'cannot be reached' in problem
+
+
+def test_a_stale_socket_from_an_ended_session_is_reported(x11_dir):
+    listen(x11_dir / 'X0')      # the file is there, nothing accepts on it
+    assert 'cannot be reached' in Session.display_problem(x11_env())
+
+
+def test_an_authority_file_it_cannot_parse_is_not_a_verdict(x11_dir, tmp_path):
+    # A file this module failed to read says nothing about what Qt will send,
+    # so the probe must not refuse a start on the strength of it.
+    broken = tmp_path / 'auth'
+    broken.write_bytes(b'\x01\x00\x00')
+    server = FakeXServer(x11_dir / 'X0', Session.SETUP_AUTHENTICATE)
+    assert Session.display_problem(x11_env(XAUTHORITY=str(broken))) == ''
+    server.done()
+
+
+def test_a_wayland_session_is_never_probed(runtime, x11_dir):
+    # Nothing authenticates over a compositor socket, and DISPLAY may still name
+    # the Xwayland Qt is not using.
+    listen(x11_dir / 'X0')
+    assert Session.display_problem({'XDG_SESSION_TYPE': 'wayland',
+                                    'DISPLAY': ':0'}) == ''
+
+
+def test_a_tcp_display_is_left_to_qt(x11_dir):
+    # `host:0` has no socket here; refusing it would be a guess.
+    assert Session.display_problem({'XDG_SESSION_TYPE': 'x11',
+                                    'DISPLAY': 'host:0'}) == ''

@@ -1,4 +1,4 @@
-"""`service`: the shipped units, the renderer, and the `--svc-*` verbs.
+"""`service`: the shipped unit, the renderer, and the `--svc-*` verbs.
 
 The plan/execute split is what makes these tests possible without a systemd
 session: every verb is asserted on the *steps* it builds, with the subprocess
@@ -6,11 +6,12 @@ call injected, and only `execute()` and the two end-to-end `dispatch()` cases
 ever touch a file.
 """
 import os
+import socket
 from pathlib import Path
 
 import pytest
 
-from luks_tray import service
+from luks_tray import Session, service
 
 UNIT_TEXT = (
     '[Unit]\n'
@@ -25,12 +26,43 @@ UNIT_TEXT = (
 )
 
 
+def listen(path):
+    """Create a unix socket at `path`: what a listening server leaves behind."""
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(path))
+    server.close()
+    return path
+
+
+def directives(text):
+    """The lines systemd reads: everything that is not a comment."""
+    return [line for line in text.splitlines() if not line.startswith('#')]
+
+
+def shipped():
+    """The shipped unit, as it is packaged."""
+    return service.read_unit(service.template())
+
+
 @pytest.fixture
-def env(isolated_home):
+def x11_dir(isolated_home, monkeypatch):
+    """A private `/tmp/.X11-unix`, so this machine's X server cannot answer."""
+    path = isolated_home / 'X11-unix'
+    path.mkdir()
+    monkeypatch.setattr(Session, 'X11_SOCKET_DIR', str(path))
+    return path
+
+
+@pytest.fixture
+def env(isolated_home, x11_dir):
     """A Wayland session's environment, pointing at the test's private home."""
+    runtime = isolated_home / 'run'
+    runtime.mkdir()
+    listen(runtime / 'wayland-1')
     return {
         'HOME': str(isolated_home),
         'XDG_CONFIG_HOME': str(isolated_home / '.config'),
+        'XDG_RUNTIME_DIR': str(runtime),
         'XDG_SESSION_TYPE': 'wayland',
         'WAYLAND_DISPLAY': 'wayland-1',
         'XDG_CURRENT_DESKTOP': 'niri',
@@ -87,33 +119,31 @@ def install_unit(env, text, name=None):
     return path
 
 
-# -- the shipped units -----------------------------------------------------
+# -- the shipped unit ------------------------------------------------------
 
-def test_both_sessions_ship_a_unit():
-    assert sorted(service.templates()) == ['wayland', 'x11']
-
-
-@pytest.mark.parametrize('session', ['wayland', 'x11'])
-def test_each_shipped_unit_runs_the_launcher(session, env):
-    text = service.read_unit(service.template_for(session))
-    assert service.installed_executable(text, env) == str(service.launcher_path(env))
+def test_exactly_one_unit_ships():
+    assert [path.name for path in service.SOURCE_DIR.glob('*.service')] == [
+        service.UNIT_NAME]
 
 
-@pytest.mark.parametrize('session', ['wayland', 'x11'])
-def test_each_shipped_unit_pins_its_session_type(session):
-    text = service.read_unit(service.template_for(session))
-    assert f'Environment=XDG_SESSION_TYPE={session}' in text
+def test_the_shipped_unit_runs_the_launcher(env):
+    assert service.installed_executable(shipped(), env) == str(service.launcher_path(env))
 
 
-@pytest.mark.parametrize('session', ['wayland', 'x11'])
-def test_each_shipped_unit_keeps_the_sbin_directories_on_path(session):
+def test_the_shipped_unit_does_not_pin_a_display_server():
+    # One unit serves both kinds of session.  A pinned XDG_SESSION_TYPE would be
+    # a snapshot of the login that installed it, and would have to be one of two
+    # templates; the applet finds the live server itself instead.
+    assert not any('XDG_SESSION_TYPE' in line for line in directives(shipped()))
+
+
+def test_the_shipped_unit_keeps_the_sbin_directories_on_path():
     # `cryptsetup`, `losetup`, `mkfs.ext4` and `blkid` live in /usr/sbin on a
     # Debian-style or non-usrmerged host, and check_dependencies() looks them
     # up with `shutil.which()`.  A unit that pinned PATH without sbin made the
     # applet exit at startup with "missing system commands" while the same
     # shell found every one of them.
-    text = service.read_unit(service.template_for(session))
-    path_line = next(line for line in text.splitlines()
+    path_line = next(line for line in shipped().splitlines()
                      if line.startswith('Environment=PATH='))
     directories = path_line.split('=', 1)[1].split(':')
     assert '/usr/local/sbin' in directories
@@ -121,26 +151,37 @@ def test_each_shipped_unit_keeps_the_sbin_directories_on_path(session):
     assert '/sbin' in directories
 
 
-@pytest.mark.parametrize('session', ['wayland', 'x11'])
-def test_each_shipped_unit_stops_restarting_on_a_lock_or_a_crash(session):
-    text = service.read_unit(service.template_for(session))
+def test_the_shipped_unit_stops_restarting_on_a_lock_or_a_crash():
     # 3 is another instance holding the lock, 15 is luks-tray's own
     # "unhandled exception" exit; retrying either just fails the same way.
-    assert 'RestartPreventExitStatus=3 15' in text
+    assert 'RestartPreventExitStatus=1 3 15' in shipped()
 
 
-@pytest.mark.parametrize('session', ['wayland', 'x11'])
-def test_each_shipped_unit_stays_down_when_a_logout_stops_it(session):
+def test_a_dead_display_is_final_but_an_absent_one_is_retried():
+    # Xlib exits 1 when the display connection goes away ("XIO: fatal IO error
+    # 0 (Success) on X server \":0\""), which is what a logout looks like from
+    # inside the applet: a clean exit, not a signal.  Read as a crash it put the
+    # unit back five seconds later, into the *next* login, where the only cookie
+    # it had was the previous session's -- Qt aborted on "could not connect to
+    # display :0" and dumped core, once per login.  Status 4 (no display the
+    # applet could use *yet*, see Session.display_problem) is the opposite case:
+    # a login race that a retry is exactly right for.
+    prevent = next(line for line in shipped().splitlines()
+                   if line.startswith('RestartPreventExitStatus='))
+    statuses = prevent.split('=', 1)[1].split()
+    assert '1' in statuses
+    assert '4' not in statuses
+
+
+def test_the_shipped_unit_stays_down_when_a_logout_stops_it():
     # `Restart=always` treated the SIGTERM that ends a logout as a crash and put
     # the applet back into a session that was waiting for its processes to exit,
     # so the logout never reached the display manager (black screen).  A stop
     # signal must therefore be final, while a crash must still be recovered.
-    text = service.read_unit(service.template_for(session))
-    directives = [line for line in text.splitlines() if not line.startswith('#')]
-    assert 'Restart=on-failure' in directives
-    # The comment above the directive names it; the directive itself must be gone.
-    assert 'Restart=always' not in directives
-    prevent = next(line for line in directives
+    lines = directives(shipped())
+    assert 'Restart=on-failure' in lines
+    assert 'Restart=always' not in lines
+    prevent = next(line for line in lines
                    if line.startswith('RestartPreventExitStatus='))
     assert 'SIGTERM' in prevent
     # The two ways a *dead session* ends this process have to be final as well.
@@ -152,75 +193,83 @@ def test_each_shipped_unit_stays_down_when_a_logout_stops_it(session):
     assert 'SIGABRT' in prevent
 
 
-@pytest.mark.parametrize('session', ['wayland', 'x11'])
-def test_no_shipped_unit_unsets_the_session_manager(session):
-    # pwr-tray sets UnsetEnvironment=SESSION_MANAGER deliberately: its Qt has no
-    # X11 session management, and it leaves of its own accord because its Log Off
-    # row quits once the desktop accepts the command.  luks-tray has no logoff
-    # action, so on a distro Qt (which does link SmcOpenConnection) this variable
-    # is the only way ksmserver can ask the applet to leave early; on a wheel Qt
-    # it is inert either way, which is why the unit's bounded stop is the real
-    # guarantee.  The directive is *named* in a comment above [Install], hence
-    # `directives`.
-    text = service.read_unit(service.template_for(session))
-    directives = [line for line in text.splitlines() if not line.startswith('#')]
+def test_the_shipped_unit_unsets_no_session_manager():
+    # On a distro Qt (which does link SmcOpenConnection) this variable is the only
+    # way ksmserver can ask the applet to leave early; on a wheel Qt it is inert
+    # either way, which is why the unit's bounded stop is the real guarantee.  The
+    # unit carries almost no prose, so this scans directives: a file that does not
+    # mention the name at all is what is being asserted.  Rationale:
+    # tests/README-DEV.md, "Running as a systemd Service Notes".
     assert not any('UnsetEnvironment=SESSION_MANAGER' in line
-                   for line in directives)
+                   for line in directives(shipped()))
 
 
-@pytest.mark.parametrize('session', ['wayland', 'x11'])
-def test_each_shipped_unit_bounds_how_long_a_stop_may_take(session):
+def test_the_shipped_unit_bounds_how_long_a_stop_may_take():
     # systemd's default is 90s, and a logout cannot finish until this process is
     # gone: a wedged Qt event loop or an open modal dialog would hold the session
     # open that long.  A short TimeoutStopSec plus SendSIGKILL is the backstop
     # under every other mechanism -- whatever asks the applet to leave, it is
     # gone within seconds.
-    text = service.read_unit(service.template_for(session))
-    directives = [line for line in text.splitlines() if not line.startswith('#')]
-    timeout = next(line for line in directives
-                   if line.startswith('TimeoutStopSec='))
+    lines = directives(shipped())
+    timeout = next(line for line in lines if line.startswith('TimeoutStopSec='))
     assert 0 < float(timeout.split('=', 1)[1]) <= 5
-    assert 'SendSIGKILL=yes' in directives
+    assert 'SendSIGKILL=yes' in lines
 
 
-@pytest.mark.parametrize('session', ['wayland', 'x11'])
-def test_each_shipped_unit_asks_to_be_started_at_login(session):
-    text = service.read_unit(service.template_for(session))
-    assert 'PartOf=graphical-session.target' in text
-    assert 'WantedBy=graphical-session.target' in text
+def test_the_shipped_unit_asks_to_be_started_at_login():
+    assert 'PartOf=graphical-session.target' in shipped()
+    assert 'WantedBy=graphical-session.target' in shipped()
 
 
-def test_no_shipped_unit_redirects_stdout():
+def test_the_shipped_unit_redirects_no_stdout():
     # prt() points itself at debug.log; a StandardOutput= line would give
     # systemd a directory it refuses to create (EXIT_STDOUT, status 209).
-    for path in service.templates().values():
-        assert 'StandardOutput=' not in service.read_unit(path)
+    assert 'StandardOutput=' not in shipped()
 
 
-def test_template_for_names_what_ships():
+def test_the_template_is_refused_when_the_package_lacks_it(tmp_path):
     with pytest.raises(service.ServiceError) as info:
-        service.template_for('tty')
-    assert 'wayland' in str(info.value) and 'x11' in str(info.value)
+        service.template(tmp_path)
+    assert service.UNIT_NAME in str(info.value)
 
 
-# -- the session -----------------------------------------------------------
+# -- display_keys() -------------------------------------------------------
 
-@pytest.mark.parametrize('value', ['wayland', 'WAYLAND', ' wayland ', 'x11', 'X11'])
-def test_session_of_reads_the_display_server(value):
-    assert service.session_of({'XDG_SESSION_TYPE': value}) in ('wayland', 'x11')
+def test_display_keys_follows_the_live_wayland_socket(env):
+    assert service.display_keys(env) == ('WAYLAND_DISPLAY',)
 
 
-def test_session_of_refuses_to_guess():
-    with pytest.raises(service.ServiceError) as info:
-        service.session_of({})
-    assert 'XDG_SESSION_TYPE' in str(info.value)
+def test_display_keys_follows_the_live_x11_socket(isolated_home, x11_dir):
+    listen(x11_dir / 'X0')
+    assert service.display_keys({'HOME': str(isolated_home), 'DISPLAY': ':0'}) == (
+        'DISPLAY',)
+
+
+def test_display_keys_pins_nothing_when_nothing_is_listening(isolated_home, x11_dir):
+    # A unit installed over ssh names no display, and the applet asks the
+    # machine at startup instead: that is not a failure to report.
+    env = {'HOME': str(isolated_home), 'XDG_RUNTIME_DIR': str(isolated_home / 'run'),
+           'XDG_SESSION_TYPE': 'wayland', 'WAYLAND_DISPLAY': 'wayland-1'}
+    assert service.display_keys(env) == ()
+
+
+def test_display_keys_prefers_the_session_over_xwayland(env, x11_dir):
+    # Both sockets are live in a Wayland login that runs Xwayland; the marker
+    # says which of them is the session, so the wrong one is never pinned.
+    listen(x11_dir / 'X1')
+    assert service.display_keys({**env, 'DISPLAY': ':1'}) == ('WAYLAND_DISPLAY',)
+
+
+def test_display_keys_chooses_wayland_when_both_are_live_and_unmarked(env, x11_dir):
+    listen(x11_dir / 'X1')
+    env = {key: value for key, value in env.items() if key != 'XDG_SESSION_TYPE'}
+    assert service.display_keys({**env, 'DISPLAY': ':1'}) == ('WAYLAND_DISPLAY',)
 
 
 # -- render() -------------------------------------------------------------
 
-def test_render_appends_the_session_variables_after_exec_start():
-    rendered = service.render(UNIT_TEXT, {'WAYLAND_DISPLAY': 'wayland-1',
-                                         'XDG_CURRENT_DESKTOP': 'niri'})
+def test_render_appends_the_display_and_desktop_variables_after_exec_start(env):
+    rendered = service.render(UNIT_TEXT, env)
     lines = rendered.splitlines()
     at = lines.index('ExecStart=%h/.local/bin/luks-tray')
     assert lines[at + 1] == 'Environment=WAYLAND_DISPLAY=wayland-1'
@@ -232,11 +281,9 @@ def test_render_never_invents_an_unexported_variable():
     assert service.render(UNIT_TEXT, {}) == UNIT_TEXT
 
 
-def test_render_skips_an_empty_variable():
-    assert service.render(UNIT_TEXT, {'DISPLAY': '', 'WAYLAND_DISPLAY': 'wayland-0'}) == (
-        UNIT_TEXT.replace('ExecStart=%h/.local/bin/luks-tray\n',
-                          'ExecStart=%h/.local/bin/luks-tray\n'
-                          'Environment=WAYLAND_DISPLAY=wayland-0\n'))
+def test_render_skips_an_empty_variable(env):
+    empty = {**env, 'WAYLAND_DISPLAY': '', 'XDG_CURRENT_DESKTOP': ''}
+    assert service.render(UNIT_TEXT, empty) == UNIT_TEXT
 
 
 def test_render_refuses_a_unit_without_an_exec_start():
@@ -245,25 +292,32 @@ def test_render_refuses_a_unit_without_an_exec_start():
     assert 'ExecStart' in str(info.value)
 
 
-def test_rendered_unit_picks_the_template_for_the_session(isolated_home):
-    env = {'HOME': str(isolated_home), 'XDG_CONFIG_HOME': str(isolated_home / '.config'),
-           'XDG_SESSION_TYPE': 'x11', 'DISPLAY': ':1'}
+def test_the_rendered_unit_pins_the_live_wayland_display(env):
     rendered = service.rendered_unit(env=env)
-    assert 'Environment=XDG_SESSION_TYPE=x11' in rendered
-    assert 'Environment=DISPLAY=:1' in rendered
-
-
-def test_a_wayland_unit_keeps_a_leftover_display_out(env):
-    # XWayland leaves DISPLAY set in a Wayland session; pinning it would follow
-    # whatever X display happened to be exported when --svc-install ran.
-    rendered = service.rendered_unit('wayland', {**env, 'DISPLAY': ':1'})
     assert 'Environment=WAYLAND_DISPLAY=wayland-1' in rendered
     assert 'Environment=DISPLAY=' not in rendered
 
 
-def test_an_x11_unit_keeps_a_stale_wayland_display_out(isolated_home):
-    env = {'HOME': str(isolated_home), 'XDG_SESSION_TYPE': 'x11', 'DISPLAY': ':0',
-           'WAYLAND_DISPLAY': 'wayland-9'}
+def test_the_rendered_unit_pins_the_live_x11_display(isolated_home, x11_dir):
+    listen(x11_dir / 'X0')
+    rendered = service.rendered_unit(env={'HOME': str(isolated_home), 'DISPLAY': ':0'})
+    assert 'Environment=DISPLAY=:0' in rendered
+    assert 'Environment=WAYLAND_DISPLAY=' not in rendered
+
+
+def test_a_wayland_login_does_not_pin_xwayland(env, x11_dir):
+    # XWayland leaves DISPLAY set in a Wayland session; pinning it would follow
+    # whatever X display happened to be exported when --svc-install ran.
+    listen(x11_dir / 'X1')
+    rendered = service.rendered_unit(env={**env, 'DISPLAY': ':1'})
+    assert 'Environment=WAYLAND_DISPLAY=wayland-1' in rendered
+    assert 'Environment=DISPLAY=' not in rendered
+
+
+def test_an_x11_login_does_not_pin_a_stale_wayland_display(isolated_home, x11_dir):
+    listen(x11_dir / 'X0')
+    env = {'HOME': str(isolated_home), 'XDG_RUNTIME_DIR': str(isolated_home / 'run'),
+           'DISPLAY': ':0', 'WAYLAND_DISPLAY': 'wayland-9'}
     rendered = service.rendered_unit(env=env)
     assert 'Environment=DISPLAY=:0' in rendered
     assert 'Environment=WAYLAND_DISPLAY=' not in rendered

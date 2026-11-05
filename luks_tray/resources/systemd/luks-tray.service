@@ -1,0 +1,36 @@
+# luks-tray -- the LUKS/VeraCrypt tray applet, as a `systemd --user` unit.
+# Install with `luks-tray --svc-install`, or copy this file to
+# ~/.config/systemd/user/luks-tray.service, then `systemctl --user
+# daemon-reload` and `systemctl --user enable --now luks-tray.service`.
+[Unit]
+Description=luks-tray (LUKS disk tray applet)
+# Start, stop and die with the graphical session.
+PartOf=graphical-session.target
+After=graphical-session.target
+BindsTo=graphical-session.target
+# Stop retrying after 5 starts in a minute.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# sbin is on the path on purpose: cryptsetup, losetup, mkfs.ext4 and blkid
+# live there, and the applet looks them up with PATH.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+# `--svc-install` adds this login's display (WAYLAND_DISPLAY or DISPLAY) and
+# desktop name here; the applet finds the live display server at startup.
+ExecStart=%h/.local/bin/luks-tray
+# Recover from a crash; a stop signal (logout) stays final.
+Restart=on-failure
+RestartSec=5
+# Final: 3 another instance, 15 crash, 1 display gone, plus the stop signals.
+# 4 (no usable display yet) is left out on purpose, so a login race is retried.
+RestartPreventExitStatus=1 3 15 SIGTERM SIGHUP SIGINT SIGPIPE SIGKILL SIGABRT
+# A logout cannot finish before this process is gone, so do not wait for it.
+TimeoutStopSec=3
+SendSIGKILL=yes
+
+[Install]
+WantedBy=graphical-session.target

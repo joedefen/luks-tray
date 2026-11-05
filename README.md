@@ -19,7 +19,7 @@ Version 3.0.0 (v3) added and enhanced features and improved quality.
 - **A log that explains itself** - `≡ Open Log` pages `debug.log` live, and the entry becomes `≡ Open Log [n errors]` once *this session* has reported a failure, so a dialog that says what failed is one click away from the log that says why. The log starts with a `=== luks-tray v<version> started, pid <pid> ===` line and ends with the matching one [**added in v3**]
 - **Late or restarting panels** - If the bar starts after the applet, or restarts later, the tray icon registers itself with it instead of staying invisible until the applet is restarted [**improved in v3**]
 - **Wayland dialog support** - On niri, sway and the other tiling compositors a dialog is a client, so the compositor decides its size and placement. Every dialog therefore carries one stable `app-id` (`luks-tray`), which a single window rule can match to make the dialogs float, and `--show-window-rules` prints the rule for the current session to paste into the compositor's config. Because sway hides title bars, each dialog also repeats its purpose as a heading inside the dialog itself, so nothing depends on the title bar being visible. See [Wayland tiling compositors](#wayland-tiling-compositors-niri-sway) [**improved in v3**]
-- **Start at login** - The `--svc-*` verbs write, render, enable and manage a `systemd --user` unit for the session. See [Starting at Login](#starting-at-login) [**added in v3**]
+- **Start at login** - The `--svc-*` verbs write, render, enable and manage one `systemd --user` unit, the same file for X11, Wayland and any desktop. See [Starting at Login](#starting-at-login) [**added in v3**]
 
 ## Competitive Analysis (as of November 2026)
 
@@ -261,8 +261,8 @@ exists. Pick the mechanism your session already uses, and use only one of them
 
 ### A `systemd --user` unit (recommended on systemd distros)
 
-Two units ship with the package, one per display server, and one command
-installs the right one for the session it runs in:
+One unit ships with the package -- the same file for X11, Wayland, and any
+desktop or window manager -- and one command installs it:
 
 ```
 luks-tray --svc-install     # write ~/.config/systemd/user/luks-tray.service and enable it
@@ -277,7 +277,7 @@ now.
 | Verb | What it does |
 | --- | --- |
 | `--svc` / `--svc-status` | Report the unit's state. Exit code 0 active, 1 installed but not running, 2 not installed, so it is usable from `if`. |
-| `--svc-install` | Render the unit for this session, write it, reload, enable. The only verb that writes the unit file. |
+| `--svc-install` | Render the unit, write it, reload, enable. The only verb that writes the unit file. |
 | `--svc-start` | Start the installed unit now, and enable it if it was disabled. Never writes the unit. |
 | `--svc-restart` | Restart it, so it runs the code `~/.local/bin/luks-tray` resolves to -- run this after `git pull` on an editable install. |
 | `--svc-stop` | Stop it now. It stays enabled, so it returns at your next login. |
@@ -286,17 +286,24 @@ now.
 
 The unit runs `~/.local/bin/luks-tray`, where `pipx` and `pip install --user`
 both put it, so installing from a virtualenv writes the same file as installing
-from any other shell. It also pins the session variables systemd cannot inherit
-from the compositor -- `WAYLAND_DISPLAY` (or `DISPLAY`) and
-`XDG_CURRENT_DESKTOP`/`DESKTOP_SESSION`, which Qt and the dialogs need -- filled
+from any other shell. It also pins what systemd cannot inherit from the
+compositor -- the display of the session the installer is running on
+(`WAYLAND_DISPLAY` or `DISPLAY`, whichever is actually listening) and
+`XDG_CURRENT_DESKTOP`/`DESKTOP_SESSION`, which Qt and the dialogs use -- filled
 in from the shell that ran `--svc-install`. Run it from a terminal *inside* the
 graphical session, not over `ssh`.
 
 > ⚠️ If the tray only appears when you start it by hand, the user manager has no
-> display for the unit. Add
-> `dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP`
-> to your compositor's config (sway users usually already have it), then
-> `luks-tray --svc-restart`.
+> display for the unit — or no cookie for it. Add
+> `dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP`
+> to your compositor's config (`--all` does the whole list at once; sway and i3
+> users usually already have it), then `luks-tray --svc-restart`. `XAUTHORITY` is
+> the one that matters on a display manager: sddm keeps the X cookie in
+> `/tmp/xauth_XXXXXX` rather than in `~/.Xauthority`, and a unit that never got
+> the variable cannot authenticate at all. The log then says
+> `ERROR: the X server on :0 refused the connection: it wants an authority
+> cookie …` and the applet exits 4 instead of letting Qt abort; the unit retries
+> that status, because a login race is what it usually is.
 
 #### Switching sessions
 
@@ -318,17 +325,27 @@ session: XDG_SESSION_TYPE wayland -> x11
 session: WAYLAND_DISPLAY wayland-1 -> (unset)
 ```
 
+The same question is then put to the server itself, before Qt exists:
+`Session.display_problem()` performs the connection setup the xcb plugin is
+about to perform, offering the cookie Qt would offer, and reports a refusal — a
+socket nobody accepts on, or one that answers "authenticate" for a display the
+authority file has no record for. That is the state an X11 login lands in when
+`$XAUTHORITY` never reached the user manager, and Qt's own answer to it is
+`could not connect to display` followed by `abort()`: one core dump per login in
+`coredumpctl`. The applet writes the reason to `debug.log` and exits 4 instead, a
+status the unit deliberately does *not* list in `RestartPreventExitStatus=`, so
+`Restart=on-failure` retries it 5 s later — which is what a login race needs.
+
 `--svc-status` may still report that the installed file differs from the
 shipped unit after a switch. That difference is the old snapshot, and
 refreshing it with `--svc-install` is optional.
 
-Two units, one per display server, each guarded with
-`ConditionEnvironment=XDG_SESSION_TYPE=...`, would also work -- systemd checks a
-condition against the user manager's environment, not against the unit's own
-`Environment=`, so the mismatched unit is skipped rather than failed. It buys
-nothing here: the guard is only as reliable as the manager's environment having
-been imported, and each unit would still carry a snapshot. One unit plus the
-startup repair covers both sessions.
+There is one unit and no session type pinned in it, so nothing about the file has
+to be chosen at install time: X11, Wayland and every desktop or window manager
+get the same directives, and only the snapshot below `ExecStart=` differs from
+one install to the next. That snapshot cannot decide anything either, because
+the startup repair above runs before Qt -- so the file is a fallback, and the
+session you log into is what counts.
 
 Under a unit, the `↺ Restart luks-tray` menu entry asks systemd to restart the
 unit instead of spawning a second process: `systemctl --user --no-block restart`
@@ -349,14 +366,25 @@ The unit is the guarantee, and it has two halves.
 
 **A logout may end the applet, and nothing may bring it back.**
 `Restart=on-failure` plus `RestartPreventExitStatus=` means a clean exit, a stop
-signal (SIGTERM, SIGHUP, SIGINT, SIGPIPE), a forced kill (SIGKILL) and a Qt
-abort (SIGABRT) are all final, while a real crash is still recovered. An applet
-that is *restarted* seconds after a logout began is started into a session that
-is waiting for its processes to disappear: the session never empties, the
-display manager never gets the VT, and the logout stops on a black screen. The
-last two statuses are how a *dead session* ends this process, so leaving them
-out would have reopened that hole one level down -- the sledgehammer below is a
-SIGKILL.
+signal (SIGTERM, SIGHUP, SIGINT, SIGPIPE), a forced kill (SIGKILL), a Qt abort
+(SIGABRT) and the plain `exit(1)` Xlib produces when the X server disappears are
+all final, while a real crash is still recovered. An applet that is *restarted*
+seconds after a logout began is started into a session that is waiting for its
+processes to disappear: the session never empties, the display manager never
+gets the VT, and the logout stops on a black screen. The last three statuses are
+how a *dead session* ends this process, so leaving them out would have reopened
+that hole one level down -- the sledgehammer below is a SIGKILL.
+
+That `exit(1)` was the missing one. When the session's final sweep took the X
+server first, Xlib ended the process with `XIO: fatal IO error 0 (Success) on X
+server ":0"` and a clean exit status -- no signal, so `RestartPreventExitStatus=`
+never saw it. Five seconds later the unit started again, into the *next* login,
+where the only cookie this process still had was the previous session's: Qt
+answered `could not connect to display :0`, aborted, and left a core dump. That
+is the whole of "a login core-dumps the tray while `--svc-start` works": by hand
+the user manager's environment is already complete. With `1` in the list a
+display that died is final, while status 4 (no usable display *yet*) stays
+retryable.
 
 **It ends in milliseconds, and never takes longer than 3 s.**
 `TimeoutStopSec=3` with `SendSIGKILL=yes` bounds the stop, whoever asks for it.

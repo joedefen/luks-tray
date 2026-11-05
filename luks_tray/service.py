@@ -2,24 +2,26 @@
 # -*- coding: utf-8 -*-
 """ Install, inspect, refresh and remove the luks-tray `systemd --user` unit.
 
-    The unit files in `luks_tray/resources/systemd/` are the single source of
-    truth.  They ship inside the wheel (flit includes everything under the
-    module directory), and `--svc-install` copies the one matching this
-    session's display server to `~/.config/systemd/user/luks-tray.service`.
-    That verb is the only one that writes or enables the file; `--svc-start`
-    and `--svc-restart` operate on a unit that is already installed.
+    One unit ships in `luks_tray/resources/systemd/luks-tray.service`, and it is
+    the single source of truth.  It ships inside the wheel (flit includes
+    everything under the module directory), and `--svc-install` copies it to
+    `~/.config/systemd/user/luks-tray.service`.  That verb is the only one that
+    writes or enables the file; `--svc-start` and `--svc-restart` operate on a
+    unit that is already installed.
 
-    Why two templates and not pwr-tray's ten: luks-tray has no per-desktop
-    behaviour to encode.  What it does need from the session is the *display*
-    (`WAYLAND_DISPLAY` or `DISPLAY`, which Qt turns into a platform plugin) and
-    the *desktop name* (`XDG_CURRENT_DESKTOP`/`DESKTOP_SESSION`, which the
-    compositor helper uses to report the right window rule and keeps the log
-    banner identifiable).  The dialogs themselves always show a body heading,
-    so they no longer change layout based on the desktop name.  A user unit
-    cannot inherit either from the compositor, so `render()`
-    appends what the installing shell exported, after `ExecStart=`, where a
-    later `Environment=` line wins.  `XDG_SESSION_TYPE` is *pinned* by each
-    template instead: it selects the template, so it is not re-derived here.
+    There is one unit rather than one per desktop or per display server:
+    luks-tray has no per-desktop behaviour to encode, and its own startup code
+    finds the session it was started into.  What it needs from that session is
+    the *display* (`WAYLAND_DISPLAY` or `DISPLAY`, which Qt turns into a
+    platform plugin) and the *desktop name* (`XDG_CURRENT_DESKTOP`/
+    `DESKTOP_SESSION`, which the compositor helper uses to report the right
+    window rule and keeps the log banner identifiable).  A user unit cannot
+    inherit either from the compositor, so `render()` appends what the
+    installing shell exported, after `ExecStart=`, where a later `Environment=`
+    line wins.  *Which* display variable is appended is decided by
+    `Session.display_server()` from the socket that is listening, so a Wayland
+    install pins `WAYLAND_DISPLAY`, an X11 install pins `DISPLAY`, and neither
+    pins the other one -- a Wayland login's Xwayland display included.
 
     That appended copy is a snapshot of one login, and a unit's own
     `Environment=` wins over what the *next* session exports, so it goes stale
@@ -32,23 +34,11 @@
     remember.  Re-running `--svc-install` after a switch is optional: it only
     refreshes the snapshot.
 
-    Two units, one per session, each guarded with
-    `ConditionEnvironment=XDG_SESSION_TYPE=...`, would also work: systemd
-    evaluates conditions against the user manager's environment and *not*
-    against the unit's own `Environment=` -- measured on systemd 257, where a
-    unit that sets `XDG_SESSION_TYPE=x11` itself is still skipped in a Wayland
-    session ("skipped, unmet condition check") -- so the mismatched unit is
-    skipped rather than failed.  It is not done here because it buys nothing
-    the startup repair does not: the guard is only as reliable as the manager's
-    environment having been imported, and each unit would still carry a
-    snapshot of the login that installed it.
-
-    The units deliberately do not redirect stdout: `main()` already points
+    The unit deliberately does not redirect stdout: `main()` already points
     `prt()` at `~/.config/luks-tray/debug.log` whenever stdout is not a
-    terminal, so the applet's own log stays the one place to look.  That also
-    keeps `--svc-install` away from pwr-tray's `StandardOutput=append:` trap
-    (systemd opens that file but never creates its directory, and fails every
-    start with `EXIT_STDOUT`, status 209).
+    terminal, so the applet's own log stays the one place to look.  A
+    `StandardOutput=append:` line would also hand systemd a path it opens but
+    never creates, failing every start with `EXIT_STDOUT` (status 209).
 
     Nothing here shells out to systemctl on its own: the verbs are built as
     `Step` lists by the `plan_*()` functions and performed by `execute()`, with
@@ -61,13 +51,14 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from luks_tray import Session
 from luks_tray.Utils import SingleInstance
 
 UNIT_NAME = 'luks-tray.service'
 COMMAND = 'systemctl'
 EXECUTABLE = 'luks-tray'
 
-#: The one path the shipped units run.  Every install method (pipx, pip
+#: The one path the shipped unit runs.  Every install method (pipx, pip
 #: --user, a distribution package) writes it, so the unit never has to know
 #: which one built it -- and `--svc-install` from a virtualenv produces the
 #: same file as `--svc-install` from any other shell.
@@ -89,9 +80,10 @@ FAILED = 1
 #: menu for longer than this.
 SYSTEMCTL_TIMEOUT = 10
 
-#: Session variables a unit pins to one value; install-time overrides them.
-#: `XDG_SESSION_TYPE` is absent on purpose: it selects the template.
-SESSION_KEYS = ('WAYLAND_DISPLAY', 'DISPLAY', 'XDG_CURRENT_DESKTOP', 'DESKTOP_SESSION')
+#: Variables that name the desktop rather than the display server.  They are
+#: pinned from the installing shell on every install; which *display* variable
+#: is pinned as well is decided per install by `display_keys()`.
+IDENTITY_KEYS = ('XDG_CURRENT_DESKTOP', 'DESKTOP_SESSION')
 
 _EXEC_START_RE = re.compile(r'^ExecStart=(.*)$', re.MULTILINE)
 _CGROUP_UNIT_RE = re.compile(r'([A-Za-z0-9@_.\-]+\.service)')
@@ -217,7 +209,7 @@ def installed_executable(text, env=None):
 
 
 def launcher_path(env=None):
-    """ Return `~/.local/bin/luks-tray`: the path the shipped units run. """
+    """ Return `~/.local/bin/luks-tray`: the path the shipped unit runs. """
     home = _env(env).get('HOME') or str(Path.home())
     return Path(home) / LAUNCHER
 
@@ -250,54 +242,35 @@ def require_launcher(env=None):
     return path
 
 
-def session_of(env=None):
-    """ Return the session a unit is rendered for: 'wayland' or 'x11'. """
-    value = (_env(env).get('XDG_SESSION_TYPE') or '').strip().lower()
-    if value in ('wayland', 'x11'):
-        return value
-    raise ServiceError(
-        'cannot tell whether this is a Wayland or an X11 session'
-        f' (XDG_SESSION_TYPE is {value or "unset"}); set it to wayland or x11'
-        ' and run the command again')
-
-
-def templates(source=None):
-    """ Map every shipped session name to its unit file. """
+def template(source=None):
+    """ Return the shipped unit file, or refuse when the package lacks it. """
     folder = SOURCE_DIR if source is None else Path(source)
-    found = {}
-    prefix, suffix = f'{EXECUTABLE}-', '.service'
-    for path in sorted(folder.glob(f'{prefix}*{suffix}')):
-        found[path.name[len(prefix):-len(suffix)]] = path
-    return found
+    path = folder / UNIT_NAME
+    if not path.is_file():
+        raise ServiceError(f'the shipped unit {path} is missing from this package')
+    return path
 
 
-def template_for(session, source=None):
-    """ Return the shipped unit file for `session`, or explain what exists. """
-    found = templates(source)
-    try:
-        return found[session]
-    except KeyError:
-        known = ', '.join(sorted(found)) or 'none'
-        raise ServiceError(f'no shipped unit for session {session!r} (shipped: {known})') from None
+def display_keys(env=None):
+    """ Return the display variables a unit rendered here should pin.
 
-
-def session_keys_for(text):
-    """ Return the session variables a unit of this kind should carry.
-
-        A Wayland unit must not pin a leftover `DISPLAY=:1` and an X11 unit must
-        not pin a stale `WAYLAND_DISPLAY`: only the display the session type
-        names is meaningful, alongside the desktop identity the dialogs read.
+        Decided from the display server that is actually listening, not from
+        `XDG_SESSION_TYPE`: one unit serves both kinds of session, and a Wayland
+        login has an Xwayland `DISPLAY` as well, so pinning by marker alone
+        would write the wrong one into the file.  Nothing listening (a bare
+        `ssh` login) pins nothing -- the applet asks the machine at startup
+        either way, so an empty answer is not a failure.
     """
-    identity = ('XDG_CURRENT_DESKTOP', 'DESKTOP_SESSION')
-    if 'Environment=XDG_SESSION_TYPE=x11' in text:
-        return ('DISPLAY', *identity)
-    if 'Environment=XDG_SESSION_TYPE=wayland' in text:
-        return ('WAYLAND_DISPLAY', *identity)
-    return SESSION_KEYS
+    kind = Session.display_server(_env(env))
+    if kind == Session.WAYLAND:
+        return ('WAYLAND_DISPLAY',)
+    if kind == Session.X11:
+        return ('DISPLAY',)
+    return ()
 
 
 def render(text, env=None):
-    """ Return `text` with this session's variables appended after `ExecStart=`.
+    """ Return `text` with this login's variables appended after `ExecStart=`.
 
         Only variables the calling shell actually exports are appended: a unit
         rendered from a bare `ssh` login must not invent a display.  Appending
@@ -306,7 +279,7 @@ def render(text, env=None):
     """
     env = _env(env)
     overrides = [f'Environment={key}={env[key]}'
-                 for key in session_keys_for(text) if env.get(key)]
+                 for key in (*display_keys(env), *IDENTITY_KEYS) if env.get(key)]
     result, placed = [], False
     for line in text.splitlines():
         result.append(line)
@@ -318,10 +291,9 @@ def render(text, env=None):
     return '\n'.join(result) + ('\n' if text.endswith('\n') else '')
 
 
-def rendered_unit(session=None, env=None):
-    """ Return the shipped unit for `session`, rendered for this environment. """
-    env = _env(env)
-    return render(read_unit(template_for(session or session_of(env))), env)
+def rendered_unit(env=None):
+    """ Return the shipped unit, rendered for this environment. """
+    return render(read_unit(template()), _env(env))
 
 
 def probe(rendered=None, env=None, run=run_command):
@@ -415,7 +387,7 @@ def _require_installed(status):
 def _refuse_moved_unit(status, env):
     """ Refuse to start a unit that does not run the launcher.
 
-        The shipped units are constants: they name `~/.local/bin/luks-tray` and
+        The shipped unit is a constant: it names `~/.local/bin/luks-tray` and
         never an installation.  A unit naming anything else was either hand
         edited or installed by a script that baked in an absolute path -- usually
         a project virtualenv's, which is how a service keeps running a copy
@@ -656,7 +628,7 @@ def _auto_yes(_question):
     return True
 
 
-def dispatch(verb, session=None, env=None, force=False, yes=False, echo=print,
+def dispatch(verb, env=None, force=False, yes=False, echo=print,
              ask=None, run=run_command, holder=None, systemd=None):
     """ Carry out one `--svc-*` verb and return a process exit status. """
     env = _env(env)
@@ -665,13 +637,13 @@ def dispatch(verb, session=None, env=None, force=False, yes=False, echo=print,
         ask = _auto_yes
 
     if verb == 'status':
-        return _report(session, env, echo, run)
+        return _report(env, echo, run)
 
     # Dumping the unit needs neither a systemd user manager nor a launcher: it
     # is the starter for a hand-installed (or hand-edited) unit, so it has to
     # work exactly where an automatic install might not.
     if verb == 'show-file':
-        for line in rendered_unit(session, env).splitlines():
+        for line in rendered_unit(env).splitlines():
             echo(line)
         return OK
 
@@ -686,12 +658,12 @@ def dispatch(verb, session=None, env=None, force=False, yes=False, echo=print,
         # or starting anything; `stop`, `uninstall` and `status` must still
         # work exactly when things are broken.
         require_launcher(env)
-        rendered = rendered_unit(session, env)
+        rendered = rendered_unit(env)
     else:
-        # stop/uninstall must work on an installed unit even when the session
-        # is unknown, so rendering is advisory here.
+        # stop/uninstall must work on an installed unit even when the shipped
+        # unit cannot be rendered, so rendering is advisory here.
         try:
-            rendered = rendered_unit(session, env)
+            rendered = rendered_unit(env)
         except ServiceError:
             rendered = None
 
@@ -733,20 +705,16 @@ def _show(plan, echo):
             echo(f'  {step.describe}')
 
 
-def _report(session, env, echo, run):
+def _report(env, echo, run):
     """ Print the state of the unit and return the documented status code. """
     path = installed_unit(env)
     if not path.is_file():
-        try:
-            available = template_for(session or session_of(env)).name
-        except ServiceError:
-            available = 'none'
-        echo(f'{UNIT_NAME}: not installed (unit available: {available})')
+        echo(f'{UNIT_NAME}: not installed')
         echo('  install it with: luks-tray --svc-install')
         return STATUS_ABSENT
 
     try:
-        rendered = rendered_unit(session, env)
+        rendered = rendered_unit(env)
     except ServiceError:
         rendered = None
     status = probe(rendered=rendered, env=env, run=run)

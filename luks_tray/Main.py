@@ -97,6 +97,14 @@ __all__ = [
 # appears, so start-up never blocks on the bar.
 TRAY_ATTACH_DELAY_MS = 500      # let a new host start serving calls
 
+# Exit status for "this login has no display the applet could use": the X server
+# is not up yet, or it wants a cookie this process does not have.  Both are
+# times to come back, not reasons to stay down -- the unit's
+# `RestartPreventExitStatus=` deliberately does *not* list 4 -- so systemd's
+# `Restart=on-failure` retries 5 s later, which is what a login race needs.  See
+# `Session.display_problem()`.
+EXIT_NO_DISPLAY = 4
+
 # `APP_NAME` (imported from AppInfo) is the name the log lines, the unit file
 # and the menu all agree on.  The session banner pairs it with `__version__`
 # and the pid, so "which build wrote this line, and which run?" is answered by
@@ -431,7 +439,7 @@ class LuksTray():
             prints the same two lists. Lookup is `shutil.which()`, so a PATH
             that lacks /usr/sbin reports `cryptsetup` as missing even though it
             is installed -- run the tray the way the desktop session would.
-            That is not hypothetical: the shipped units once pinned the path
+            That is not hypothetical: the shipped unit once pinned the path
             without the sbin directories, and the applet refused to start under
             `systemd --user` while the same shell found every command, so a
             missing report now names the PATH it searched.  The lookup is not
@@ -1934,7 +1942,7 @@ def main():
                  ' 1 installed but not running, 2 not installed)')
     svc.add_argument('--svc-install', dest='svc', action='store_const',
             const='install',
-            help='write the unit for this session and enable it (not started);'
+            help='write the unit and enable it (not started);'
                  ' only this verb writes the unit')
     svc.add_argument('--svc-start', dest='svc', action='store_const',
             const='start',
@@ -1952,7 +1960,7 @@ def main():
             help='stop, disable and delete the unit (config and logs are kept)')
     svc.add_argument('--show-svc-file', dest='svc', action='store_const',
             const='show-file',
-            help='print the systemd unit for this session, then exit'
+            help='print the systemd unit, then exit'
                  ' (a starter for a hand-installed or customized unit)')
     # The release gate installs the built wheel in a throwaway venv and runs
     # this, so the number printed has to come from the installed package --
@@ -2087,6 +2095,18 @@ def main():
         # X11 must not need a re-install (see luks_tray/Session.py).
         for name, before, after in Session.repair_environment(note=prt):
             prt(f"session: {name} {before or '(unset)'} -> {after or '(unset)'}")
+
+        # That repair fixes the *variables*; it cannot make the server accept us.
+        # An X11 login authenticates with a cookie in `$XAUTHORITY`, and a unit
+        # only has that variable when the session exported the environment to
+        # the user manager.  Without it Qt's xcb plugin prints "could not
+        # connect to display" and then *aborts*: one core dump per login in
+        # `coredumpctl` and a SIGABRT that systemd reads as a crash.  Asking the
+        # server first turns that into a log line and a status the unit retries.
+        problem = Session.display_problem()
+        if problem:
+            prt(f'ERROR: {problem}')
+            sys.exit(EXIT_NO_DISPLAY)
 
         tray = LuksTray(ini_tool, opts)
         sys.exit(tray.app.exec())

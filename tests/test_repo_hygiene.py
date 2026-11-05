@@ -82,8 +82,8 @@ def test_no_test_writes_into_the_repository():
     # The suite is run from the repository root; anything it creates there would
     # show up in `git status` and stop the next bless run.
     known = {'.git', '.gitignore', '.github', '.pytest_cache', '.ruff_cache',
-             '.coverage', 'LICENSE', 'README.md', 'bless', 'conftest.py',
-             'images', 'luks_tray', 'lt-venv', 'pyproject.toml', 'runner',
+             '.coverage', '.venv', 'LICENSE', 'README.md', 'bless', 'conftest.py',
+             'images', 'luks_tray', 'pyproject.toml', 'runner',
              'tests', '__pycache__', 'build', 'dist'}
     surprise = sorted(name for name in os.listdir(ROOT) if name not in known)
     assert surprise == [], f'unexpected files at the repository root: {surprise}'

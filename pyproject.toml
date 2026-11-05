@@ -19,11 +19,11 @@
 # test inventory and the release checklist in detail, see
 # tests/README-DEV.md; the essentials:
 #
-#   python3 -m venv lt-venv
-#   lt-venv/bin/python -m pip install -e '.[dev]'
-#   lt-venv/bin/python -m ruff check .
-#   lt-venv/bin/python -m compileall -q luks_tray tests
-#   lt-venv/bin/python -m pytest -q --cov=luks_tray --cov-report=term-missing
+#   python3 -m venv .venv
+#   .venv/bin/python -m pip install -e '.[dev]'
+#   .venv/bin/python -m ruff check .
+#   .venv/bin/python -m compileall -q luks_tray tests
+#   .venv/bin/python -m pytest -q --cov=luks_tray --cov-report=term-missing
 #
 # That last line is the test gate CI runs.  It is not only a count of tests: the
 # coverage floor in [tool.coverage.report] is read by pytest-cov itself, so a
@@ -40,7 +40,7 @@
 # uploads a throwaway X.Y.Z.99.N to TestPyPI from a copy of the tree; `publish`
 # makes main and dev one commit, tags vX.Y.Z, uploads to PyPI and pushes.
 #
-# Run it as `lt-venv/bin/python ./bless`: the gates run sys.executable, and the
+# Run it as `.venv/bin/python ./bless`: the gates run sys.executable, and the
 # system python3 has no PyQt6 for the tests to import.
 
 [build-system]
@@ -138,7 +138,7 @@ precision = 1
 # change which rules CI enforces.
 target-version = "py311"
 line-length = 100
-extend-exclude = ["build", "dist", "lt-venv"]
+extend-exclude = ["build", "dist", ".venv"]
 
 [tool.ruff.lint]
 # The selection is pinned rather than inherited.  `ruff check .` with no flags

@@ -9,7 +9,7 @@
     It is a script, not an importable module, so the CamelCase naming rule used
     for the modules in `luks_tray/` does not apply to it. If the shebang picks
     an interpreter without the dependencies, name one explicitly:
-    `lt-venv/bin/python runner --check-deps`.
+    `.venv/bin/python runner --check-deps`.
 """
 
 import sys
