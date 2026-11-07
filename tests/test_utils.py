@@ -407,10 +407,14 @@ def test_log_viewer_argv_pages_the_rotated_file_too(monkeypatch, tmp_path):
 
 def test_log_viewer_argv_skips_a_rotated_file_that_is_not_there(monkeypatch,
                                                                 tmp_path):
+    # Pin the terminal too: on a runner with none installed the auto-detection
+    # would answer [] for a reason that has nothing to do with the rotated file.
     monkeypatch.setattr(Utils, '_less_follow_name', False)
+    monkeypatch.setattr(Utils, '_TERMINALS', (('xterm', '-e', 'argv'),))
+    monkeypatch.setattr(Utils.shutil, 'which', lambda name: f'/usr/bin/{name}')
     log = tmp_path / 'debug.log'
     argv = Utils.log_viewer_argv(str(log), str(tmp_path / 'debug.log.old'), '')
-    assert argv[-2:] == ['+F', str(log)]
+    assert argv == ['/usr/bin/xterm', '-e', 'less', '+F', str(log)]
     assert '--follow-name' not in argv
 
 
