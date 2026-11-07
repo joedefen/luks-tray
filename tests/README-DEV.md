@@ -88,7 +88,7 @@ nothing else counts as "green":
   the misses that matter here are the arms of an `if` nobody takes — the
   container state machine and the mount/unmount error paths.
 
-The suite is **601 tests**.  It needs no network, no `sudo`, and writes nothing
+The suite is **669 tests**.  It needs no network, no `sudo`, and writes nothing
 outside `tmp_path` (the `isolated_home` fixture in
 [`conftest.py`](../conftest.py) points `HOME` and `XDG_CONFIG_HOME` at a
 temporary directory for every test).  Any behaviour that would need root is
@@ -122,7 +122,7 @@ from that table, so a developer and CI cannot enforce different floors.
 | [`test_service_restart.py`](test_service_restart.py) | The supervisor-aware paths: `restart_self()` asks systemd (`systemctl --user --no-block restart`, run synchronously so the job is queued before the applet exits) instead of spawning a child the cgroup teardown would kill, stays up when the request cannot be made, and `--replace` refuses to signal a holder that a unit supervises.  Also `Utils.in_systemd_service()` and `spawn_detached()` (viewers only -- a detached control request is what made the menu row behave like Quit). |
 | [`test_metadata.py`](test_metadata.py) | One version location, one console script, and a `--version` that agrees with both. |
 | [`test_repo_hygiene.py`](test_repo_hygiene.py) | Repository invariants the gate relies on: the sdist manifest, the inspector, the workflow's gates matrix, `QT_QPA_PLATFORM`, branch triggers, `permissions`, and that CI holds no credential and cannot publish. |
-| [`test_bless.py`](test_bless.py) | The gate's own decisions: identity read from `pyproject.toml`, version-line rewrite inside the rehearsal copy, the duplicate check, `branch_plan`, the prompt, `_artifacts()`, `~/.pypirc` lookup, index-lag messages. |
+| [`test_bless.py`](test_bless.py) | The half only this project can answer: the identity the vendored `bless` derives from [`pyproject.toml`](../pyproject.toml) (distribution name, module, console script, branch model), `read_version()` agreeing with the package, and the inspector the release uploads behind — [`inspect_dist.py`](inspect_dist.py) run against a synthetic wheel and sdist. What the gate itself decides (branch plan, refusals, prompt, index check, emitter) is tested once, in [`../blessd/tests/test_bless.py`](../blessd/tests/test_bless.py). |
 
 The suite imports the **real PyQt6**; it does not stub Qt.  Everything it needs
 is on PyPI, and the behaviour worth pinning — window flags, the manual title
@@ -170,15 +170,31 @@ The stages run in this order, and each one refuses rather than warns:
 | branch plan | a `main`/`dev` pair that has diverged, a missing `origin/<branch>`, or a push that would not be a fast-forward |
 | checklist | prints everything in hand, then asks |
 
-`bless` is copied **verbatim** from `../pwr-tray`, where it is byte-identical to
-the copy in `../my-snaps` and `../vappman`: 1015 lines, SHA-256
-`4f756337840b0619fbf6f077b00d4bb3fb9aee95ff18bbeb6a0521d39d52131e`.
+[`bless`](../bless) is **emitted**, byte for byte, from
+[`../blessd/bless`](../blessd/bless) by that repository's
+[`build.py`](../blessd/build.py): 1229 lines, SHA-256
+`3ef60e9e806ca58a3d900dd6622bb8be0052210da1ef26f9918bf0a1deb1e3b2`.
+It is never edited here — a change is made in `blessd` and re-emitted with
+
+```sh
+python3 ../blessd/build.py --into . --force     # replaces ./bless, prints the hash
+sha256sum bless                                  # must equal build.py --sha
+```
+
 [`test_repo_hygiene.py`](test_repo_hygiene.py) pins that hash.  Every
 project-specific fact is read out of [`pyproject.toml`](../pyproject.toml) and
-the package, so nothing here is edited per project: adopting a newer upstream
-means a new copy and a new hash, never a local patch.  (`../dwipe/bless` is a
-different file and is not the source.)  It replaced `deploy`, which has been
-deleted — a second, unchecked install path that guessed at the interpreter.
+the package, so nothing here is edited per project.  The gate's policy and its
+tests live in `blessd` once ([`../blessd/docs/adopting.md`](../blessd/docs/adopting.md));
+what stays here is the identity this tree derives and the inspector it uploads
+behind.  `bless` replaced `deploy`, which has been deleted — a second,
+unchecked install path that guessed at the interpreter.
+
+**Adoption note.**  The tree already satisfied the gate: one version location
+(`dynamic = ["version"]`), a console script that answers `--version`, the
+inspector at `tests/inspect_dist.py`, and a `dev` extra holding `build`,
+`twine>=7` and `packaging>=26`.  Its branch model is the gate's default,
+`main` and `dev`; the hash above is the build it carries, and the two commands
+just above reproduce it.
 
 Three things are deliberately *not* wired up:
 
@@ -336,7 +352,7 @@ grows a credential, drifts from the gates above, or loses the offscreen setting.
 
 * **The coverage floor is not set yet.**  `[tool.coverage.report]` deliberately
   has no `fail_under`: the number should be the one the suite actually achieves,
-  set once and then only raised.  A full run measures **73.3% of 3172
+  set once and then only raised.  A full run measures **76.5% of 3623
   statements** with `branch = true`, which is the figure the floor has to start
   from.  Still uncovered: `DeviceInfo`'s `lsblk`/`/sys` parsing, the
   menu/refresh half of [`Main.py`](../luks_tray/Main.py) (`update_menu`,

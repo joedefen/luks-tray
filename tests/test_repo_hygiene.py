@@ -15,10 +15,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Copied verbatim from ../pwr-tray/bless (identical in vappman and my-snaps).
+# Emitted byte for byte by ../blessd/build.py, which is the gate's one home.
 # Project identity is read from pyproject.toml, so the file is never edited per
-# project -- adopting a newer upstream means a new copy and a new hash here.
-BLESS_SHA256 = '4f756337840b0619fbf6f077b00d4bb3fb9aee95ff18bbeb6a0521d39d52131e'
+# project -- adopting a newer gate means re-emitting it and a new hash here.
+BLESS_SHA256 = '3ef60e9e806ca58a3d900dd6622bb8be0052210da1ef26f9918bf0a1deb1e3b2'
 
 # What the gate writes and then expects not to see in `git status`.
 IGNORED = ('.ruff_cache/', '.pytest_cache/', '.coverage', '*.whl', '*.tar.gz',
@@ -37,11 +37,12 @@ def test_bless_is_present_and_executable():
     assert mode & stat.S_IXUSR, 'bless must be executable to be run as ./bless'
 
 
-def test_bless_is_the_verbatim_copy():
+def test_bless_is_the_emitted_copy():
     digest = hashlib.sha256((ROOT / 'bless').read_bytes()).hexdigest()
     assert digest == BLESS_SHA256, (
-        'bless has been edited; adopt a new upstream copy and update '
-        'BLESS_SHA256 (and the provenance note in tests/README-DEV.md §5)')
+        'bless has been edited; re-emit it with '
+        '`python3 ../blessd/build.py --into . --force` and update '
+        'BLESS_SHA256 (and the adoption note in tests/README-DEV.md §5)')
 
 
 def test_the_shared_inspector_exists_where_bless_expects_it():
