@@ -36,6 +36,13 @@
     also answers the question Qt is about to ask, by doing the same connection
     setup the plugin does (`display_problem()`), and `main()` turns a refusal
     into a log line and a retryable exit status instead.
+
+    A Wayland login has no cookie, but it has the socket itself, and that is
+    just as decisive: a compositor that has not published its socket yet (or
+    has just taken it away) cannot serve a Wayland client, and Qt's ending is
+    the same abort.  `display_problem()` reports a missing Wayland socket when
+    no live Xwayland display is left to fall back on, so that login race also
+    leaves through the retryable status instead of a crash.
 """
 import os
 import socket
@@ -388,6 +395,35 @@ def x11_setup_status(socket_path, cookie=b''):
     return answer[0] if answer else SETUP_FAILED
 
 
+def _wayland_problem(env):
+    """ Return why this Wayland session has no compositor Qt could reach.
+
+        A compositor socket is the whole connection: there is no cookie and no
+        second handshake to fail.  When `XDG_SESSION_TYPE` says Wayland and the
+        named socket is not there, Qt's wayland plugin cannot initialise; if
+        there is also no live X11 server to fall back on, `QApplication` aborts
+        and `main()`'s exception handler exits 15, which the unit treats as
+        final.  The login race is the opposite case: the compositor is a moment
+        from publishing its socket, so the applet must exit 4 and be retried.
+
+        A live Xwayland display is left to Qt -- the xcb fallback is a working
+        session, and it is not this probe's business to refuse it.  A TCP
+        display is left alone for the same reason the X11 branch leaves it
+        alone: it cannot be checked from here.
+    """
+    if live_wayland(env):
+        return ''
+    display = (env.get('DISPLAY') or '').strip()
+    if display and not x11_socket_path(display):
+        return ''               # a TCP display: not judgeable from here
+    if live_x11(env):
+        return ''               # Xwayland is up; Qt can fall back to xcb
+    named = (env.get('WAYLAND_DISPLAY') or '').strip()
+    return (f'the Wayland compositor named by WAYLAND_DISPLAY={named or "(unset)"}'
+            f' is not listening, and no X11 server is available: the session is'
+            f' not up yet, or it has just ended')
+
+
 def display_problem(env=None):
     """ Return why Qt could not use this session's display, '' when it can.
 
@@ -399,14 +435,19 @@ def display_problem(env=None):
         cookie, and only the session's own
         `dbus-update-activation-environment` gives them to the manager).
 
-        Only positive evidence is reported: a server that cannot be reached,
+        Only positive evidence is reported: an X server that cannot be reached,
         refuses the connection, or asks for a cookie the readable authority file
-        does not contain.  Anything the probe cannot judge -- a Wayland session,
-        a TCP display, an authority file it failed to parse -- is left to Qt,
-        so a host that authenticates some other way is never refused a start.
+        does not contain; or a Wayland session whose compositor socket is not
+        there and which has no live X11 display to fall back on.  Anything the
+        probe cannot judge -- a Wayland session with a listening compositor, a
+        TCP display, an authority file it failed to parse -- is left to Qt, so
+        a host that authenticates some other way is never refused a start.
     """
     env = os.environ if env is None else env
-    if (env.get('XDG_SESSION_TYPE') or '').strip().lower() != X11:
+    kind = (env.get('XDG_SESSION_TYPE') or '').strip().lower()
+    if kind == WAYLAND:
+        return _wayland_problem(env)
+    if kind != X11:
         return ''
     display = (env.get('DISPLAY') or '').strip()
     path = x11_socket_path(display)

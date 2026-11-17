@@ -287,11 +287,15 @@ now.
 The unit runs `~/.local/bin/luks-tray`, where `pipx` and `pip install --user`
 both put it, so installing from a virtualenv writes the same file as installing
 from any other shell. It also pins what systemd cannot inherit from the
-compositor -- the display of the session the installer is running on
-(`WAYLAND_DISPLAY` or `DISPLAY`, whichever is actually listening) and
-`XDG_CURRENT_DESKTOP`/`DESKTOP_SESSION`, which Qt and the dialogs use -- filled
-in from the shell that ran `--svc-install`. Run it from a terminal *inside* the
-graphical session, not over `ssh`.
+compositor: the display of the session the installer is running on
+(`WAYLAND_DISPLAY` or `DISPLAY`, whichever is actually listening), filled in
+from the shell that ran `--svc-install`. Run it from a terminal *inside* the
+graphical session, not over `ssh`. The desktop name
+(`XDG_CURRENT_DESKTOP`/`DESKTOP_SESSION`) is deliberately **not** pinned: the
+unit inherits the user manager's environment, so the session can refresh it on
+every switch instead of freezing the value chosen at install time. If your WM
+does not export those variables to the manager, add them to the
+`dbus-update-activation-environment` line below.
 
 > ⚠️ If the tray only appears when you start it by hand, the user manager has no
 > display for the unit — or no cookie for it. Add
@@ -304,6 +308,21 @@ graphical session, not over `ssh`.
 > `ERROR: the X server on :0 refused the connection: it wants an authority
 > cookie …` and the applet exits 4 instead of letting Qt abort; the unit retries
 > that status, because a login race is what it usually is.
+
+> **A standalone WM has to start this unit itself.** On current systemd
+> `graphical-session.target` is `RefuseManualStart=yes`, so the often-quoted
+> `systemctl --user start graphical-session.target` is *refused*; the target is
+> meant to be pulled in as a dependency by a session wrapper. A full DE (or
+> `niri-session`) does that, which is what makes
+> `WantedBy=graphical-session.target` start the applet. A bare i3/sway config
+> has no wrapper to pull the target -- or this unit -- in, so either use the
+> desktop autostart entry below, or start the unit explicitly from the WM
+> config (`systemctl --user start luks-tray.service`) and stop it when the WM
+> exits. Starting the unit does pull the target in as a dependency, so it works
+> even when no wrapper has done so. If the user manager lingers and the target
+> is never stopped, it is still *active* across a switch, and a unit that is
+> merely wanted by an already-active target is not started again; use
+> `luks-tray --svc-restart` in that case.
 
 #### Switching sessions
 
@@ -336,16 +355,26 @@ authority file has no record for. That is the state an X11 login lands in when
 status the unit deliberately does *not* list in `RestartPreventExitStatus=`, so
 `Restart=on-failure` retries it 5 s later — which is what a login race needs.
 
+The same question is put to a Wayland session, where the socket is the whole
+connection: if the compositor's socket is not there and no live X11 display is
+available to fall back on, `display_problem()` reports that too, and the applet
+exits 4 for the retry instead of letting Qt abort. A listening compositor, or a
+live Xwayland display, is still left to Qt.
+
 `--svc-status` may still report that the installed file differs from the
 shipped unit after a switch. That difference is the old snapshot, and
 refreshing it with `--svc-install` is optional.
 
 There is one unit and no session type pinned in it, so nothing about the file has
 to be chosen at install time: X11, Wayland and every desktop or window manager
-get the same directives, and only the snapshot below `ExecStart=` differs from
-one install to the next. That snapshot cannot decide anything either, because
-the startup repair above runs before Qt -- so the file is a fallback, and the
-session you log into is what counts.
+get the same directives, and only the display snapshot below `ExecStart=`
+differs from one install to the next. That snapshot cannot decide anything
+either, because the startup repair above runs before Qt -- so the file is a
+fallback, and the session you log into is what counts. The desktop *name* is not
+in the file at all: it comes from the user manager's environment, which the
+session is expected to refresh (see the `dbus-update-activation-environment`
+line above). That is what keeps Qt's platform theme and `--show-window-rules`
+from naming the window manager you used when you installed the unit.
 
 Under a unit, the `↺ Restart luks-tray` menu entry asks systemd to restart the
 unit instead of spawning a second process: `systemctl --user --no-block restart`

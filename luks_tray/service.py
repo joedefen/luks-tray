@@ -13,15 +13,20 @@
     luks-tray has no per-desktop behaviour to encode, and its own startup code
     finds the session it was started into.  What it needs from that session is
     the *display* (`WAYLAND_DISPLAY` or `DISPLAY`, which Qt turns into a
-    platform plugin) and the *desktop name* (`XDG_CURRENT_DESKTOP`/
-    `DESKTOP_SESSION`, which the compositor helper uses to report the right
-    window rule and keeps the log banner identifiable).  A user unit cannot
-    inherit either from the compositor, so `render()` appends what the
-    installing shell exported, after `ExecStart=`, where a later `Environment=`
-    line wins.  *Which* display variable is appended is decided by
-    `Session.display_server()` from the socket that is listening, so a Wayland
-    install pins `WAYLAND_DISPLAY`, an X11 install pins `DISPLAY`, and neither
-    pins the other one -- a Wayland login's Xwayland display included.
+    platform plugin).  A user unit cannot inherit that from the compositor, so
+    `render()` appends what the installing shell exported, after `ExecStart=`,
+    where a later `Environment=` line wins.  *Which* display variable is
+    appended is decided by `Session.display_server()` from the socket that is
+    listening, so a Wayland install pins `WAYLAND_DISPLAY`, an X11 install pins
+    `DISPLAY`, and neither pins the other one -- a Wayland login's Xwayland
+    display included.
+
+    The desktop *name* (`XDG_CURRENT_DESKTOP`/`DESKTOP_SESSION`) is deliberately
+    not pinned.  A unit inherits the user manager's environment, and every
+    session that starts `graphical-session.target` can refresh it with
+    `dbus-update-activation-environment`; a value copied at install time would
+    outrank that refresh forever, so switching from one window manager to
+    another would leave Qt and `--show-window-rules` naming the old desktop.
 
     That appended copy is a snapshot of one login, and a unit's own
     `Environment=` wins over what the *next* session exports, so it goes stale
@@ -79,11 +84,6 @@ FAILED = 1
 #: Called from a Qt action slot, so a wedged user manager must not freeze the
 #: menu for longer than this.
 SYSTEMCTL_TIMEOUT = 10
-
-#: Variables that name the desktop rather than the display server.  They are
-#: pinned from the installing shell on every install; which *display* variable
-#: is pinned as well is decided per install by `display_keys()`.
-IDENTITY_KEYS = ('XDG_CURRENT_DESKTOP', 'DESKTOP_SESSION')
 
 _EXEC_START_RE = re.compile(r'^ExecStart=(.*)$', re.MULTILINE)
 _CGROUP_UNIT_RE = re.compile(r'([A-Za-z0-9@_.\-]+\.service)')
@@ -270,16 +270,18 @@ def display_keys(env=None):
 
 
 def render(text, env=None):
-    """ Return `text` with this login's variables appended after `ExecStart=`.
+    """ Return `text` with this login's display appended after `ExecStart=`.
 
-        Only variables the calling shell actually exports are appended: a unit
-        rendered from a bare `ssh` login must not invent a display.  Appending
-        after `ExecStart=` is safe because systemd collects every `Environment=`
-        line and the last assignment to a name wins.
+        Only the display variable that names a listening server is appended
+        (see `display_keys()`): a unit rendered from a bare `ssh` login must not
+        invent one.  The desktop name is left to the user manager's environment,
+        so a later session can correct it without reinstalling the unit.
+        Appending after `ExecStart=` is safe because systemd collects every
+        `Environment=` line and the last assignment to a name wins.
     """
     env = _env(env)
     overrides = [f'Environment={key}={env[key]}'
-                 for key in (*display_keys(env), *IDENTITY_KEYS) if env.get(key)]
+                 for key in display_keys(env) if env.get(key)]
     result, placed = [], False
     for line in text.splitlines():
         result.append(line)

@@ -268,13 +268,24 @@ def test_display_keys_chooses_wayland_when_both_are_live_and_unmarked(env, x11_d
 
 # -- render() -------------------------------------------------------------
 
-def test_render_appends_the_display_and_desktop_variables_after_exec_start(env):
+def test_render_appends_the_live_display_after_exec_start(env):
     rendered = service.render(UNIT_TEXT, env)
     lines = rendered.splitlines()
     at = lines.index('ExecStart=%h/.local/bin/luks-tray')
     assert lines[at + 1] == 'Environment=WAYLAND_DISPLAY=wayland-1'
-    assert lines[at + 2] == 'Environment=XDG_CURRENT_DESKTOP=niri'
+    assert lines[at + 2] == 'Restart=on-failure'
     assert rendered.endswith('\n')
+
+
+def test_render_does_not_pin_the_desktop_name(env):
+    # The desktop name is inherited from the user manager, whose environment a
+    # session refreshes on every switch.  A copied value would outrank that
+    # refresh forever: the measured unit said XDG_CURRENT_DESKTOP=i3 while the
+    # live session was niri, and only the display variables were repaired.
+    rendered = service.render(UNIT_TEXT, {**env, 'DESKTOP_SESSION': 'i3-qt6'})
+    assert 'XDG_CURRENT_DESKTOP' not in rendered
+    assert 'DESKTOP_SESSION' not in rendered
+    assert 'Environment=WAYLAND_DISPLAY=wayland-1' in rendered
 
 
 def test_render_never_invents_an_unexported_variable():

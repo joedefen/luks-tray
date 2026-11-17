@@ -388,12 +388,49 @@ def test_an_authority_file_it_cannot_parse_is_not_a_verdict(x11_dir, tmp_path):
     server.done()
 
 
-def test_a_wayland_session_is_never_probed(runtime, x11_dir):
+def test_a_wayland_session_is_never_probed_when_a_compositor_is_listening(runtime, x11_dir):
     # Nothing authenticates over a compositor socket, and DISPLAY may still name
     # the Xwayland Qt is not using.
+    listen(runtime / 'wayland-1')
     listen(x11_dir / 'X0')
-    assert Session.display_problem({'XDG_SESSION_TYPE': 'wayland',
+    assert Session.display_problem({'XDG_RUNTIME_DIR': str(runtime),
+                                    'XDG_SESSION_TYPE': 'wayland',
+                                    'WAYLAND_DISPLAY': 'wayland-1',
                                     'DISPLAY': ':0'}) == ''
+
+
+def test_a_wayland_session_without_a_live_socket_is_reported(runtime, x11_dir):
+    # The compositor has not published its socket yet (a login race), and there
+    # is no Xwayland display to fall back on: Qt would abort, so this has to be
+    # the retryable exit 4 instead of the final exit 15.
+    problem = Session.display_problem({
+        'XDG_RUNTIME_DIR': str(runtime),
+        'XDG_SESSION_TYPE': 'wayland',
+        'WAYLAND_DISPLAY': 'wayland-1',
+    })
+    assert 'WAYLAND_DISPLAY=wayland-1' in problem
+    assert 'not listening' in problem
+
+
+def test_a_wayland_session_may_fall_back_to_a_live_xwayland(runtime, x11_dir):
+    # A Wayland login has an Xwayland DISPLAY; Qt's xcb fallback is a working
+    # session, so the probe must not refuse it.
+    listen(x11_dir / 'X1')
+    assert Session.display_problem({
+        'XDG_RUNTIME_DIR': str(runtime),
+        'XDG_SESSION_TYPE': 'wayland',
+        'WAYLAND_DISPLAY': 'wayland-9',
+        'DISPLAY': ':1',
+    }) == ''
+
+
+def test_a_wayland_session_leaves_a_tcp_display_to_qt(runtime, x11_dir):
+    # `host:0` cannot be checked from here, exactly as in the X11 branch.
+    assert Session.display_problem({
+        'XDG_RUNTIME_DIR': str(runtime),
+        'XDG_SESSION_TYPE': 'wayland',
+        'DISPLAY': 'host:0',
+    }) == ''
 
 
 def test_a_tcp_display_is_left_to_qt(x11_dir):

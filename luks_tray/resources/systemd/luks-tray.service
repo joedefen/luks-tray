@@ -19,8 +19,10 @@ Type=simple
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
 Environment=XDG_RUNTIME_DIR=/run/user/%U
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
-# `--svc-install` adds this login's display (WAYLAND_DISPLAY or DISPLAY) and
-# desktop name here; the applet finds the live display server at startup.
+# `--svc-install` adds this login's display (WAYLAND_DISPLAY or DISPLAY) here;
+# the applet finds the live display server at startup.  The desktop name
+# (XDG_CURRENT_DESKTOP/DESKTOP_SESSION) is not pinned: the unit inherits the
+# user manager's environment, which the session can refresh on every switch.
 ExecStart=%h/.local/bin/luks-tray
 # Recover from a crash; a stop signal (logout) stays final.
 Restart=on-failure

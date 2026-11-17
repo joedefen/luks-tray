@@ -617,21 +617,23 @@ own `Environment=` — but it buys nothing: the guard is only as good as the
 manager's environment having been imported, and each unit would still carry a
 display snapshot.
 
-What *is* compositor-specific lives in the lines `--svc-install` appends below
-`ExecStart=`, for example `Environment=XDG_CURRENT_DESKTOP=niri` — a snapshot of
-the shell that ran the installer.  Only [`Compositor.detect()`](../luks_tray/Compositor.py)
-reads it, to print `--show-window-rules` and to label the log; no behaviour of
-the unit depends on it, so a unit carried to another desktop is not wrong, just
-less informative.
+The desktop name is not in the file at all.  It is inherited from the user
+manager's environment, which every session that starts
+`graphical-session.target` can refresh with
+`dbus-update-activation-environment`; a value copied at install time would
+outrank that refresh for the life of the unit, so a switch from i3 to niri
+left `XDG_CURRENT_DESKTOP=i3` and `DESKTOP_SESSION=i3-qt6` in the unit while
+the live session was niri.  [`Compositor.detect()`](../luks_tray/Compositor.py)
+reads the refreshed values for `--show-window-rules`, and Qt reads them for its
+platform theme.
 
 ### `--svc-install` renders, it does not template
 
 A user unit cannot inherit the display from the compositor, so
 [`service.render()`](../luks_tray/service.py) appends, *after* `ExecStart=`, the
-variables the installing shell exported: the display variable the live server
-uses, plus `XDG_CURRENT_DESKTOP` and `DESKTOP_SESSION`.  `after ExecStart=` is
-safe because systemd collects every `Environment=` line and the last assignment
-to a name wins.
+one display variable the live server uses.  `after ExecStart=` is safe because
+systemd collects every `Environment=` line and the last assignment to a name
+wins.
 
 Which display variable that is comes from `display_keys()`, which asks
 `Session.display_server()` — the sockets, not the marker — so:
@@ -646,7 +648,7 @@ Which display variable that is comes from `display_keys()`, which asks
   login) pins no display at all.  The unit still starts: the applet asks
   `loginctl` and reads the socket itself.
 
-The appended values are a snapshot of one login.  That is why the applet
+The appended display is a snapshot of one login.  That is why the applet
 re-derives `XDG_SESSION_TYPE`, `WAYLAND_DISPLAY` and `DISPLAY` from the socket
 that is actually listening before Qt starts ([`Session.py`](../luks_tray/Session.py)):
 switching display servers needs no re-install, and a stale line here is
