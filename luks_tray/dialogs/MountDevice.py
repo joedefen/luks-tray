@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-""" Mount/unmount dialog for LUKS *device* containers (partitions). """
+"""Mount and unmount dialog for LUKS device containers."""
 # pylint: disable=broad-exception-caught, invalid-name, too-many-locals
 # pylint: disable=too-many-branches,too-many-statements
 
@@ -11,22 +10,21 @@ from luks_tray.LuksOps import mount_luks_container, run_unmount, sudo_cmd
 
 
 class MountDeviceDialog(CommonDialog):
-    """ One dialog for a LUKS *device* container, in whichever state it is.
+    """One dialog for a LUKS device container, in whichever state it is."""
 
-        The layout follows the container, not the caller: mounted filesystems
-        give the unmount/close prompt, an opened-but-unmounted container gives
-        the close prompt (the anomaly case that used to render "Close ?"), and
-        anything else gives the mount form. `tray.containers[uuid]` stays the
-        source of truth during the operation, so the dialog itself keeps no
-        copy of the container state.
-    """
     def __init__(self, tray, container):
+        """Build the dialog for `container`.
+
+        Args:
+            tray: The running tray instance.
+            container: The device container record.
+        """
         super().__init__(tray)
 
         mounts = []
         if container.filesystems:
             mounts = container.filesystems[0].mounts
-        if mounts:  # unmount dialog
+        if mounts:
             self.set_title('Unmount and Close Device')
             self.add_line(f'{container.name}')
             self.add_line(f'Unmount {",".join(mounts)}?')
@@ -34,12 +32,9 @@ class MountDeviceDialog(CommonDialog):
             self.add_push_button('Cancel', self.cancel)
             self.main_layout.addLayout(self.button_layout)
 
-        elif container.opened:  # close dialog: unlocked but nothing mounted
+        elif container.opened:
             self.set_title('Close Unmounted Device')
             self.add_line(f'{container.name}')
-            # `mounts` is empty in this branch by definition (that is what
-            # selected it), so joining it rendered a bare "Close ?". Name the
-            # mapper device when it is known, else the container itself.
             mappers = [fs.name for fs in (container.filesystems or [])
                        if getattr(fs, 'name', '')]
             target = ', '.join(mappers) if mappers else container.name
@@ -73,13 +68,10 @@ class MountDeviceDialog(CommonDialog):
         self.setLayout(self.main_layout)
 
     def mount_device(self, uuid):
-        """ Validate the form, unlock+mount the container, then record it.
+        """Validate the form, unlock and mount the container, then record it.
 
-            Nothing is executed unless every field validates (`errs` stays
-            empty), and the whole privileged part runs inside
-            `tray.busy_operation()` so the poller cannot rebuild the menu
-            between `cryptsetup open` and `mount`. On success the mount point
-            and password go into the history and the menu is refreshed.
+        Args:
+            uuid: Container identity.
         """
 
         tray, container = self.tray, None
@@ -92,13 +84,8 @@ class MountDeviceDialog(CommonDialog):
             errs.append(f'ERR: container w UUID={uuid} not found')
             return
 
-        # `errs` holds *errors only*. The container name used to be pushed in
-        # as a placeholder so callers could test `len(errs) <= 1`; that made
-        # the first element magic and the emptiness test off by one. The
-        # context line is now added only where the dialog is built.
         tray.update_mounts()
 
-        # Parse and validate inputs
         for key, field in self.inputs.items():
             text = field.text().strip()
             values[key] = text
@@ -115,11 +102,8 @@ class MountDeviceDialog(CommonDialog):
             else:
                 errs.append(f'ERR: unknown key({key})')
 
-        # Determine the device-mapper name for `cryptsetup open`. Normally the
-        # LUKS header has exactly one child filesystem whose name *is* the
-        # mapper name. Any other case (no filesystem parsed yet, or several)
-        # used to yield '' and end up as an empty argument to `cryptsetup
-        # open`, so derive a deterministic name from the container instead.
+        # The mapper name is the single child filesystem's name when there is
+        # exactly one; otherwise derive a deterministic name.
         filesystems = [fs for fs in (container.filesystems or [])
                        if getattr(fs, 'name', '')]
         if len(filesystems) == 1:
@@ -127,20 +111,12 @@ class MountDeviceDialog(CommonDialog):
         else:
             luks_device = f'{container.name}-luks'
 
-        # Proceed with mounting if no errors
         if not errs:
-            # The mount point is created by mount_luks_container(), as the user:
-            # the startup cleanup removes empty auto-mount folders with a plain
-            # rmdir, and a root-owned directory (what `sudo mkdir -p` left
-            # behind) can never be removed again by the unprivileged tray.
             mount_point = values['upon']
 
             self.hide_password()
             self.show_progress('Mount device...')
             try:
-                # Keep the poller out until cryptsetup open *and* mount have
-                # both finished; a refresh in between rebuilds the menu from
-                # a half-mounted container.
                 with tray.busy_operation('mount device'):
                     err = mount_luks_container(tray, container, values['password'],
                             upon=mount_point, readonly=values['readonly'],
@@ -162,22 +138,18 @@ class MountDeviceDialog(CommonDialog):
         self.accept()
 
     def unmount_device(self, uuid):
-        """ Unmount every filesystem of the container, then close the mapper.
+        """Unmount every filesystem of the container, then close the mapper.
 
-            `cryptsetup close` is skipped when an unmount failed, so nothing is
-            closed while files are still open. The unmounted mount points are
-            pruned through `tray.remove_if_auto()`, which only touches empty
-            directories below the validated auto-mount root.
+        Args:
+            uuid: Container identity.
         """
 
         errs, container = [], None
         tray = self.tray
         container = tray.containers.get(uuid, None)
 
-        # Show progress - disable buttons and add progress indicator
         self.show_progress("Unmount/Close device...")
         try:
-            # No menu refresh between the umount and the cryptsetup close.
             with tray.busy_operation('unmount device'):
                 tray.update_mounts()
                 busy_warns = set()
@@ -195,12 +167,8 @@ class MountDeviceDialog(CommonDialog):
                                 else:
                                     unmounteds.append(mount)
 
-                    # cryptsetup close takes the *mapper* name, which lives in
-                    # the child filesystem entries. An opened container may
-                    # legitimately have none -- the '‼' open-but-unmounted
-                    # anomaly -- so fall back to the container's own name (file
-                    # containers are their own mapper) and, failing that,
-                    # report a usable error.
+                    # `cryptsetup close` takes the mapper name from the child
+                    # filesystem, falling back to the container name.
                     close_name = filesystems[0].name if filesystems else ''
                     if not close_name and container.type == 'crypt':
                         close_name = container.name
@@ -217,15 +185,13 @@ class MountDeviceDialog(CommonDialog):
                 else:
                     errs.append(f'ERR: container w UUID={uuid} not found')
         finally:
-            # Hide progress indicator
             self.hide_progress()
 
         if errs:
             if not busy_warns:
-                # Name the container first, as the old placeholder element did.
                 heading = [f'{container.name}'] if container else []
                 self.alert_errors(heading + errs)
-            return # don't close dialog box
+            return
 
         tray.update_menu()
         self.accept()

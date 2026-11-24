@@ -1,50 +1,32 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-""" The persisted container history for LUKS TRAY.
-
-    One "vital" per container: its UUID, mount point, backing file and the
-    password that unlocks it. It is stored as JSON at the path `IniTool`
-    computes, either in clear text, encrypted with Fernet/PBKDF2 under a
-    master password, or unreadable until that password is supplied -- which is
-    what `status` reports ('clear_text', 'unlocked', 'locked').
-
-    Writes are atomic (temp file + rename) and 0600. On restore the entries are
-    re-checked against the system: a file container whose identity no longer
-    matches the file on disk is dropped, so a replaced or deleted crypt file
-    cannot silently inherit another volume's saved password. "Identity" is the
-    LUKS UUID, or the salt of a TrueCrypt/VeraCrypt header, which has no UUID
-    anything can read (see ContainerType.py).
-"""
+"""Persisted container history for LUKS TRAY."""
 # pylint: disable=invalid-name,broad-exception-caught
 # pylint: disable=line-too-long,too-many-instance-attributes
 # pylint: disable=too-many-return-statements
 
-import os
-import time
+import base64
+import hashlib
 import json
+import os
 import subprocess
 import tempfile
+import time
 from types import SimpleNamespace
-import hashlib
-import base64
+
 from cryptography.fernet import Fernet, InvalidToken
+
 from luks_tray.ContainerType import salt_identity
-from luks_tray.Utils import prt, prt_once, PROBE_TIMEOUT
+from luks_tray.Utils import PROBE_TIMEOUT, prt, prt_once
 
 
 def _describe(exc):
-    """ `exc` as a phrase a log line can end with, never just ''.
+    """Return `exc` as a non-empty phrase for a log line.
 
-        `cryptography` raises InvalidToken with no arguments on purpose: the
-        library will not say whether the MAC or the padding was wrong, so a
-        wrong password and a damaged file stay indistinguishable to whoever
-        might be guessing. `str()` on it is therefore the empty string, so a
-        line that interpolated `{exc}` ended at the colon -- "decryption
-        failed: " with nothing after it, which reads like a bug in the logger.
+    Args:
+        exc: Exception to describe.
 
-        The type name is what is left, and it is the fact the reader needs: a
-        typo (InvalidToken) looks different from a truncated or re-formatted
-        file (ValueError from the header split, JSONDecodeError, ...).
+    Returns:
+        str: The exception type and message, or just the type.
     """
     if str(exc).strip():
         return f'{type(exc).__name__}: {exc}'
@@ -52,31 +34,23 @@ def _describe(exc):
         return 'InvalidToken (wrong master password, or a damaged file)'
     return type(exc).__name__
 
+
 class HistoryClass:
-    """
-    Manages the history of LUKS-encrypted volumes, including passwords and mount points.
-    The history can be stored in a clear-text JSON format or an encrypted file
-    using a master password.
-    """
+    """Manage the stored container passwords, mount points and backing files."""
+
     ENCRYPTED_HEADER = b'{{{ENCRYPTED}}}'
-    # What follows the header is self-describing:
-    #     b'v2:<iterations>:' + <salt> + <Fernet token>
-    # Files written by older versions carry a bare Fernet token keyed by an
-    # unsalted single SHA-256 of the password; those are still readable, and
-    # they are re-written in the v2 format on the next save. The salt lives
-    # *inside* the existing header, so an older luks-tray opening a v2 file
-    # fails to decrypt and reports "locked" instead of treating the file as
-    # corrupt and re-initialising it.
     ENCRYPTED_VERSION = 2
-    KDF_ITERATIONS = 600_000  # OWASP-style floor for PBKDF2-HMAC-SHA256
+    KDF_ITERATIONS = 600_000
     KDF_SALT_BYTES = 16
-    # Upper bound for the identity cache keyed on (path, mtime, size), see
-    # _probe_back_file_identity(). One entry per backing file the history
-    # refers to is the normal occupancy; the cap only stops a long-lived tray
-    # from accumulating paths that were renamed or deleted.
     IDENTITY_CACHE_MAX = 64
 
     def __init__(self, path, master_password=''):
+        """Load state for the history file at `path`.
+
+        Args:
+            path: History file path.
+            master_password: Master password, when one is known.
+        """
         self.status = None # 'clear_text', 'unlocked', 'locked'
         self.master_password = master_password
         self.path = path
@@ -84,94 +58,83 @@ class HistoryClass:
         self.vitals = {}
         self.last_mtime = None
         self.file_existed = False
-        self.upons = set() # all known mounts
-        # path -> ((mtime_ns, size), identity). Filled by
-        # _probe_back_file_identity(); survives _json_data_to_namespaces() so
-        # that re-parsing the history does not shell out to blkid (or re-read
-        # a header salt) again for unchanged backing files.
+        self.upons = set()
         self._back_file_identity_cache = {}
 
     @staticmethod
     def make_ns(uuid):
-        """
-        Creates a new SimpleNamespace object to represent a LUKS volume's vital information.
+        """Return a blank vital record for `uuid`.
 
         Args:
-            uuid (str): The unique identifier for the volume -- the LUKS UUID,
-                or the salt identity of a TrueCrypt/VeraCrypt file.
+            uuid: History key for the container.
 
-        `meta_type` is '' until a container has been opened once: the header
-        type cannot be read out of a file, only asked for (see ContainerType.py
-        and `LuksOps.unlock_container()`), and the answer is remembered here so
-        that the next unlock asks for the right one first.
+        Returns:
+            SimpleNamespace: The blank record.
         """
         return SimpleNamespace(
-                uuid=uuid, # can be full path
+                uuid=uuid,
                 password='',
-                upon='', # "primary" mount only
-                back_file='', # backing file if any
-                meta_type='', # 'luks', 'tcrypt', or '' if not known yet
-                when=0,  # last update
+                upon='',
+                back_file='',
+                meta_type='',
+                when=0,
             )
 
     def _has_file_changed(self):
-        """
-        Checks if the history file has been modified or removed since the last check.
+        """Return True when the history file changed or disappeared.
 
         Returns:
-            bool: True if the file has changed or if it's the first check. False otherwise.
+            bool: True when a reload is needed.
         """
         file_exists_now = os.path.exists(self.path)
         if not file_exists_now:
-            return True  # Needs init
+            return True
         if self.master_password and self.status == 'locked':
-            return True # need to try password unlock
+            return True
         if file_exists_now:
             current_mtime = os.path.getmtime(self.path)
             if self.last_mtime is None or self.last_mtime != current_mtime:
                 self.last_mtime = current_mtime
                 self.file_existed = True
-                return True  # Changed
+                return True
         if not file_exists_now and self.file_existed:
             self.file_existed = False
             self.last_mtime = None
-            return True  # File was removed and needs re-init
-        return False  # Unchanged
-
+            return True
+        return False
 
     def get_vital(self, uuid):
-        """
-        Retrieves the vital information for a specific LUKS volume.
+        """Return the vital record for `uuid`, creating a blank one if needed.
 
         Args:
-            uuid (str): The UUID of the volume.
+            uuid: History key for the container.
 
         Returns:
-            SimpleNamespace: The object containing vital info, or a new empty one if not found.
+            SimpleNamespace: The stored or new record.
         """
         vital = self.vitals.get(uuid, None)
-        if not vital: # should not happen
+        if not vital:
             vital = self.make_ns(uuid)
         return vital
 
     def put_vital(self, vital):
-        """
-        Updates the vital information for a LUKS volume and marks the history as dirty.
+        """Store `vital` and save the history.
 
         Args:
-            vital (SimpleNamespace): The vital object to be saved.
+            vital: The record to store.
+
+        Returns:
+            None | str: The save error, if any.
         """
         self.vitals[vital.uuid] = vital
         vital.when = time.time()
         return self.save(force=True)
 
     def ensure_container(self, container):
-        """
-        Ensures a discovered container exists in the history.
-        Updates the container's details if a change is detected.
+        """Add `container` to the history, or update its details.
 
         Args:
-            container (SimpleNamespace): The container object to check and add.
+            container: Container record to check and add.
         """
         upon = container.upon
         if upon:
@@ -191,32 +154,28 @@ class HistoryClass:
             self.vitals[uuid].back_file = container.back_file
 
     def _namespaces_to_json_data(self):
-        """Converts internal vital namespaces to a JSON-serializable dictionary.
+        """Return copies of the vitals as JSON-serializable dictionaries.
 
-            Each vital is *copied* into a plain dict first. Without a master
-            password the copy's password is blanked (it must never be written
-            in clear text), and that blanking used to happen on
-            `vital.__dict__` itself -- the live object in `self.vitals` -- so
-            every clear-text save erased the remembered password. Dialogs then
-            prefilled an empty password and `update_history()` compared against
-            '' and considered the entry changed on every call.
+        Returns:
+            dict: The vital data keyed by container identity.
         """
         entries = {}
         for uuid, vital in self.vitals.items():
-            legit = dict(vars(vital))  # copy, never the live namespace
+            legit = dict(vars(vital))
             if not self.master_password:
-                legit['password'] = ''  # never persist it in clear text
+                legit['password'] = ''
             entries[uuid] = legit
         return entries
 
     def _password_to_fernet_key(self, salt=None, iterations=None) -> bytes:
-        """Derive a Fernet-compatible key from the master password.
+        """Derive a Fernet key from the master password.
 
-            With `salt`, PBKDF2-HMAC-SHA256 (>= KDF_ITERATIONS rounds) is used
-            -- that is what every new/updated file gets. Without one the legacy
-            derivation is reproduced (a single unsalted SHA-256 of the
-            password), which exists only so older encrypted files stay
-            readable.
+        Args:
+            salt: PBKDF2 salt; without one the legacy derivation is used.
+            iterations: PBKDF2 iteration count.
+
+        Returns:
+            bytes: The URL-safe Fernet key.
         """
         password = self.master_password.encode()
         if salt is None:
@@ -224,14 +183,16 @@ class HistoryClass:
         else:
             key = hashlib.pbkdf2_hmac('sha256', password, salt,
                     iterations or self.KDF_ITERATIONS)
-        # Base64 encode the key to make it suitable for Fernet
         return base64.urlsafe_b64encode(key)
 
     def _encrypt_payload(self, json_data):
         """Encrypt `json_data` with a fresh random salt.
 
-            Salt and iteration count travel with the payload, so the work
-            factor can be raised later without breaking existing files.
+        Args:
+            json_data: Encoded JSON payload.
+
+        Returns:
+            bytes: Version header, salt and Fernet token.
         """
         salt = os.urandom(self.KDF_SALT_BYTES)
         cipher = Fernet(self._password_to_fernet_key(salt))
@@ -241,8 +202,11 @@ class HistoryClass:
     def _decrypt_payload(self, payload):
         """Decrypt an encrypted payload.
 
-            Returns (json_str, used_legacy_kdf) so callers can schedule a
-            rewrite of legacy files.
+        Args:
+            payload: Encrypted bytes after the header.
+
+        Returns:
+            tuple: The decoded JSON text and whether the legacy KDF was used.
         """
         if payload.startswith(f'v{self.ENCRYPTED_VERSION}:'.encode()):
             _version, iterations, rest = payload.split(b':', 2)
@@ -250,17 +214,15 @@ class HistoryClass:
             token = rest[self.KDF_SALT_BYTES:]
             cipher = Fernet(self._password_to_fernet_key(salt, int(iterations)))
             return cipher.decrypt(token).decode('utf-8'), False
-        # Legacy: bare Fernet token keyed by the unsalted SHA-256 derivation
         cipher = Fernet(self._password_to_fernet_key())
         return cipher.decrypt(payload).decode('utf-8'), True
 
     def _write_atomic(self, data, binary):
-        """ Write `data` to self.path atomically, owner-readable/writable only.
+        """Write `data` to `self.path` atomically with mode `0600`.
 
-            A temp file is created in the *same* directory (so os.replace() is
-            guaranteed to be a same-filesystem rename), written, fsync'd and
-            chmod'd 0600, then swapped in. A crash or short write can therefore
-            never leave a truncated or world-readable history file behind.
+        Args:
+            data: Bytes or text to write.
+            binary: True to write bytes, false to write UTF-8 text.
         """
         tmp_path = None
         try:
@@ -271,8 +233,8 @@ class HistoryClass:
                            encoding=None if binary else 'utf-8') as file:
                 file.write(data)
                 file.flush()
-                os.fsync(file.fileno())  # flush before the rename
-            os.chmod(tmp_path, 0o600)    # mkstemp's default, made explicit
+                os.fsync(file.fileno())
+            os.chmod(tmp_path, 0o600)
             os.replace(tmp_path, self.path)
             tmp_path = None
         finally:
@@ -280,24 +242,17 @@ class HistoryClass:
                 try:
                     os.remove(tmp_path)
                 except OSError as exc:
-                    # A stray 0600 temp file next to the history is harmless,
-                    # but it means the write failed *and* its cleanup failed.
                     prt(f'WARN: cannot remove leftover {tmp_path!r}: {exc}')
 
     def save(self, force=False, drop_encryption=False):
-        """
-        Saves the history file. Encrypts with the master password if set,
-        otherwise saves as plain text.
+        """Save the history, encrypted when a master password is set.
 
-        A clear-text write is refused while the file on disk is encrypted and
-        this process holds no password: that is the one combination in which a
-        save destroys data nobody can read back, and it used to be reachable
-        from a "Remove Password" button while the history was locked (the empty
-        password looked like a deliberate choice, and `history.json` was
-        replaced with `{}`). Dropping the encryption is a decision, not a
-        side effect, so the caller that has just proved it can read the file --
-        which means `master_password` was set when the content was loaded --
-        asks for it with `drop_encryption=True`.
+        Args:
+            force: Save even when the history is not marked dirty.
+            drop_encryption: Allow a clear-text write over an encrypted file.
+
+        Returns:
+            None | str: The error text, or None on success.
         """
         if not self.dirty and not force:
             return None
@@ -307,18 +262,15 @@ class HistoryClass:
         try:
             entries = self._namespaces_to_json_data()
             if self.master_password:
-                # Save Encrypted with Header + salted PBKDF2 payload
                 json_data = json.dumps(entries).encode('utf-8')
                 payload = self.ENCRYPTED_HEADER + self._encrypt_payload(json_data)
                 self._write_atomic(payload, binary=True)
             else:
-                # Save Clear-Text
                 self._write_atomic(json.dumps(entries, indent=4), binary=False)
         except Exception as e:
             prt(f'Error saving history: {e}')
             return f'failed saving history: {e}'
 
-        # Update state and mtime upon successful save
         self.dirty = False
         self.last_mtime = os.path.getmtime(self.path) if os.path.exists(self.path) else None
         self.file_existed = os.path.exists(self.path)
@@ -326,12 +278,10 @@ class HistoryClass:
         return None
 
     def disk_is_encrypted(self):
-        """ True when the file on disk still starts with the encrypted header.
+        """Return True when the file on disk starts with the encrypted header.
 
-            Only the header is read. The question this answers is "would a
-            clear-text write destroy something this process cannot read?", not
-            "is the payload valid" -- a corrupt encrypted file is exactly the
-            kind that must not be overwritten either.
+        Returns:
+            bool: Whether a clear-text write would destroy readable data.
         """
         try:
             with open(self.path, 'rb') as file:
@@ -340,13 +290,10 @@ class HistoryClass:
             return False
 
     def verify_password_on_disk(self):
-        """ True when the file on disk decrypts with `self.master_password`.
+        """Return True when the file on disk decrypts with the master password.
 
-            `restore()` cannot answer this right after a save: it short-cuts on
-            an unchanged file stamp, which the save just set. The password is
-            the only key to the history and there is no recovery, so the caller
-            that changes it checks the round trip before telling the user the
-            new password is in effect.
+        Returns:
+            bool: Whether the file reads back successfully.
         """
         try:
             with open(self.path, 'rb') as file:
@@ -363,88 +310,56 @@ class HistoryClass:
 
     @staticmethod
     def _file_stamp(path):
-        """(mtime, size) of `path`, or None if it cannot be stat'ed.
+        """Return `(mtime, size)` of `path`, or None when it cannot be read.
 
-            A cheap identity for "has this backing file changed since we last
-            looked?": no content hashing, no reads, one stat call.
+        Args:
+            path: File path.
+
+        Returns:
+            tuple | None: The file stamp.
         """
         try:
             info = os.stat(path)
         except OSError as exc:
-            # None is a usable answer (the caller then does not cache), but a
-            # back_file that cannot be stat'ed is also the first sign that the
-            # history entry is about to be purged -- say so once per path.
             prt_once(f'stat back_file {path}', f'note: cannot stat {path!r}: {exc}')
             return None
         return (info.st_mtime_ns, info.st_size)
 
     def _blkid_uuid(self, path):
-        """UUID of the LUKS header in `path`, or None when blkid had no answer.
+        """Return the LUKS UUID of `path`, or None when the probe failed.
 
-            `''` is a *clean* answer -- "there is no LUKS signature here" --
-            while None means the probe itself failed (a timeout, an unreadable
-            path, no `blkid` installed) and says nothing about the contents.
-            The difference matters to the caller: a disk that was busy for a
-            moment must not cost the user a history entry.
+        Args:
+            path: Container file path.
+
+        Returns:
+            str | None: The UUID, `''` for no signature, or None on failure.
         """
         try:
-            # The deadline matters here because this runs while the tray is
-            # loading history: a back_file on hung media would otherwise stall
-            # the caller for as long as the mount is wedged.
-            result = subprocess.run(['blkid', '-o', 'value', '-s', 'UUID', path],
+            result = subprocess.run(['blkid', '-o', 'value', '-s', 'UUID', path], # noqa: UP022
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     text=True, check=True, timeout=PROBE_TIMEOUT)
         except subprocess.TimeoutExpired:
-            # Unknown -- not "no UUID". Caching this would permanently purge a
-            # perfectly valid entry because a disk was briefly busy.
             prt(f'blkid timed out after {PROBE_TIMEOUT}s: {path}')
             return None
         except subprocess.CalledProcessError as exce:
             complaint = (exce.stderr or '').strip()
             if complaint:
-                # "cannot open ...: Permission denied", I/O errors and the
-                # like: no verdict about the contents, so no caching.
                 prt(f'blkid failed for {path}: {complaint}')
                 return None
-            # blkid exits 2 with no complaint when the file simply has no
-            # signature -- a real answer, just an empty one.
             return ''
-        except OSError as exce:  # blkid missing, fork failure, ...
+        except OSError as exce:
             prt(f'blkid could not run for {path}: {exce}')
             return None
-        return result.stdout.strip()  # the UUID as a string
+        return result.stdout.strip()
 
     def _probe_back_file_identity(self, path):
-        """ Identity of the container stored in `path`, None if unknown.
+        """Return the identity of the container stored in `path`.
 
-            There are two identities, one per header type:
+        Args:
+            path: Backing file path.
 
-            - LUKS: the UUID `blkid` reads out of the cleartext header -- the
-              same value lsblk reports for the loop device;
-            - TrueCrypt/VeraCrypt: the salt its encrypted header starts with,
-              hashed. blkid answers "no signature" for such a file, which is
-              exactly how that fallback is reached (see ContainerType.py).
-
-            Both change when the container is re-created, which is what the
-            purge check in `_json_data_to_namespaces()` needs, and neither
-            needs the passphrase.
-
-            `blkid` is an external program and this runs for every history
-            entry with a back_file. `restore()` re-parses the whole history
-            whenever its mtime moves -- which any mount, unmount or newly
-            discovered container causes -- so an uncached probe meant one
-            `blkid` per entry per re-parse, on the Qt main thread.
-
-            The answer can only change when the file's contents change, so it
-            is remembered against (mtime, size): writing, reformatting or
-            truncating the file always moves at least one of them, which is
-            why a stale identity cannot outlive the data it describes.
-
-            Negative answers are cached too (a back_file that legitimately
-            carries no header should stop being probed), but *only* when the
-            probe answered cleanly. A timeout, an unstattable path or an
-            I/O/permission complaint is not an answer: None is returned
-            uncached, and the caller keeps the entry.
+        Returns:
+            str | None: The UUID or salt identity, or None when unknown.
         """
         stamp = self._file_stamp(path)
         if stamp is not None:
@@ -458,28 +373,25 @@ class HistoryClass:
             identity = salt_identity(path)
         if stamp is not None:
             if len(self._back_file_identity_cache) >= self.IDENTITY_CACHE_MAX:
-                # Rebuilt lazily, so dropping everything is cheaper than
-                # maintaining an LRU: worst case one probe per live entry.
                 self._back_file_identity_cache.clear()
             self._back_file_identity_cache[path] = (stamp, identity)
         return identity
 
     def _json_data_to_namespaces(self, entries):
-        """
-        Converts a JSON-serializable dictionary back into internal vital namespaces.
-        Also validates `back_file` entries and purges invalid ones.
-        """
+        """Replace the vitals with `entries`, purging stale backing files.
 
+        Args:
+            entries: Decoded history mapping.
+
+        Returns:
+            bool: True when `entries` was a mapping.
+        """
         self.vitals = {}
         purges = []
         if not isinstance(entries, dict):
             self.status = 'locked'
             return False
         for uuid, entry in entries.items():
-            # Earlier versions wrote uuid-less updates under the JSON key
-            # "null" (uuid=None was passed to update_history). Such entries
-            # carry no usable identity or back_file -- drop them on load and
-            # rewrite the file.
             if uuid is None or str(uuid).strip().lower() in ('', 'none', 'null'):
                 self.dirty = True
                 continue
@@ -489,8 +401,6 @@ class HistoryClass:
                     legit[key] = entry[key]
             ns = SimpleNamespace(**legit)
             if ns.back_file:
-                # None means the probe could not answer; only a real, different
-                # identity is a reason to forget a password.
                 identity = self._probe_back_file_identity(ns.back_file)
                 if identity is not None and identity != uuid:
                     purges.append(uuid)
@@ -502,27 +412,11 @@ class HistoryClass:
             self.dirty = True
         return True
 
-# ... (inside HistoryClass)
-
     def lock(self):
-        """ Forget the master password and everything decrypted with it.
+        """Forget the master password and the decrypted vitals.
 
-            The second line is the point of this method. A lock that only flips
-            `status` would leave every container password sitting in `vitals`,
-            one attribute read away from any later caller -- the menu would look
-            locked while the secrets it exists to protect stayed in memory. So
-            the decrypted namespaces go too, and the next `restore()` with the
-            right password rebuilds them from the file (the whole point of the
-            file being the only copy).
-
-            Nothing is written: a locked history has nothing this version is
-            willing to write, and the file on disk is already the encrypted one.
-            `dirty` is dropped with the entries it described, so a later `save()`
-            cannot claim there is something to write.
-
-            Returns True only when *this* call is what locked the history, so a
-            caller can tell a real transition from the second and third session
-            event of the same screen lock.
+        Returns:
+            bool: True when this call locked an unlocked history.
         """
         if self.status != 'unlocked':
             return False
@@ -533,86 +427,61 @@ class HistoryClass:
         return True
 
     def restore(self):
-        """
-        Loads the history file from disk. It handles:
-        1. Missing/Corrupt files (re-init to clear_text).
-        2. Clear-text JSON (status='clear_text').
-        3. Encrypted with correct password (status='unlocked').
-        4. Encrypted with wrong/missing password (status='locked').
+        """Load the history file from disk.
+
+        Returns:
+            bool: True when the history was loaded or was already current.
         """
         if not self._has_file_changed():
-            return True  # No changes, no need to reload
+            return True
 
-        # --- Helper for Corrupt/Missing/Uninitialized ---
         def re_init_history(reason="Missing or corrupt history file."):
-            """Re-initializes history to an empty clear_text state."""
+            """Replace the history with an empty clear-text one."""
             prt(f"Warning: {reason} Recreating an empty history.")
             self._json_data_to_namespaces({})
-            self.save(force=True)  # This will save as clear_text if master_password is not set
+            self.save(force=True)
             self.status = 'clear_text'
             return False
 
-        # --- State 1: File Missing/Uninitialized ---
         if not self.file_existed:
-            self.status = None # The initial state you mentioned
+            self.status = None
             return re_init_history("History file is missing.")
 
-        # --- Read the File Content ---
         try:
             with open(self.path, 'rb') as file:
                 data = file.read()
-        except IOError as e:
+        except OSError as e:
             return re_init_history(f"Failed to read file: {e}")
 
-        # --- Check for Encrypted Header ---
         if data.startswith(self.ENCRYPTED_HEADER):
             encrypted_data = data[len(self.ENCRYPTED_HEADER):]
 
             if not self.master_password:
-                # State 4: Encrypted but no master_password provided (locked)
-                # A note, not a warning: on a desktop start the tray has no
-                # password to offer until the user unlocks it, so this is the
-                # expected state, not a failure worth counting.
                 prt("Note: History file is encrypted, but no master password was provided.")
                 self.status = 'locked'
                 return False
 
-            # Try to decrypt
             try:
                 decrypted_str, used_legacy_kdf = self._decrypt_payload(encrypted_data)
                 decrypted_data = json.loads(decrypted_str)
                 self._json_data_to_namespaces(decrypted_data)
-
-                # State 3: Successfully Decrypted (unlocked)
                 self.status = 'unlocked'
                 if used_legacy_kdf:
-                    # upgrade to the salted PBKDF2 format on the next save
                     self.dirty = True
                 return True
             except Exception as exc:                    # pylint: disable=broad-except
-                # Decryption failed (wrong password or corrupt encrypted data).
-                # The exception type is part of the message because "failed"
-                # alone cannot tell a typo (InvalidToken) from a truncated
-                # file; `_describe()` is needed because InvalidToken's own text
-                # is empty.
                 prt("Warning: History file appears encrypted, but decryption"
                     f" failed: {_describe(exc)}")
                 self.status = 'locked'
                 return False
 
-        # --- Attempt Clear-Text JSON Load ---
-        else:
-            try:
-                decrypted_str = data.decode('utf-8')
-                decrypted_data = json.loads(decrypted_str)
-                self._json_data_to_namespaces(decrypted_data)
-
-                # State 2: Valid Clear-Text JSON
-                self.status = 'clear_text'
-                return True
-            except json.JSONDecodeError:
-                # Corrupt file that's not encrypted
-                return re_init_history("History file is present but not valid JSON (corrupt).")
-            except Exception as e:
-                # Other error (e.g., unexpected encoding)
-                return re_init_history(f"Error reading clear-text history file: {e}")
+        try:
+            decrypted_str = data.decode('utf-8')
+            decrypted_data = json.loads(decrypted_str)
+            self._json_data_to_namespaces(decrypted_data)
+            self.status = 'clear_text'
+            return True
+        except json.JSONDecodeError:
+            return re_init_history("History file is present but not valid JSON (corrupt).")
+        except Exception as e:
+            return re_init_history(f"Error reading clear-text history file: {e}")

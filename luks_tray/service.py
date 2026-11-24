@@ -1,55 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-""" Install, inspect, refresh and remove the luks-tray `systemd --user` unit.
-
-    One unit ships in `luks_tray/resources/systemd/luks-tray.service`, and it is
-    the single source of truth.  It ships inside the wheel (flit includes
-    everything under the module directory), and `--svc-install` copies it to
-    `~/.config/systemd/user/luks-tray.service`.  That verb is the only one that
-    writes or enables the file; `--svc-start` and `--svc-restart` operate on a
-    unit that is already installed.
-
-    There is one unit rather than one per desktop or per display server:
-    luks-tray has no per-desktop behaviour to encode, and its own startup code
-    finds the session it was started into.  What it needs from that session is
-    the *display* (`WAYLAND_DISPLAY` or `DISPLAY`, which Qt turns into a
-    platform plugin).  A user unit cannot inherit that from the compositor, so
-    `render()` appends what the installing shell exported, after `ExecStart=`,
-    where a later `Environment=` line wins.  *Which* display variable is
-    appended is decided by `Session.display_server()` from the socket that is
-    listening, so a Wayland install pins `WAYLAND_DISPLAY`, an X11 install pins
-    `DISPLAY`, and neither pins the other one -- a Wayland login's Xwayland
-    display included.
-
-    The desktop *name* (`XDG_CURRENT_DESKTOP`/`DESKTOP_SESSION`) is deliberately
-    not pinned.  A unit inherits the user manager's environment, and every
-    session that starts `graphical-session.target` can refresh it with
-    `dbus-update-activation-environment`; a value copied at install time would
-    outrank that refresh forever, so switching from one window manager to
-    another would leave Qt and `--show-window-rules` naming the old desktop.
-
-    That appended copy is a snapshot of one login, and a unit's own
-    `Environment=` wins over what the *next* session exports, so it goes stale
-    the moment the user logs in as the other display server -- which is a thing
-    people do often.  The snapshot is therefore a fallback only:
-    [`luks_tray.Session`](luks_tray/Session.py:1) re-derives `XDG_SESSION_TYPE`,
-    `WAYLAND_DISPLAY` and `DISPLAY` at startup from the socket that is
-    listening (and from `loginctl` when the environment names none), so an
-    installed unit keeps working across a switch and there is nothing to
-    remember.  Re-running `--svc-install` after a switch is optional: it only
-    refreshes the snapshot.
-
-    The unit deliberately does not redirect stdout: `main()` already points
-    `prt()` at `~/.config/luks-tray/debug.log` whenever stdout is not a
-    terminal, so the applet's own log stays the one place to look.  A
-    `StandardOutput=append:` line would also hand systemd a path it opens but
-    never creates, failing every start with `EXIT_STDOUT` (status 209).
-
-    Nothing here shells out to systemctl on its own: the verbs are built as
-    `Step` lists by the `plan_*()` functions and performed by `execute()`, with
-    the subprocess call injected.  That keeps the whole policy testable on a
-    machine without a systemd session.
-"""
+"""Install, inspect, refresh and remove the luks-tray `systemd --user` unit."""
 import os
 import re
 import subprocess
@@ -63,16 +13,10 @@ UNIT_NAME = 'luks-tray.service'
 COMMAND = 'systemctl'
 EXECUTABLE = 'luks-tray'
 
-#: The one path the shipped unit runs.  Every install method (pipx, pip
-#: --user, a distribution package) writes it, so the unit never has to know
-#: which one built it -- and `--svc-install` from a virtualenv produces the
-#: same file as `--svc-install` from any other shell.
 LAUNCHER = Path('.local') / 'bin' / EXECUTABLE
 
-#: Directory holding the units shipped in the wheel.  Tests repoint this.
 SOURCE_DIR = Path(__file__).resolve().parent / 'resources' / 'systemd'
 
-# `--svc-status` exit codes: the one verb meant to be used from `if`.
 STATUS_ACTIVE = 0
 STATUS_INACTIVE = 1
 STATUS_ABSENT = 2
@@ -80,30 +24,28 @@ STATUS_ABSENT = 2
 OK = 0
 FAILED = 1
 
-#: How long the applet waits for `systemctl --no-block` to accept a restart.
-#: Called from a Qt action slot, so a wedged user manager must not freeze the
-#: menu for longer than this.
 SYSTEMCTL_TIMEOUT = 10
 
 _EXEC_START_RE = re.compile(r'^ExecStart=(.*)$', re.MULTILINE)
 _CGROUP_UNIT_RE = re.compile(r'([A-Za-z0-9@_.\-]+\.service)')
-#: A user session's own manager, which is in every process's cgroup and is not
-#: what supervises the applet -- a terminal under it must not look supervised.
 _USER_MANAGER_RE = re.compile(r'^user@[0-9]*\.service$')
 
 
 class ServiceError(Exception):
-    """ A `--svc-*` request that cannot be carried out as stated. """
+    """A `--svc-*` request that cannot be carried out as stated."""
 
 
 @dataclass(frozen=True)
 class Step:
-    """ One effect, in the order the verbs have to perform them.
+    """One effect, in the order the verbs perform them.
 
-        Exactly one of `argv` (run a command), `write` (create or replace a
-        file), `mkdir` (create a directory) or `remove` (delete a file) is set;
-        `describe` is what the user is shown before anything happens, and
-        `hint` is appended to the error if the step turns out to fail.
+    Attributes:
+        describe: Text shown to the user before the step runs.
+        argv: Command to run, when this step runs a command.
+        write: `(path, content)` to write, when this step writes a file.
+        remove: File to delete, when this step removes one.
+        mkdir: Directory to create, when this step creates one.
+        hint: Text appended to the error when the step fails.
     """
     describe: str
     argv: tuple = ()
@@ -115,7 +57,14 @@ class Step:
 
 @dataclass
 class Plan:
-    """ What a verb intends to do, plus anything the user should know first. """
+    """What a verb intends to do, plus anything the user should know first.
+
+    Attributes:
+        steps: Steps to perform in order.
+        notes: Messages to print before the steps.
+        details: Diff lines describing the intended change.
+        prompt: Question asked before a destructive step.
+    """
     steps: list = field(default_factory=list)
     notes: list = field(default_factory=list)
     details: list = field(default_factory=list)
@@ -124,7 +73,16 @@ class Plan:
 
 @dataclass
 class Status:
-    """ Current on-disk and systemd state of the installed unit. """
+    """Current on-disk and systemd state of the installed unit.
+
+    Attributes:
+        path: Installed unit path.
+        installed: Whether the unit file exists.
+        enabled: Whether the unit is enabled.
+        active: Whether the unit is running.
+        up_to_date: Whether the file matches the shipped unit.
+        failed: Whether the last start failed.
+    """
     path: Path
     installed: bool
     enabled: bool
@@ -134,11 +92,20 @@ class Status:
 
 
 def _env(env=None):
+    """Return a plain environment mapping."""
     return dict(os.environ if env is None else env)
 
 
 def run_command(argv, timeout=60):
-    """ Run one command and return `(exit status, combined output)`. """
+    """Run one command and return `(exit status, combined output)`.
+
+    Args:
+        argv: Command and arguments.
+        timeout: Deadline in seconds.
+
+    Returns:
+        tuple: Exit status and combined output.
+    """
     try:
         completed = subprocess.run(
             list(argv), capture_output=True, text=True, check=False, timeout=timeout)
@@ -148,53 +115,94 @@ def run_command(argv, timeout=60):
 
 
 def systemctl(*args):
-    """ Build a `systemctl --user` argv tuple. """
+    """Build a `systemctl --user` argv tuple.
+
+    Args:
+        *args: Arguments for the command.
+
+    Returns:
+        tuple: The argv tuple.
+    """
     return (COMMAND, '--user', *args)
 
 
 def systemd_available(env=None):
-    """ True if a user manager can be talked to on this machine. """
+    """Return True when a user manager can be reached.
+
+    Args:
+        env: Environment mapping to read.
+
+    Returns:
+        bool: Whether systemd and a runtime directory are present.
+    """
     return Path('/run/systemd/system').is_dir() and bool(_env(env).get('XDG_RUNTIME_DIR'))
 
 
 def unit_dir(env=None):
-    """ Return `$XDG_CONFIG_HOME/systemd/user` (defaulting to ~/.config). """
+    """Return `$XDG_CONFIG_HOME/systemd/user`, defaulting to `~/.config`.
+
+    Args:
+        env: Environment mapping to read.
+
+    Returns:
+        Path: The unit directory.
+    """
     base = _env(env).get('XDG_CONFIG_HOME') or str(Path.home() / '.config')
     return Path(base) / 'systemd' / 'user'
 
 
 def installed_unit(env=None):
-    """ Return the path the unit is installed to. """
+    """Return the path the unit is installed to.
+
+    Args:
+        env: Environment mapping to read.
+
+    Returns:
+        Path: The installed unit path.
+    """
     return unit_dir(env) / UNIT_NAME
 
 
 def read_unit(path):
-    """ Read a unit file as text. """
+    """Read a unit file as text.
+
+    Args:
+        path: Unit file path.
+
+    Returns:
+        str: The file contents.
+    """
     return Path(path).read_text(encoding='utf-8')
 
 
 def log_path(env=None):
-    """ Return the applet's own log, spelled the way IniTool spells it.
+    """Return the applet's log path.
 
-        Display-only: this file is written by `Utils.configure_log()`, and the
-        function exists so a refused or failed unit can point at it.
+    Args:
+        env: Environment mapping to read.
+
+    Returns:
+        Path: The debug log path.
     """
     home = _env(env).get('HOME') or str(Path.home())
     return Path(home) / '.config' / 'luks-tray' / 'debug.log'
 
 
 def _expand(path, env):
-    """ Expand the `%h`/`%U` specifiers systemd would expand in a path. """
+    """Expand the `%h` and `%U` specifiers systemd would expand."""
     home = _env(env).get('HOME') or str(Path.home())
     return path.replace('%h', home).replace('%U', str(os.getuid()))
 
 
 def installed_executable(text, env=None):
-    """ Return the executable named by the first `ExecStart=`, expanded.
+    """Return the executable named by the first `ExecStart=`, expanded.
 
-        systemd expands `%h` when it starts the unit, so the comparison that
-        matters -- does this unit run `~/.local/bin/luks-tray`? -- has to
-        expand it the same way.
+    Args:
+        text: Unit file text.
+        env: Environment mapping to read.
+
+    Returns:
+        str | None: The executable path, or None when no `ExecStart=` exists.
     """
     match = _EXEC_START_RE.search(text)
     if not match:
@@ -209,13 +217,27 @@ def installed_executable(text, env=None):
 
 
 def launcher_path(env=None):
-    """ Return `~/.local/bin/luks-tray`: the path the shipped unit runs. """
+    """Return `~/.local/bin/luks-tray`.
+
+    Args:
+        env: Environment mapping to read.
+
+    Returns:
+        Path: The launcher path.
+    """
     home = _env(env).get('HOME') or str(Path.home())
     return Path(home) / LAUNCHER
 
 
 def launcher_problem(path):
-    """ Return why `path` cannot launch the applet, or None when it can. """
+    """Return why `path` cannot launch the applet, or None when it can.
+
+    Args:
+        path: Launcher path.
+
+    Returns:
+        str | None: The problem text.
+    """
     path = Path(path)
     if path.is_symlink() and not path.exists():
         return f'{path} is a dangling symlink'
@@ -229,12 +251,23 @@ def launcher_problem(path):
 
 
 def _launcher_hint():
+    """Return the install hint for a missing launcher."""
     return ('install it with: pipx install luks-tray (or pipx install --editable .'
             ' for a checkout, or python -m pip install --user luks-tray)')
 
 
 def require_launcher(env=None):
-    """ Return the launcher path, or refuse because no unit could start. """
+    """Return the launcher path, or refuse because no unit could start.
+
+    Args:
+        env: Environment mapping to read.
+
+    Returns:
+        Path: The launcher path.
+
+    Raises:
+        ServiceError: When the launcher cannot start the applet.
+    """
     path = launcher_path(env)
     problem = launcher_problem(path)
     if problem:
@@ -243,7 +276,17 @@ def require_launcher(env=None):
 
 
 def template(source=None):
-    """ Return the shipped unit file, or refuse when the package lacks it. """
+    """Return the shipped unit file, or refuse when the package lacks it.
+
+    Args:
+        source: Directory holding the unit; defaults to the packaged copy.
+
+    Returns:
+        Path: The unit file path.
+
+    Raises:
+        ServiceError: When the unit file is missing.
+    """
     folder = SOURCE_DIR if source is None else Path(source)
     path = folder / UNIT_NAME
     if not path.is_file():
@@ -252,14 +295,13 @@ def template(source=None):
 
 
 def display_keys(env=None):
-    """ Return the display variables a unit rendered here should pin.
+    """Return the display variables a unit rendered here should pin.
 
-        Decided from the display server that is actually listening, not from
-        `XDG_SESSION_TYPE`: one unit serves both kinds of session, and a Wayland
-        login has an Xwayland `DISPLAY` as well, so pinning by marker alone
-        would write the wrong one into the file.  Nothing listening (a bare
-        `ssh` login) pins nothing -- the applet asks the machine at startup
-        either way, so an empty answer is not a failure.
+    Args:
+        env: Environment mapping to read.
+
+    Returns:
+        tuple: Variable names to pin.
     """
     kind = Session.display_server(_env(env))
     if kind == Session.WAYLAND:
@@ -270,14 +312,17 @@ def display_keys(env=None):
 
 
 def render(text, env=None):
-    """ Return `text` with this login's display appended after `ExecStart=`.
+    """Return `text` with this login's display appended after `ExecStart=`.
 
-        Only the display variable that names a listening server is appended
-        (see `display_keys()`): a unit rendered from a bare `ssh` login must not
-        invent one.  The desktop name is left to the user manager's environment,
-        so a later session can correct it without reinstalling the unit.
-        Appending after `ExecStart=` is safe because systemd collects every
-        `Environment=` line and the last assignment to a name wins.
+    Args:
+        text: Unit file text.
+        env: Environment mapping to read.
+
+    Returns:
+        str: The rendered unit.
+
+    Raises:
+        ServiceError: When the unit has no `ExecStart=` line.
     """
     env = _env(env)
     overrides = [f'Environment={key}={env[key]}'
@@ -294,12 +339,28 @@ def render(text, env=None):
 
 
 def rendered_unit(env=None):
-    """ Return the shipped unit, rendered for this environment. """
+    """Return the shipped unit, rendered for this environment.
+
+    Args:
+        env: Environment mapping to read.
+
+    Returns:
+        str: The rendered unit.
+    """
     return render(read_unit(template()), _env(env))
 
 
 def probe(rendered=None, env=None, run=run_command):
-    """ Read the installed unit and ask systemd about it. """
+    """Read the installed unit and ask systemd about it.
+
+    Args:
+        rendered: Rendered unit text to compare against, when available.
+        env: Environment mapping to read.
+        run: Command runner; defaults to `run_command`.
+
+    Returns:
+        Status: The current unit state.
+    """
     path = installed_unit(env)
     installed = path.is_file()
     enabled = active = failed = False
@@ -318,7 +379,15 @@ def probe(rendered=None, env=None, run=run_command):
 
 
 def changed_lines(current, wanted):
-    """ Return `-`/`+` lines describing how `current` differs from `wanted`. """
+    """Return `-`/`+` lines describing how `current` differs from `wanted`.
+
+    Args:
+        current: Current text.
+        wanted: Desired text.
+
+    Returns:
+        list: Diff lines, or one line when the difference is large.
+    """
     old, new = current.splitlines(), wanted.splitlines()
     spare = sum(1 for line in old if line not in new) + sum(1 for line in new if line not in old)
     if spare > 12:
@@ -329,12 +398,17 @@ def changed_lines(current, wanted):
 
 
 def plan_install(rendered, status, force=False, holder=None, env=None):
-    """ Write the unit if needed, reload, and enable it (without starting).
+    """Write the unit if needed, reload, and enable it without starting.
 
-        Installing never starts the applet: the user may already be running one
-        from a desktop autostart, and starting it here would either exit 3
-        against the lock or fight that instance.  The unit takes over at the
-        next login, which is what "starting at login" means.
+    Args:
+        rendered: Rendered unit text.
+        status: Current unit state.
+        force: Accepted for API symmetry; unused.
+        holder: Pid of a running instance outside systemd.
+        env: Environment mapping to read.
+
+    Returns:
+        Plan: The install plan.
     """
     plan = Plan()
     target = status.path
@@ -368,11 +442,13 @@ def plan_install(rendered, status, force=False, holder=None, env=None):
 
 
 def _systemd_hint():
+    """Return the systemd inspection hint."""
     return (f'inspect it with: systemctl --user status {UNIT_NAME};'
             f' the applet\'s own log is {log_path()}')
 
 
 def _running_outside_systemd(holder):
+    """Return the error for a running instance outside systemd."""
     return ServiceError(
         f'luks-tray is already running outside systemd (pid {holder}); the unit'
         ' would exit 3 against the single-instance lock.  Remove the desktop'
@@ -380,22 +456,14 @@ def _running_outside_systemd(holder):
 
 
 def _require_installed(status):
-    """ Refuse a start/restart that has no unit to operate on. """
+    """Refuse a start or restart that has no unit to operate on."""
     if not status.installed:
         raise ServiceError(
             f'{UNIT_NAME} is not installed; run luks-tray --svc-install first')
 
 
 def _refuse_moved_unit(status, env):
-    """ Refuse to start a unit that does not run the launcher.
-
-        The shipped unit is a constant: it names `~/.local/bin/luks-tray` and
-        never an installation.  A unit naming anything else was either hand
-        edited or installed by a script that baked in an absolute path -- usually
-        a project virtualenv's, which is how a service keeps running a copy
-        nobody edits.  Rewriting the unit is `--svc-install`'s decision, so it is
-        refused here rather than fixed here.
-    """
+    """Refuse to start a unit that does not run the launcher."""
     try:
         installed = installed_executable(read_unit(status.path), env)
     except OSError:
@@ -408,7 +476,7 @@ def _refuse_moved_unit(status, env):
 
 
 def _note_stale_unit(plan, status, rendered):
-    """ Point at --svc-install when the file differs, without changing it. """
+    """Point at `--svc-install` when the file differs, without changing it."""
     if rendered is not None and status.installed and not status.up_to_date:
         plan.notes.append(
             f'{status.path} differs from the shipped unit;'
@@ -416,12 +484,17 @@ def _note_stale_unit(plan, status, rendered):
 
 
 def plan_start(rendered, status, force=False, holder=None, env=None):
-    """ Enable if needed and start an installed unit; never writes the unit.
+    """Enable if needed and start an installed unit; never writes the unit.
 
-        Installing is a separate, explicit act (`--svc-install`).  `start` only
-        operates on the unit that is already installed, so it cannot silently
-        commit the machine to systemd.  It does enable a disabled unit:
-        "start" means "run now and come back at your next login".
+    Args:
+        rendered: Rendered unit text.
+        status: Current unit state.
+        force: Accepted for API symmetry; unused.
+        holder: Pid of a running instance outside systemd.
+        env: Environment mapping to read.
+
+    Returns:
+        Plan: The start plan.
     """
     _require_installed(status)
     _refuse_moved_unit(status, env)
@@ -437,8 +510,6 @@ def plan_start(rendered, status, force=False, holder=None, env=None):
         if status.up_to_date or rendered is None:
             plan.notes.append(f'{UNIT_NAME} is already running')
         else:
-            # `start` on an active unit is a no-op; restarting is a separate
-            # verb so that `start` never changes what is running.
             plan.notes.append(
                 f'{UNIT_NAME} is already running; the installed unit differs from the'
                 ' shipped one, so run luks-tray --svc-install to update it or'
@@ -453,13 +524,17 @@ def plan_start(rendered, status, force=False, holder=None, env=None):
 
 
 def plan_restart(rendered, status, force=False, holder=None, env=None):
-    """ Restart an installed unit so it runs the code its launcher names.
+    """Restart an installed unit so it runs its current code.
 
-        An editable install (or a `git pull`) changes the *code* without
-        changing the unit file, so neither `--svc-install` nor `--svc-start`
-        can notice it: only a restart makes systemd load the modules the
-        launcher resolves to.  A restart never installs, enables or rewrites
-        the unit.
+    Args:
+        rendered: Rendered unit text.
+        status: Current unit state.
+        force: Accepted for API symmetry; unused.
+        holder: Pid of a running instance outside systemd.
+        env: Environment mapping to read.
+
+    Returns:
+        Plan: The restart plan.
     """
     _require_installed(status)
     _refuse_moved_unit(status, env)
@@ -482,7 +557,14 @@ def plan_restart(rendered, status, force=False, holder=None, env=None):
 
 
 def plan_stop(status):
-    """ Stop the unit; it stays enabled, so it returns at the next login. """
+    """Stop the unit; it stays enabled, so it returns at the next login.
+
+    Args:
+        status: Current unit state.
+
+    Returns:
+        Plan: The stop plan.
+    """
     plan = Plan()
     if not status.installed:
         raise ServiceError(f'{UNIT_NAME} is not installed, so there is nothing to stop')
@@ -495,7 +577,15 @@ def plan_stop(status):
 
 
 def plan_uninstall(status, force=False):
-    """ Stop, disable and delete the unit, leaving config and logs alone. """
+    """Stop, disable and delete the unit, leaving config and logs alone.
+
+    Args:
+        status: Current unit state.
+        force: Delete a unit that was edited after installation.
+
+    Returns:
+        Plan: The uninstall plan.
+    """
     plan = Plan()
     if not status.installed:
         plan.notes.append(f'{UNIT_NAME} is not installed; nothing to do')
@@ -515,7 +605,15 @@ def plan_uninstall(status, force=False):
 
 
 def execute(plan, run=run_command):
-    """ Perform every step of `plan` in order; the plan was already shown. """
+    """Perform every step of `plan` in order.
+
+    Args:
+        plan: Plan to carry out.
+        run: Command runner; defaults to `run_command`.
+
+    Raises:
+        ServiceError: When a command step fails.
+    """
     for step in plan.steps:
         if step.write:
             path, content = step.write[0], step.write[1]
@@ -533,14 +631,13 @@ def execute(plan, run=run_command):
 
 
 def applet_holder(lock_dir):
-    """ Return the pid of a live luks-tray holding the single-instance lock.
+    """Return the pid of a live luks-tray holding the single-instance lock.
 
-        The lock is authoritative here, not a `ps` scan: a command line that
-        merely *mentions* luks-tray -- the shell running
-        `luks-tray --svc-start`, an editor, `tail` on the log -- must not look
-        like a running applet, and a stale pid file must not either.  Holding
-        the lock is the only thing that makes the next start exit 3, which is
-        the case worth warning about.
+    Args:
+        lock_dir: Directory holding the lock file.
+
+    Returns:
+        int | None: The holder pid, or None when the lock is free.
     """
     path = Path(lock_dir) / f'{EXECUTABLE}.lock'
     if not path.exists():
@@ -553,14 +650,13 @@ def applet_holder(lock_dir):
 
 
 def unit_in_cgroup(text):
-    """ Return the deepest `.service` a `/proc/<pid>/cgroup` file names, or None.
+    """Return the deepest `.service` named in a `/proc/<pid>/cgroup` file.
 
-        A supervised applet sits in
-        `.../user@1000.service/app.slice/luks-tray.service` on cgroup v2 (and in
-        `.../user@1000.service/luks-tray.service` on v1), so the last match is
-        the unit that owns it.  `user@1000.service` is skipped: it is the user's
-        own manager, present in every process's cgroup, and a terminal under it
-        -- whose deepest entry is a `.scope` -- must not look supervised.
+    Args:
+        text: Cgroup file contents.
+
+    Returns:
+        str | None: The owning unit, or None.
     """
     found = [name for name in _CGROUP_UNIT_RE.findall(text or '')
              if not _USER_MANAGER_RE.match(name)]
@@ -568,7 +664,14 @@ def unit_in_cgroup(text):
 
 
 def supervised_by(pid):
-    """ Return the systemd unit that supervises `pid`, or None when none does. """
+    """Return the systemd unit that supervises `pid`, or None.
+
+    Args:
+        pid: Process id.
+
+    Returns:
+        str | None: The supervising unit.
+    """
     try:
         text = Path(f'/proc/{int(pid)}/cgroup').read_text(encoding='utf-8', errors='replace')
     except (OSError, TypeError, ValueError):
@@ -577,39 +680,26 @@ def supervised_by(pid):
 
 
 def supervised_here():
-    """ True when *this* process is running inside the applet's own unit.
+    """Return True when this process runs inside the applet's own unit.
 
-        `INVOCATION_ID` alone is not enough: systemd sets it for every process it
-        launches, and children inherit it -- a terminal opened from a GUI
-        session that systemd started carries it too.  The cgroup says which unit
-        this pid actually belongs to, which is the question a restart has to
-        answer.
+    Returns:
+        bool: Whether the current process is supervised by the unit.
     """
     return supervised_by(os.getpid()) == UNIT_NAME
 
 
 def request_restart(env=None, run=None):
-    """ Ask systemd to restart this unit, and wait until the job is queued.
+    """Ask systemd to restart this unit and wait until the job is queued.
 
-        Called from inside the unit, so the request has to reach the manager
-        *before* the applet exits: a restart begins by stopping the unit, and
-        that stop kills the unit's whole cgroup (`KillMode=control-group`).
+    Args:
+        env: Environment mapping to read.
+        run: Command runner; defaults to `run_command`.
 
-        `--no-block` is what makes a synchronous call safe.  The job is queued
-        and `systemctl` returns without waiting for the stop it just asked for,
-        so the caller can leave cleanly and the manager carries the job out --
-        stop, then the unit's own `ExecStart=` starts the fresh instance.
+    Returns:
+        int: Exit status of the `systemctl` call.
 
-        Detaching the request instead (`systemd-run --user --scope`, which is
-        what `Utils.spawn_detached()` does for *viewers*) does not work here,
-        and field-testing showed exactly why: the transient scope is created
-        out of our own cgroup, so the stop job kills the helper before it has
-        asked systemd anything.  The tray went down, the unit stayed inactive,
-        and the menu row behaved like "Quit".
-
-        Returns the exit status of the `systemctl` call (0 = request accepted).
-        Raises ServiceError when this process is not the unit's main process --
-        there is no unit to restart then.
+    Raises:
+        ServiceError: When this process is not the unit's main process.
     """
     env = _env(env)
     if not supervised_here():
@@ -623,16 +713,33 @@ def request_restart(env=None, run=None):
 
 
 def _no_prompt(_question):
+    """Answer no to every question."""
     return False
 
 
 def _auto_yes(_question):
+    """Answer yes to every question."""
     return True
 
 
 def dispatch(verb, env=None, force=False, yes=False, echo=print,
              ask=None, run=run_command, holder=None, systemd=None):
-    """ Carry out one `--svc-*` verb and return a process exit status. """
+    """Carry out one `--svc-*` verb.
+
+    Args:
+        verb: Verb name.
+        env: Environment mapping to read.
+        force: Replace or delete a unit luks-tray did not write.
+        yes: Answer yes to prompts.
+        echo: Callable used to print output.
+        ask: Callable used to ask questions.
+        run: Command runner.
+        holder: Pid of a running instance outside systemd.
+        systemd: Override for the systemd availability check.
+
+    Returns:
+        int: Process exit status.
+    """
     env = _env(env)
     ask = (ask or _no_prompt)
     if yes:
@@ -641,9 +748,6 @@ def dispatch(verb, env=None, force=False, yes=False, echo=print,
     if verb == 'status':
         return _report(env, echo, run)
 
-    # Dumping the unit needs neither a systemd user manager nor a launcher: it
-    # is the starter for a hand-installed (or hand-edited) unit, so it has to
-    # work exactly where an automatic install might not.
     if verb == 'show-file':
         for line in rendered_unit(env).splitlines():
             echo(line)
@@ -655,15 +759,9 @@ def dispatch(verb, env=None, force=False, yes=False, echo=print,
             ' use your desktop autostart instead')
 
     if verb in ('install', 'start', 'restart'):
-        # The unit runs ~/.local/bin/luks-tray and nothing else, so a missing
-        # launcher is a unit that fails every restart.  Refuse before writing
-        # or starting anything; `stop`, `uninstall` and `status` must still
-        # work exactly when things are broken.
         require_launcher(env)
         rendered = rendered_unit(env)
     else:
-        # stop/uninstall must work on an installed unit even when the shipped
-        # unit cannot be rendered, so rendering is advisory here.
         try:
             rendered = rendered_unit(env)
         except ServiceError:
@@ -697,6 +795,7 @@ def dispatch(verb, env=None, force=False, yes=False, echo=print,
 
 
 def _show(plan, echo):
+    """Print a plan before it runs."""
     for note in plan.notes:
         echo(note)
     for line in plan.details:
@@ -708,7 +807,16 @@ def _show(plan, echo):
 
 
 def _report(env, echo, run):
-    """ Print the state of the unit and return the documented status code. """
+    """Print the state of the unit and return the documented status code.
+
+    Args:
+        env: Environment mapping to read.
+        echo: Callable used to print output.
+        run: Command runner.
+
+    Returns:
+        int: `STATUS_ACTIVE`, `STATUS_INACTIVE` or `STATUS_ABSENT`.
+    """
     path = installed_unit(env)
     if not path.is_file():
         echo(f'{UNIT_NAME}: not installed')

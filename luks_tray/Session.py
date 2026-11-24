@@ -1,85 +1,30 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-""" Which display server this login is really on, and the variables for it.
-
-    `systemd --user` cannot hand a unit the session's display, so
-    `service.render()` copies `WAYLAND_DISPLAY` (or `DISPLAY`) and the desktop
-    name out of the installing shell and into the unit file.  That copy is a
-    *snapshot of one login*: log out of a Wayland session and into one on X11,
-    and the unit still says `WAYLAND_DISPLAY=wayland-1`.  A unit's own
-    `Environment=` wins over what the session exports, so Qt reads the snapshot
-    and either dies ("could not connect to display") or lands on a platform
-    whose tray host is not there.  Until now the remedy was to remember
-    `--svc-install` after every switch.
-
-    The machine knows the answer, so it is asked instead:
-
-    * a display server is *listening* when its socket exists -- the
-      compositor's in `$XDG_RUNTIME_DIR`, the X server's in `/tmp/.X11-unix` --
-      so a snapshot naming a server that is not listening is a snapshot of a
-      session that has ended;
-    * `loginctl` names the type for the case where the environment holds
-      nothing usable at all (a unit started by a manager that never imported
-      the session).
-
-    `repair_environment()` applies that to `os.environ`, and `main()` calls it
-    before `QApplication` exists, so one installed unit works in both sessions
-    and switching needs no re-install.
-
-    Naming a listening X11 server is not the same as being allowed to talk to
-    it: an X11 login authenticates with a cookie, and the cookie file of an
-    sddm/gdm login lives at a path (`$XAUTHORITY`) that a unit only has when the
-    session imported it.  When it is missing, Qt's xcb plugin prints
-    "Authorization required, but no authorization protocol specified" and
-    "could not connect to display", and then *aborts* -- a core dump in
-    `coredumpctl`, and a SIGABRT that the unit reads as a crash.  So the module
-    also answers the question Qt is about to ask, by doing the same connection
-    setup the plugin does (`display_problem()`), and `main()` turns a refusal
-    into a log line and a retryable exit status instead.
-
-    A Wayland login has no cookie, but it has the socket itself, and that is
-    just as decisive: a compositor that has not published its socket yet (or
-    has just taken it away) cannot serve a Wayland client, and Qt's ending is
-    the same abort.  `display_problem()` reports a missing Wayland socket when
-    no live Xwayland display is left to fall back on, so that login race also
-    leaves through the retryable status instead of a crash.
-"""
+"""Determine the real display server and repair the session variables."""
 import os
 import socket
 import stat
 import subprocess
 
-#: Where an X server publishes one socket per display number.
 X11_SOCKET_DIR = '/tmp/.X11-unix'
 
-#: The variables that decide which platform Qt connects to.  `QT_QPA_PLATFORM`
-#: is deliberately absent: it is the user's own override, and a repair must not
-#: undo a decision somebody made on purpose.
 SESSION_VARIABLES = ('XDG_SESSION_TYPE', 'WAYLAND_DISPLAY', 'DISPLAY')
 
 WAYLAND = 'wayland'
 X11 = 'x11'
 
-#: How long the start-up probe waits for an X server to answer its connection
-#: setup.  A server that cannot answer in two seconds cannot serve a tray
-#: either, and this runs on the way into `QApplication`.
 X11_PROBE_TIMEOUT = 2.0
 
-#: The auth protocol every local X11 login uses for its cookie.
 COOKIE_NAME = b'MIT-MAGIC-COOKIE-1'
 
-#: Xauthority's "any host" family: what `xauth add :0 ...` writes when it stores
-#: a cookie for the machine rather than for one hostname.
 FAMILY_WILD = 0xffff
 
-#: The three answers an X server can give to a connection setup request.
-SETUP_FAILED = 0        # the server refused the connection outright
-SETUP_SUCCESS = 1       # accepted; Qt's xcb plugin will be accepted as well
-SETUP_AUTHENTICATE = 2  # the cookie we sent was missing or wrong
+SETUP_FAILED = 0
+SETUP_SUCCESS = 1
+SETUP_AUTHENTICATE = 2
 
 
 def _is_socket(path):
-    """ True when `path` is a unix socket -- what "listening" looks like on disk. """
+    """Return True when `path` is a unix socket."""
     try:
         return stat.S_ISSOCK(os.stat(path).st_mode)
     except OSError:
@@ -87,17 +32,18 @@ def _is_socket(path):
 
 
 def _runtime_dir(env):
+    """Return the stripped `XDG_RUNTIME_DIR` value."""
     return (env.get('XDG_RUNTIME_DIR') or '').strip()
 
 
 def x11_socket_path(display):
-    """ Return the socket path an X11 `DISPLAY` names, or '' when it names none.
+    """Return the socket path an X11 `DISPLAY` names, or `''`.
 
-        Only the local form can be checked this way: `:0` and `:0.0` are
-        `/tmp/.X11-unix/X0`, while `host:0` reaches a server over TCP and has no
-        socket here at all -- treating that as "not listening" is right, because
-        a tray applet on one host for another host's session is not a case this
-        unit can serve.
+    Args:
+        display: X11 display string.
+
+    Returns:
+        str: The socket path.
     """
     host, _, rest = (display or '').partition(':')
     if host or not rest:
@@ -107,7 +53,14 @@ def x11_socket_path(display):
 
 
 def live_wayland(env=None):
-    """ Return `$WAYLAND_DISPLAY` when its socket is listening, else ''. """
+    """Return `$WAYLAND_DISPLAY` when its socket is listening, else `''`.
+
+    Args:
+        env: Environment mapping to read; defaults to `os.environ`.
+
+    Returns:
+        str: The live compositor name.
+    """
     env = os.environ if env is None else env
     name = (env.get('WAYLAND_DISPLAY') or '').strip()
     if not name:
@@ -123,7 +76,14 @@ def live_wayland(env=None):
 
 
 def live_x11(env=None):
-    """ Return `$DISPLAY` when the X socket it names is listening, else ''. """
+    """Return `$DISPLAY` when its socket is listening, else `''`.
+
+    Args:
+        env: Environment mapping to read; defaults to `os.environ`.
+
+    Returns:
+        str: The live display string.
+    """
     env = os.environ if env is None else env
     display = (env.get('DISPLAY') or '').strip()
     path = x11_socket_path(display)
@@ -131,13 +91,15 @@ def live_x11(env=None):
 
 
 def _named_kind(env, wayland, display):
-    """ Return the server type the environment points at, '' when none is live.
+    """Return the server type the environment points at, or `''`.
 
-        Both sockets exist whenever Xwayland is up -- on this machine an niri
-        login has `wayland-1` *and* `:1` -- so the pair alone cannot say which
-        one is the session.  The marker can, and it is only trusted when it
-        names a server that is actually listening; otherwise the live socket
-        wins, which is what makes an ended session's snapshot harmless.
+    Args:
+        env: Environment mapping to read.
+        wayland: Live Wayland display, or `''`.
+        display: Live X11 display, or `''`.
+
+    Returns:
+        str: `'wayland'`, `'x11'` or `''`.
     """
     named = (env.get('XDG_SESSION_TYPE') or '').strip().lower()
     if wayland and display:
@@ -150,22 +112,27 @@ def _named_kind(env, wayland, display):
 
 
 def display_server(env=None):
-    """ Return `'wayland'`, `'x11'`, or '' when no display server is listening.
+    """Return `'wayland'`, `'x11'`, or `''` when no display server is listening.
 
-        Judged from the sockets, with `XDG_SESSION_TYPE` trusted only when both
-        are live -- which is what an Xwayland login looks like -- and `loginctl`
-        never asked, so this answers from an environment alone.  That is what
-        `service.render()` needs to decide which display variable a unit should
-        pin, and it is deliberately stricter than trusting the marker: a
-        snapshot naming a server that is not listening is a snapshot of a
-        session that has ended.
+    Args:
+        env: Environment mapping to read; defaults to `os.environ`.
+
+    Returns:
+        str: The detected display server type.
     """
     env = os.environ if env is None else env
     return _named_kind(env, live_wayland(env), live_x11(env))
 
 
 def _loginctl(*args):
-    """ Run one `loginctl` query and return its stripped output, '' on any error. """
+    """Run one `loginctl` query and return its stripped output.
+
+    Args:
+        *args: Query arguments.
+
+    Returns:
+        str: The output, or `''` on error.
+    """
     try:
         done = subprocess.run(('loginctl', *args), capture_output=True, text=True,
                               check=False, timeout=5)
@@ -175,13 +142,13 @@ def _loginctl(*args):
 
 
 def newest_wayland_socket(env=None):
-    """ Return the newest `wayland-*` socket in the runtime directory, or ''.
+    """Return the newest `wayland-*` socket in the runtime directory, or `''`.
 
-        Wayland publishes no equivalent of X11's `Display=`, and the name
-        depends on what else is running: a compositor takes the first free
-        number, so a bare one is `wayland-0` while niri with Xwayland started
-        first is `wayland-1`.  The directory is read rather than the name
-        guessed.
+    Args:
+        env: Environment mapping to read; defaults to `os.environ`.
+
+    Returns:
+        str: The socket name.
     """
     env = os.environ if env is None else env
     try:
@@ -203,11 +170,18 @@ def newest_wayland_socket(env=None):
 
 
 def _from_loginctl(env, query):
-    """ Ask logind about the user's session: `(kind, wayland_name, display)`. """
+    """Ask logind about the user's session.
+
+    Args:
+        env: Environment mapping to read.
+        query: Callable that runs a `loginctl` query.
+
+    Returns:
+        tuple: `(kind, wayland name, display)`.
+    """
     user = (env.get('USER') or env.get('LOGNAME') or '').strip()
     session = query('show-user', user, '-p', 'Display', '--value') if user else ''
     if not session:
-        # A manager that imported nothing may still have been given the id.
         session = (env.get('XDG_SESSION_ID') or '').strip()
     if not session:
         return '', '', ''
@@ -216,20 +190,20 @@ def _from_loginctl(env, query):
         return WAYLAND, newest_wayland_socket(env), ''
     if kind == X11:
         display = query('show-session', session, '-p', 'Display', '--value').strip()
-        # `Display=` is the X display; logind leaves it out once the session is
-        # closing, and `:0` is then the only useful guess left.
         return X11, '', display or ':0'
     return '', '', ''
 
 
 def session_values(env=None, query=None):
-    """ Return the values the session variables should have, or None if unknown.
+    """Return the values the session variables should have.
 
-        A name mapped to `None` means "this session has no such thing, remove
-        it": a `WAYLAND_DISPLAY` a unit pinned must not survive into an X11
-        login, because Qt would then try a socket nothing is listening on.  A
-        live second display (`DISPLAY=:1` next to a Wayland socket) is kept,
-        since it is the Xwayland a client may legitimately want.
+    Args:
+        env: Environment mapping to read; defaults to `os.environ`.
+        query: Callable that runs a `loginctl` query.
+
+    Returns:
+        dict | None: Values by variable name, or None when unknown. A value of
+        None means the variable should be removed.
     """
     env = os.environ if env is None else env
     query = _loginctl if query is None else query
@@ -248,14 +222,15 @@ def session_values(env=None, query=None):
 
 
 def repair_environment(env=None, query=None, note=None):
-    """ Point the session variables at the display server that is listening.
+    """Point the session variables at the display server that is listening.
 
-        Returns the applied changes as `(name, old, new)` tuples -- `new` is
-        `None` when the variable was removed -- so the caller can write down
-        what it corrected.  An environment that already agrees is left alone,
-        which is the ordinary case for a session started from a terminal or
-        from a desktop autostart entry: those inherit the display from the
-        session, and only a unit has to be repaired.
+    Args:
+        env: Environment mapping to edit; defaults to `os.environ`.
+        query: Callable that runs a `loginctl` query.
+        note: Callable that receives a message when nothing can be repaired.
+
+    Returns:
+        list: Applied changes as `(name, old, new)` tuples.
     """
     env = os.environ if env is None else env
     note = (lambda *_args, **_kwargs: None) if note is None else note
@@ -279,12 +254,13 @@ def repair_environment(env=None, query=None, note=None):
 
 
 def authority_file(env=None):
-    """ Return the Xauthority file Qt will read, or '' when none is named.
+    """Return the Xauthority file Qt will read, or `''`.
 
-        `$XAUTHORITY` first -- sddm, gdm and lightdm each write a per-session
-        file under `/tmp` or `/run/user` and export its path -- and then
-        `~/.Xauthority`, which is where `xauth` writes by default and what
-        libxcb falls back to when the variable is absent.
+    Args:
+        env: Environment mapping to read; defaults to `os.environ`.
+
+    Returns:
+        str: The authority file path.
     """
     env = os.environ if env is None else env
     named = (env.get('XAUTHORITY') or '').strip()
@@ -295,13 +271,17 @@ def authority_file(env=None):
 
 
 def _field(blob, at):
-    """ Read one length-prefixed Xauthority field: `CARD16` length, then data.
+    """Read one length-prefixed Xauthority field.
 
-        There is no padding: the four-byte alignment people remember belongs to
-        the X11 *connection setup* on the wire, not to this file.  `xauth add :0
-        . <cookie>` writes `CARD16 family, CARD16 address_length, address,
-        CARD16 number_length, number, CARD16 name_length, name, CARD16
-        data_length, data` straight through.
+    Args:
+        blob: Xauthority bytes.
+        at: Offset of the length prefix.
+
+    Returns:
+        tuple: The field bytes and the next offset.
+
+    Raises:
+        ValueError: When the field is truncated.
     """
     if at + 2 > len(blob):
         raise ValueError('truncated')
@@ -313,13 +293,16 @@ def _field(blob, at):
 
 
 def _authority_records(blob):
-    """ Yield `(family, number, name, cookie)` from an Xauthority file's bytes.
+    """Yield `(family, number, name, cookie)` from an Xauthority file.
 
-        The format is a flat sequence of records with no header and no count, so
-        the only way to read it is to walk it.  The address is skipped: it is
-        only meaningful for `FamilyLocal`, and a cookie stored for another
-        hostname simply fails at the server, which is the answer the probe
-        reports anyway.
+    Args:
+        blob: Xauthority bytes.
+
+    Yields:
+        tuple: One record per iteration.
+
+    Raises:
+        ValueError: When a record is truncated.
     """
     at = 0
     while at < len(blob):
@@ -335,14 +318,15 @@ def _authority_records(blob):
 
 
 def authority_cookie(display, env=None):
-    """ Return `(cookie, known)` for `display`: the bytes to send, and whether
-        "there were none" is a fact rather than a guess.
+    """Return the cookie libxcb would send for `display`.
 
-        The cookie libxcb would send is the one whose Xauthority record names
-        this display number, or an `FamilyWild` record, and whose name is
-        `MIT-MAGIC-COOKIE-1`.  `known` is False when the file could not be read
-        or parsed at all: then "no cookie found" says nothing about what Qt will
-        send, and the caller must not turn it into a refusal.
+    Args:
+        display: X11 display string.
+        env: Environment mapping to read; defaults to `os.environ`.
+
+    Returns:
+        tuple: `(cookie, known)`, where `known` is False when the authority
+        file could not be read or parsed.
     """
     path = authority_file(env)
     if not path:
@@ -351,7 +335,7 @@ def authority_cookie(display, env=None):
         with open(path, 'rb') as handle:
             blob = handle.read()
     except FileNotFoundError:
-        return b'', True       # an empty file and no file are the same to libxcb
+        return b'', True
     except OSError:
         return b'', False
     try:
@@ -368,13 +352,14 @@ def authority_cookie(display, env=None):
 
 
 def x11_setup_status(socket_path, cookie=b''):
-    """ Return the answer an X server gives to a connection setup request.
+    """Return the answer an X server gives to a connection setup request.
 
-        This is the whole of what libxcb does before Qt declares the display
-        unusable: a 12-byte header carrying the protocol version and the
-        lengths of the auth name and data, then the two padded blobs.  The
-        reply's first byte is the status -- accepted, refused, or "authenticate
-        again with a cookie you do not have".
+    Args:
+        socket_path: X11 socket path.
+        cookie: Authority cookie to offer.
+
+    Returns:
+        int: `SETUP_FAILED`, `SETUP_SUCCESS` or `SETUP_AUTHENTICATE`.
     """
     name = COOKIE_NAME
     request = (b'l\x00' + (11).to_bytes(2, 'little') + (0).to_bytes(2, 'little')
@@ -396,28 +381,21 @@ def x11_setup_status(socket_path, cookie=b''):
 
 
 def _wayland_problem(env):
-    """ Return why this Wayland session has no compositor Qt could reach.
+    """Return why this Wayland session has no reachable compositor.
 
-        A compositor socket is the whole connection: there is no cookie and no
-        second handshake to fail.  When `XDG_SESSION_TYPE` says Wayland and the
-        named socket is not there, Qt's wayland plugin cannot initialise; if
-        there is also no live X11 server to fall back on, `QApplication` aborts
-        and `main()`'s exception handler exits 15, which the unit treats as
-        final.  The login race is the opposite case: the compositor is a moment
-        from publishing its socket, so the applet must exit 4 and be retried.
+    Args:
+        env: Environment mapping to read.
 
-        A live Xwayland display is left to Qt -- the xcb fallback is a working
-        session, and it is not this probe's business to refuse it.  A TCP
-        display is left alone for the same reason the X11 branch leaves it
-        alone: it cannot be checked from here.
+    Returns:
+        str: The problem text, or `''` when Qt can proceed.
     """
     if live_wayland(env):
         return ''
     display = (env.get('DISPLAY') or '').strip()
     if display and not x11_socket_path(display):
-        return ''               # a TCP display: not judgeable from here
+        return ''
     if live_x11(env):
-        return ''               # Xwayland is up; Qt can fall back to xcb
+        return ''
     named = (env.get('WAYLAND_DISPLAY') or '').strip()
     return (f'the Wayland compositor named by WAYLAND_DISPLAY={named or "(unset)"}'
             f' is not listening, and no X11 server is available: the session is'
@@ -425,23 +403,13 @@ def _wayland_problem(env):
 
 
 def display_problem(env=None):
-    """ Return why Qt could not use this session's display, '' when it can.
+    """Return why Qt could not use this session's display, or `''`.
 
-        Called by `main()` after `repair_environment()` and before
-        `QApplication` exists, because the alternative is Qt's own ending: a
-        fatal "no Qt platform plugin could be initialized", an `abort()` and a
-        core dump -- which is what an X11 login produces when the unit has no
-        `$XAUTHORITY` (a systemd user unit does not inherit the display *or* its
-        cookie, and only the session's own
-        `dbus-update-activation-environment` gives them to the manager).
+    Args:
+        env: Environment mapping to read; defaults to `os.environ`.
 
-        Only positive evidence is reported: an X server that cannot be reached,
-        refuses the connection, or asks for a cookie the readable authority file
-        does not contain; or a Wayland session whose compositor socket is not
-        there and which has no live X11 display to fall back on.  Anything the
-        probe cannot judge -- a Wayland session with a listening compositor, a
-        TCP display, an authority file it failed to parse -- is left to Qt, so
-        a host that authenticates some other way is never refused a start.
+    Returns:
+        str: The problem text, or `''` when the display looks usable.
     """
     env = os.environ if env is None else env
     kind = (env.get('XDG_SESSION_TYPE') or '').strip().lower()
@@ -457,9 +425,6 @@ def display_problem(env=None):
     try:
         status = x11_setup_status(path, cookie)
     except OSError as error:
-        # libxcb also tries the *abstract* socket for the same name (Linux
-        # publishes it there next to the file), so a path that cannot be opened
-        # is not a verdict on its own.
         try:
             status = x11_setup_status('\0' + path, cookie)
         except OSError:
@@ -470,7 +435,7 @@ def display_problem(env=None):
         return ''
     if status == SETUP_AUTHENTICATE:
         if not known:
-            return ''       # our reading of the authority file is in doubt
+            return ''
         named = authority_file(env) or '(no authority file)'
         return (f'the X server on {display} refused the connection: it wants an'
                 f' authority cookie and {named} holds none for that display.'

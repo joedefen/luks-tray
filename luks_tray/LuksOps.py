@@ -1,25 +1,10 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-""" Privileged command helpers and LUKS primitives for LUKS TRAY.
-
-    Two layers live here:
-
-    - process execution: [`run_cmd_capture()`](luks_tray/LuksOps.py:1) and
-      its ``sudo -n`` variant return real output, while
-      [`run_cmd()`](luks_tray/LuksOps.py:1) / ``sudo_cmd()`` keep the
-      ``None``-or-``'FAIL: ...'`` contract every call site tests;
-    - LUKS work: unlock, mount (optionally through bindfs), loop setup and the
-      single ``mount_luks_container()`` entry point used by both dialogs.
-
-    Nothing here touches Qt widgets (except the busy-mount warning in
-    ``run_unmount()``) or the tray class, so the primitives can be called from
-    anywhere by passing the tray in as an argument.
-"""
+"""Privileged command helpers and LUKS primitives for LUKS TRAY."""
 # pylint: disable=broad-exception-caught, invalid-name, too-many-arguments
 # pylint: disable=too-many-locals,too-many-branches,too-many-statements
 
-import os
 import hashlib
+import os
 import subprocess
 import traceback
 
@@ -27,27 +12,31 @@ from PyQt6.QtWidgets import QMessageBox
 
 from luks_tray.AppInfo import window_title
 from luks_tray.ContainerType import CONTAINER_TYPES, LUKS, TCRYPT, salt_identity
-from luks_tray.Utils import prt, CMD_TIMEOUT, PROBE_TIMEOUT, FORMAT_TIMEOUT, TIMEOUT_RC
+from luks_tray.Utils import CMD_TIMEOUT, FORMAT_TIMEOUT, PROBE_TIMEOUT, TIMEOUT_RC, prt
 
 
 def generate_uuid_for_file_path(file_path):
-    """ Use SHA-256 to hash the file path """
-    file_hash = hashlib.sha256(file_path.encode('utf-8')).hexdigest()
+    """Return a UUID-shaped digest of `file_path`.
 
-    # Take the first 32 characters of the hash and format it as a UUID
-    # UUID is normally 32 hexadecimal digits, formatted as 8-4-4-4-12
+    Args:
+        file_path: Container file path.
+
+    Returns:
+        str: The generated identifier.
+    """
+    file_hash = hashlib.sha256(file_path.encode('utf-8')).hexdigest()
     generated_uuid = f"{file_hash[:8]}-{file_hash[8:12]}-{file_hash[12:16]}-{file_hash[16:20]}-{file_hash[20:32]}"
 
     return generated_uuid
 
 def get_luks_uuid_for_file(file_path):
-    """ Return the LUKS UUID *inside* a LUKS file ('' if it cannot be read).
+    """Return the LUKS UUID inside `file_path`, or `''`.
 
-        History entries for file containers are keyed by this UUID -- the same
-        value lsblk reports for the loop device and the same value
-        HistoryClass re-checks with blkid on restore. A path-derived UUID
-        (generate_uuid_for_file_path) never matches, so such an entry is
-        silently purged the next time the history is loaded.
+    Args:
+        file_path: Container file path.
+
+    Returns:
+        str: The UUID reported by `blkid`.
     """
     if not file_path:
         return ''
@@ -56,14 +45,13 @@ def get_luks_uuid_for_file(file_path):
     return stdout.strip() if rc == 0 else ''
 
 def get_container_identity(file_path):
-    """ The history key for the container stored in `file_path`.
+    """Return the history key for the container stored in `file_path`.
 
-        A LUKS file is keyed by the UUID inside it -- the same value
-        HistoryClass re-checks on restore. A TrueCrypt/VeraCrypt file has no
-        such UUID (its header is encrypted), so it is keyed by its salt; see
-        ContainerType.py. The path-derived UUID is the last resort: nothing
-        re-derives it, so such an entry is dropped on the next restore rather
-        than silently inheriting another volume's password.
+    Args:
+        file_path: Container file path.
+
+    Returns:
+        str: A LUKS UUID, a salt identity, or a path-derived identifier.
     """
     if not file_path:
         return ''
@@ -72,40 +60,42 @@ def get_container_identity(file_path):
             or generate_uuid_for_file_path(file_path))
 
 def sudo_cmd(args, errs=None, input_str=None, timeout=None):
-    """ run sudo -n {args}; the -n will avoid prompting for a
-        sudo password and fail if not allowed
+    """Run `args` through `sudo -n`, which never prompts.
+
+    Args:
+        args: Command and arguments.
+        errs: Optional list that receives the failure text.
+        input_str: Text passed to the command's stdin.
+        timeout: Deadline in seconds; defaults to `CMD_TIMEOUT`.
+
+    Returns:
+        str | None: The failure text, or None on success.
     """
     args = ['sudo', '-n'] + args
     return run_cmd(args, errs, input_str, timeout)
 
 def run_cmd(args, errs=None, input_str=None, timeout=None):
-    """ Run args and return None on success, or a 'FAIL: ...' string on failure.
+    """Run `args` and return None on success, or a `'FAIL: ...'` string.
 
-        stdout is deliberately NOT returned here -- this helper is a
-        success/failure predicate. Use run_cmd_capture() when you need the
-        child's output.
+    Args:
+        args: Command and arguments.
+        errs: Optional list that receives the failure text.
+        input_str: Text passed to the command's stdin.
+        timeout: Deadline in seconds; defaults to `CMD_TIMEOUT`.
 
-        `timeout` is forwarded to run_cmd_capture() (default CMD_TIMEOUT);
-        pass FORMAT_TIMEOUT for the slow, one-shot setup commands.
+    Returns:
+        str | None: The failure text, or None on success.
     """
     rc, stdout, stderr = run_cmd_capture(args, input_str, timeout)
     if rc == 0:
         return None
-    # NB: keep the outer quote different from the one used inside the
-    # expression -- quote reuse is PEP 701 / Python 3.12+ only.
     err = f"FAIL: {' '.join(args)}: {stdout} {stderr} [rc={rc}]"
-    # NOTE: test against None, not truthiness -- callers routinely pass a
-    # freshly created [] to collect errors and an empty list is falsy.
     if errs is not None:
         errs.append(err)
     return err
 
 def _as_text(value):
-    """ Coerce TimeoutExpired.stdout/.stderr to str.
-
-        Depending on the Python version those attributes hold None, raw bytes
-        (the child was killed mid-write) or already-decoded text.
-    """
+    """Return `value` as text, whatever `TimeoutExpired` stored."""
     if value is None:
         return ''
     if isinstance(value, bytes):
@@ -113,14 +103,15 @@ def _as_text(value):
     return value
 
 def run_cmd_capture(args, input_str=None, timeout=None):
-    """ Run args via subprocess.run(); return (returncode, stdout, stderr).
+    """Run `args` and return `(returncode, stdout, stderr)`.
 
-        `timeout` defaults to CMD_TIMEOUT. A child that overruns the deadline
-        is killed (subprocess.run() does that for us) and reported through
-        TIMEOUT_RC, so callers need no extra branch: run_cmd()/sudo_cmd()
-        just render it as their usual 'FAIL: ...' string. Without this, a
-        hung cryptsetup/mount blocked the Qt main thread forever and the tray
-        had no terminal left (stdin is /dev/null) to interrupt it.
+    Args:
+        args: Command and arguments.
+        input_str: Text passed to the command's stdin.
+        timeout: Deadline in seconds; defaults to `CMD_TIMEOUT`.
+
+    Returns:
+        tuple: Return code, standard output and standard error.
     """
     if timeout is None:
         timeout = CMD_TIMEOUT
@@ -140,18 +131,13 @@ def sudo_run(args, input_str=None, timeout=None):
 
 
 def ensure_dir(path):
-    """ Create `path` (and any missing parents) as the *user*, not as root.
+    """Create `path` as the user, falling back to `sudo` for system paths.
 
-        Auto-mount points live inside the user's own vault area, and the
-        startup cleanup removes the empty ones with a plain `os.rmdir()`, which
-        needs write permission on their *parent*. Creating them with
-        `sudo mkdir -p` therefore left directories the unprivileged tray could
-        never tidy up again -- and the `-p` also created the vault root itself
-        as root, which blocked every later removal below it.
+    Args:
+        path: Directory to create.
 
-        `mount` does not care who owns the mount point, so the user's own tree
-        is created directly, and sudo is only used as a fallback for a path
-        outside it (e.g. a manual mount point below /mnt).
+    Returns:
+        str | None: The failure text, or None on success.
     """
     if os.path.isdir(path):
         return None
@@ -168,9 +154,14 @@ def ensure_dir(path):
 
 
 def run_unmount(mount_point: str, busy_warns: set) -> str | None:
-    """Attempts to unmount the given mount point.
-    If it fails due to 'busy', show a popup with the list of processes using it.
-    Returns error string or None on success.
+    """Unmount `mount_point`, showing busy processes when needed.
+
+    Args:
+        mount_point: Path to unmount.
+        busy_warns: Mount points already reported as busy.
+
+    Returns:
+        str | None: The failure text, or None on success.
     """
     try:
         sub = subprocess.run(['sudo', "umount", mount_point],
@@ -191,7 +182,7 @@ def run_unmount(mount_point: str, busy_warns: set) -> str | None:
 
     # Try to get processes using the mount point
     try:
-        fuser = subprocess.run(
+        fuser = subprocess.run(  # noqa: UP022
                 ['sudo', "fuser", "-vm", mount_point],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -215,10 +206,7 @@ def run_unmount(mount_point: str, busy_warns: set) -> str | None:
 
     info = "\n - ".join(process_lines) if process_lines else "(No user-space processes found using the mount)"
 
-    # Show user-friendly popup.  `setWindowTitle`, not `set_title`: QMessageBox
-    # has no `set_title`, so this path raised AttributeError on the first
-    # "target is busy" -- the most ordinary unmount failure there is -- instead
-    # of naming the processes holding the mount open.
+    # QMessageBox has `setWindowTitle`, not `set_title`.
     msg = QMessageBox()
     msg.setIcon(QMessageBox.Icon.Warning)
     msg.setWindowTitle(window_title('Unmount Failed — Device Busy'))
@@ -229,11 +217,8 @@ def run_unmount(mount_point: str, busy_warns: set) -> str | None:
     return err
 
 
-####################################################
-# LUKS Primitives
-####################################################
 def _open_argv(device_path, luks_device, readonly, meta_type):
-    """ The `cryptsetup open` command for one declared header type. """
+    """Return the `cryptsetup open` argv for one declared header type."""
     args = ['cryptsetup', 'open', '--type', meta_type]
     if meta_type == TCRYPT:
         # A TCRYPT header carries a PIM. cryptsetup's "use the default
@@ -249,40 +234,24 @@ def _open_argv(device_path, luks_device, readonly, meta_type):
 
 def _unlock_luks(device_path, password, luks_device, readonly=False,
                  meta_type=LUKS):
-    """ One `cryptsetup open` attempt, for one declared header type. """
-    # No "already unlocked?" short-circuit here on purpose. It used to be
-    # `if hasattr(self, 'opened') and self.opened`, but `self` was the
-    # dialog, which never defines `opened`, so the test never fired.
-    # Making it live (e.g. "the mapper path exists") would skip the
-    # password check and mount a volume somebody else has open, so a
-    # repeat `cryptsetup open` is left to fail with its own message.
+    """Run one `cryptsetup open` attempt for a declared header type."""
     return sudo_cmd(_open_argv(device_path, luks_device, readonly, meta_type),
                     input_str=password)
 
 
 def unlock_container(device_path, password, luks_device, readonly=False,
                      meta_type=''):
-    """ Open a container, asking for the declared type first.
+    """Open a container, trying the declared header type first.
 
-        Returns `(err, used_type)`, where `used_type` is the type that opened
-        the container (or the last one tried when nothing did).
+    Args:
+        device_path: Device or file to open.
+        password: Container password.
+        luks_device: Mapper name.
+        readonly: Open read-only.
+        meta_type: Declared type, `'luks'`, `'tcrypt'` or `''`.
 
-        The type cannot be read out of the file -- a LUKS header is cleartext,
-        a TrueCrypt/VeraCrypt one is encrypted (see ContainerType.py) -- so it
-        is asked for, and the *failure* decides whether the other type is
-        worth a turn:
-
-        - rc=1 is cryptsetup's "is not a valid LUKS device". That is a
-          deterministic verdict about the header, so the same password is
-          handed to `--type tcrypt` next;
-        - anything else (rc=2 "no key available with this passphrase", a
-          timeout, a missing device node) is about the password or the system,
-          and a second attempt would only replace a useful message with a
-          confusing one.
-
-        `meta_type=''` means "not known yet", which starts with LUKS: that is
-        what every container this applet creates is, and rc=1 makes the
-        fallback to TCRYPT cheap.
+    Returns:
+        tuple: `(error, used_type)`.
     """
     first = meta_type if meta_type in CONTAINER_TYPES else LUKS
     order = [first] + [kind for kind in CONTAINER_TYPES if kind != first]
@@ -303,7 +272,7 @@ def unlock_container(device_path, password, luks_device, readonly=False,
 
 
 def _mount_manual(tray, mapper_path, upon, do_bindfs=False, readonly=False):
-    """Manual mounting with bindfs"""
+    """Mount `mapper_path` at `upon`, optionally through bindfs."""
     if readonly:
         err = sudo_cmd(['mount', '-o', 'ro', mapper_path, upon])
     else:
@@ -314,13 +283,11 @@ def _mount_manual(tray, mapper_path, upon, do_bindfs=False, readonly=False):
     return err
 
 def _setup_loop_device(container):
-    """Set up loop device for file-based containers"""
-    # The same dead `hasattr(self, 'opened')` test lived here while this was
-    # a method: `self` was the dialog, so it never fired -- and it tested the
-    # wrong object anyway, since the loop state ends up on `container.name`.
+    """Attach `container.back_file` to a loop device.
 
-    # Use --show to get the loop device name; we need its stdout, so call
-    # subprocess directly instead of sudo_cmd() (which only reports errors).
+    Returns:
+        tuple: `(error, loop device path)`.
+    """
     args = ['losetup', '-f', '--show', container.back_file]
     rc, stdout, stderr = sudo_run(args)
     if rc != 0:
@@ -337,36 +304,27 @@ def _setup_loop_device(container):
     return None, loop_device
 
 
-####################################################
-# LUKS Generic Mounter
-####################################################
 def mount_luks_container(tray, container, password, upon=None, luks_device=None,
                         readonly=False, luks_file=None, size=None,
                         dot_vault_dir=None, meta_type=''):
-    """
-    Unified function to mount any LUKS container (device or file).
+    """Mount any LUKS container, device or file.
 
     Args:
-        tray: the running LuksTray (for uid/gid of the bindfs mount)
-        container: Container object
-        password: LUKS password
-        upon: Manual mount point (None for auto-mounting)
-        luks_device: Device mapper name (for devices)
-        luks_file: Path to LUKS file (for files)
-        size: Size for new file creation
-        dot_vault_dir: directory new crypt files default to (dialog's
-            ``~/.Vaults``); only used when creating a container
-        meta_type: 'luks', 'tcrypt', or '' when it is not known yet (a new
-            file, or one added before this was recorded). '' falls back to
-            `container.meta_type`, which is where the dialog found it. Ignored
-            for a file that is being created: that one is always LUKS2. The
-            type that actually opened the container is stored back on
-            `container.meta_type`, which is how the dialog learns it.
+        tray: Running tray, for uid/gid and mount state.
+        container: Container record.
+        password: Container password.
+        upon: Manual mount point; None to auto-mount.
+        luks_device: Mapper name for devices.
+        readonly: Mount read-only.
+        luks_file: Container file path for file containers.
+        size: Size in MiB when creating a new file.
+        dot_vault_dir: Directory new crypt files default to.
+        meta_type: Declared header type, or `''` when unknown.
+
+    Returns:
+        str | None: The error text, or None on success.
     """
     if not upon:
-        # This function reports failure by returning a string (callers do
-        # `if err:`), and must keep doing so under `python -O`, where an
-        # `assert` would vanish and let a bogus mount point reach `mount`.
         return 'ERR: cannot mount without a mount point'
     try:
         # Both dialogs come through here, so the mount point is created in one

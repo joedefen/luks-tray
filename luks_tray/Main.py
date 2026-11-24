@@ -1,23 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-""" LUKS TRAY -- application entry point and tray orchestration.
-
-    The code that used to live in this one file is now split by concern:
-
-    - [`luks_tray.DeviceInfo`](luks_tray/DeviceInfo.py) -- `lsblk` parsing
-      and the "banned mount point" policy (device discovery);
-    - [`luks_tray.LuksOps`](luks_tray/LuksOps.py) -- privileged command
-      helpers (`sudo -n`, deadlines) and the LUKS primitives (unlock, mount,
-      loop setup, format);
-    - [`luks_tray.dialogs`](luks_tray/dialogs) -- the Qt dialogs, which take
-      the tray instance as a constructor argument.
-
-    What remains here is the Qt tray itself (menu building, refresh policy),
-    the auto-mount folder policy and `main()`.
-
-    The Wayland/Sway caveats that shaped the dialogs are documented in
-    [`luks_tray.dialogs.Common`](luks_tray/dialogs/Common.py).
-"""
+"""LUKS TRAY application entry point and tray orchestration."""
 # pylint: disable=unused-import,broad-exception-caught, invalid-name
 # pylint: disable=no-name-in-module,import-outside-toplevel,too-many-instance-attributes
 # pylint: disable=too-many-locals,too-many-branches,too-many-statements
@@ -25,45 +7,50 @@
 # pylint: disable=line-too-long,too-many-lines,too-many-public-methods
 # pylint: disable=too-many-return-statements
 import atexit
-import os
-import sys
-import signal
-import shutil
-import subprocess
-import pwd
-import traceback
-import time
 import importlib.resources
+import os
+import pwd
 import random
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import traceback
 from contextlib import contextmanager
 from types import SimpleNamespace
-import petname
-from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
-from PyQt6.QtWidgets import QWidgetAction, QWidget, QLabel
-from PyQt6.QtGui import QIcon, QCursor, QAction, QFont, QFontInfo
-from PyQt6.QtGui import QSessionManager
-from PyQt6.QtCore import (QSocketNotifier, QTimer, Qt, QtMsgType,
-                          qInstallMessageHandler)
 
-from luks_tray.AppInfo import (APP_NAME, APPLICATION_DISPLAY_NAME,
-                               DESKTOP_FILE_NAME)
-from luks_tray import Compositor
-from luks_tray.History import HistoryClass
-from luks_tray.Utils import PyKill, prt, prt_once
-from luks_tray import Utils, __version__
-from luks_tray import Session, service
-from luks_tray.IniTool import IniTool
+import petname
+from PyQt6.QtCore import QSocketNotifier, Qt, QTimer, QtMsgType, qInstallMessageHandler
+from PyQt6.QtGui import QAction, QCursor, QFont, QFontInfo, QIcon, QSessionManager
+from PyQt6.QtWidgets import QApplication, QLabel, QMenu, QSystemTrayIcon, QWidget, QWidgetAction
+
+from luks_tray import Compositor, Session, Utils, __version__, service
+from luks_tray.AppInfo import APP_NAME, APPLICATION_DISPLAY_NAME, DESKTOP_FILE_NAME
 from luks_tray.DeviceInfo import DeviceInfo
-from luks_tray.dialogs import (CommonDialog, MasterPasswordDialog,
-                               MasterPasswordSetupDialog, MountDeviceDialog,
-                               MountFileDialog, OptionsDialog)
-from luks_tray.LuksOps import (generate_uuid_for_file_path,
-                                get_container_identity,
-                                get_luks_uuid_for_file, run_cmd,
-                                run_cmd_capture, run_unmount, sudo_cmd,
-                                sudo_run)
+from luks_tray.dialogs import (
+    CommonDialog,
+    MasterPasswordDialog,
+    MasterPasswordSetupDialog,
+    MountDeviceDialog,
+    MountFileDialog,
+    OptionsDialog,
+)
+from luks_tray.History import HistoryClass
+from luks_tray.IniTool import IniTool
 from luks_tray.LockWatch import SessionLockWatch
+from luks_tray.LuksOps import (
+    generate_uuid_for_file_path,
+    get_container_identity,
+    get_luks_uuid_for_file,
+    run_cmd,
+    run_cmd_capture,
+    run_unmount,
+    sudo_cmd,
+    sudo_run,
+)
 from luks_tray.TrayWatch import STATUS_NOTIFIER_WATCHER, TrayWatch
+from luks_tray.Utils import PyKill, prt, prt_once
 
 # The command/discovery/dialog helpers used to be module-level API of this
 # file. They now live in their own modules and are re-exported here so that
@@ -91,42 +78,13 @@ __all__ = [
     'tray_watcher_present',
 ]
 
-# Every tray host -- plasmashell, xfce4-panel, waybar, swaybar+snixembed, ... --
-# claims STATUS_NOTIFIER_WATCHER (see TrayWatch.py).  A host that is not on the
-# bus yet is an event, not a wait: the item is registered again when one
-# appears, so start-up never blocks on the bar.
-TRAY_ATTACH_DELAY_MS = 500      # let a new host start serving calls
+# Delay before registering with a newly appeared tray host.
+TRAY_ATTACH_DELAY_MS = 500
 
-# Exit status for "this login has no display the applet could use": the X server
-# is not up yet, or it wants a cookie this process does not have.  Both are
-# times to come back, not reasons to stay down -- the unit's
-# `RestartPreventExitStatus=` deliberately does *not* list 4 -- so systemd's
-# `Restart=on-failure` retries 5 s later, which is what a login race needs.  See
-# `Session.display_problem()`.
+# Exit status for a login whose display is not usable yet; the unit retries it.
 EXIT_NO_DISPLAY = 4
 
-# `APP_NAME` (imported from AppInfo) is the name the log lines, the unit file
-# and the menu all agree on.  The session banner pairs it with `__version__`
-# and the pid, so "which build wrote this line, and which run?" is answered by
-# the log itself.
-
-# Qt messages that are chatter rather than news.  The qt6ct platform theme (and
-# its qt5ct twin, whose class name differs by one digit) prints its whole
-# palette table through qDebug() every time a widget asks for one, which used to
-# put some forty lines in debug.log between the messages a reader actually
-# wanted; the markers catch that output even where it arrives at warning level.
-# The QThreadStorage notice is Qt describing its own teardown, once, at exit --
-# addressed by a hex thread id, so it can only be recognised by its prefix.
-#
-# The portal line is the third kind, and the most predictable one of all: naming
-# a desktop file for the Wayland app_id (see luks_tray/AppInfo.py) claims that an
-# installed `luks-tray.desktop` exists, and this package ships none, so
-# xdg-desktop-portal answers "App info not found for 'luks-tray'" on every
-# start.  Nothing here uses a portal feature -- no portal file chooser, no
-# notifications, no openUrl -- so that registration has nothing to enable and
-# failing it changes nothing the tray does.  It is matched on the registration
-# call rather than on the word "portal", so a portal problem that *would* matter
-# is still logged; ship a desktop entry and this marker can go.
+# Qt messages that are noise rather than news.
 QT_NOISE = (
     'CTPlatformTheme::',
     'QWindowsWindow::',
@@ -137,14 +95,12 @@ _qt_seen = set()
 
 
 def qt_message_handler(mode, context, message):
-    """ Qt's own console output, filtered, deduplicated and stamped into the log.
+    """Filter, deduplicate and log one Qt message.
 
-        Called by Qt through `install_qt_messages()`. Debug and information
-        messages are dropped: they are the internals of Qt and of its plugins,
-        and nothing in this applet acts on them. What is kept is a warning or an
-        error -- once per distinct text, with the `[file:line]` of the C++ side
-        as the footer, so "who said this?" is answerable at a glance instead of
-        looking like a luks-tray bug.
+    Args:
+        mode: Qt message type.
+        context: Qt message context.
+        message: Message text.
     """
     if mode in (QtMsgType.QtDebugMsg, QtMsgType.QtInfoMsg):
         return
@@ -162,17 +118,13 @@ def qt_message_handler(mode, context, message):
 
 
 def install_qt_messages():
-    """ Send Qt's console output through prt(); call before QApplication exists. """
+    """Send Qt console output through `prt()`."""
     qInstallMessageHandler(qt_message_handler)
 
 
-#: How many bytes one wakeup drain may read.  The pipe holds one byte per
-#: signal, and signals are rare on this path -- the drain only has to leave it
-#: empty so the notifier stops firing.
+# How many bytes one wakeup drain may read.
 _WAKEUP_CHUNK = 64
-#: The pipe behind `install_signal_wakeup()`: `(notifier, read fd, write fd)`.
-#: Module level on purpose: a collected `QSocketNotifier` stops waking the
-#: event loop, and the handlers would go back to waiting for a poll tick.
+# The pipe behind `install_signal_wakeup()`: `(notifier, read fd, write fd)`.
 _signal_wakeup = None
 
 
@@ -186,31 +138,13 @@ def _drain_signal_pipe(fd):
 
 
 def install_signal_wakeup(app):
-    """ Wake the Qt event loop when a signal arrives, so its handler runs at once.
+    """Wake the Qt event loop when a signal arrives.
 
-        CPython runs a signal handler only between bytecodes, and only in the
-        main thread.  A tray applet spends its life parked inside
-        `QApplication.exec()`, so a SIGTERM -- a `systemctl --user stop`, or the
-        stop at the end of a logout -- has to wait for the event loop to hand
-        control back to Python, and on a quiet tray the only thing that does
-        that is the 3 s refresh timer.  That latency is visible against
-        journald: a stop job accepted at 13:16:48 produced its `(signal 15)`
-        line in debug.log at 13:16:50.  It is also the only reason the unit
-        needs a `TimeoutStopSec=` at all, and a tick that is busy (one
-        `cryptsetup` call outlives several of them) can push the handler past
-        the deadline -- so SIGKILL, not the handler, ends up stopping the
-        applet.
+    Args:
+        app: The QApplication that owns the notifier.
 
-        `signal.set_wakeup_fd()` writes the signal number into a pipe, and a
-        `QSocketNotifier` on the read end makes the loop notice it at once: it
-        returns to Python and runs the pending handler in the same millisecond.
-        The notifier only drains the pipe -- what the handler *does* is still
-        `Utils.install_termination_log()`'s business (log the stop line, then
-        die of the signal, which is what the unit's `RestartPreventExitStatus=`
-        reads as "stay stopped").
-
-        Main thread only, after the `QApplication` exists.  A second call
-        returns the first call's pipe and otherwise does nothing.
+    Returns:
+        tuple: The notifier and the read and write descriptors.
     """
     global _signal_wakeup
     if _signal_wakeup is not None:
@@ -236,46 +170,20 @@ FORBIDDEN_AUTO_MOUNT_ROOTS = frozenset((
     '/lib64', '/media', '/mnt', '/opt', '/proc', '/root', '/run',
     '/sbin', '/srv', '/sys', '/tmp', '/usr', '/var',
 ))
-# Same idea, but for whole system trees: nothing *inside* these may be used
-# either. `/home`, `/mnt`, `/media` and `/tmp` are absent on purpose -- a vault
-# directory may legitimately live there (e.g. `~/Vaults`, `/mnt/Vaults`); they
-# are covered by the home-directory and ownership/permission checks instead.
-# Paths inside the real user's home are exempt from this list, so non-standard
-# layouts such as /var/home/<user>/Vaults keep working.
+# System trees that may not contain the vault root.
 FORBIDDEN_AUTO_MOUNT_PREFIXES = tuple(os.path.normpath(path) for path in (
     '/bin', '/boot', '/dev', '/etc', '/lib', '/lib32', '/lib64', '/opt',
     '/proc', '/root', '/run', '/sbin', '/srv', '/sys', '/usr', '/var',
 ))
 
 
-class LuksTray():
-    """ The tray icon, the menu it shows, and the refresh/mount policy.
-
-        `main()` creates exactly one instance, and the vault-root policy
-        (`get_auto_mount_root()` and friends) are *methods* on it rather than
-        lookups through a class-level `singleton`: a static helper that reads
-        the configuration can only work after a tray exists, which turned
-        construction order into a hidden requirement and crashed with
-        `AttributeError` when it was violated. Besides the `QSystemTrayIcon`
-        this owns the single `QMenu`, rebuilt only when its contents actually
-        change (see `replace_menu_if_different()`), and the 3 s `QTimer` that
-        drives `update_menu()`.
-
-        The poller is synchronous but self-guarded: `update_menu()` returns
-        immediately while a refresh or a privileged dialog operation is in
-        flight, and `busy_operation()` marks the latter, so a tick that lands
-        between `cryptsetup open` and `mount` cannot snapshot a half-mounted
-        container.
-    """
-    # One entry per state the shield can report; the nickname is the `icon_key`
-    # that `replace_menu_if_different()` remembers and `self.icons` is keyed by.
-    # The two lists are positional, so they are edited together.
+class LuksTray:
+    """The tray icon, its menu, and the refresh and mount policy."""
     svg_info = SimpleNamespace(version='04', bases=[
-                            'white-shield',   # nothing unlocked, and the state is known
-                            'alert-shield',   # something unlocked but not mounted
-                            'green-shield',   # something unlocked and mounted
-                            'orange-shield',  # history locked: the state is unknown
-                            # 'yellow-shield',  # unused: no state needs a fifth icon
+                            'white-shield',
+                            'alert-shield',
+                            'green-shield',
+                            'orange-shield',
                         ],
                         nicknames=[
                             'none',
@@ -285,6 +193,12 @@ class LuksTray():
                         ] )
 
     def __init__(self, ini_tool, opts):
+        """Build the tray, its icons and its timers.
+
+        Args:
+            ini_tool: Configuration and path helper.
+            opts: Parsed command-line options.
+        """
         self.uid = os.environ.get('SUDO_UID', os.getuid())
         self.gid = os.environ.get('SUDO_GID', os.getgid())
 
@@ -387,7 +301,7 @@ class LuksTray():
         self.operation = None
 
         # The tray item is shown immediately; a host that is not on the bus yet
-        # is picked up by the watch below instead of being waited for.  ``menu``
+        # is picked up by the watch below instead of being waited for.  `menu`
         # exists first, so re-registering the item can restore it, and the watch
         # starts *before* the item is shown: a watcher that appears between the
         # two still produces the event we need.
@@ -432,36 +346,13 @@ class LuksTray():
 
     @staticmethod
     def check_dependencies(verbose=False):
-        """ Return (found, missing) for the system commands the tray shells out to.
+        """Return `(found, missing)` for the commands the tray runs.
 
-            `__init__` refuses to start when `missing` is non-empty (it used to
-            be a bare `assert`, which `python -O` stripped) and `--check-deps`
-            prints the same two lists. Lookup is `shutil.which()`, so a PATH
-            that lacks /usr/sbin reports `cryptsetup` as missing even though it
-            is installed -- run the tray the way the desktop session would.
-            That is not hypothetical: the shipped unit once pinned the path
-            without the sbin directories, and the applet refused to start under
-            `systemd --user` while the same shell found every command, so a
-            missing report now names the PATH it searched.  The lookup is not
-            widened to /usr/sbin behind the caller's back on purpose: the
-            commands are later run through the inherited PATH, so a hit found
-            outside it would only move the failure to the first `mount`.
+        Args:
+            verbose: Print every checked command.
 
-            The list is meant to be *complete*, not minimal: a command left off
-            it does not go away, it just fails later, on some unlucky path,
-            with a message that no longer says "install me". Three entries look
-            superfluous and are not:
-
-            - `sudo` is never looked up by the app itself -- `sudo_cmd()` and
-              `sudo_run()` prepend it -- so without this check its absence
-              would surface as a FileNotFoundError from subprocess rather than
-              as a readable "please install sudo";
-            - `blkid` is only a read-only probe, but it is what keeps a file
-              container's history entry alive: without it the LUKS UUID cannot
-              be re-derived and the entry (password, mount point) is purged;
-            - `touch` and `chown` sit on the two paths that are rarely re-run:
-              a newly created file container, and the repair of a root-owned
-              vault root left behind by an older `sudo mkdir -p`.
+        Returns:
+            tuple: Found and missing command names.
         """
         utilities = [
             'sudo', 'lsblk', 'blkid', 'cryptsetup', 'losetup',
@@ -485,7 +376,14 @@ class LuksTray():
 
     @staticmethod
     def get_emoji_font(size=10):
-        """Try to load Noto Color Emoji, fallback to system emoji-capable fonts."""
+        """Return a font that can render color emoji.
+
+        Args:
+            size: Point size.
+
+        Returns:
+            QFont: The best available emoji font.
+        """
         preferred_fonts = [
             "Noto Color Emoji",         # Linux standard
             "Segoe UI Emoji",           # Windows
@@ -505,16 +403,14 @@ class LuksTray():
         return QFont()  # system default
 
     def update_mounts(self):
-        """ Re-read /proc/mounts into `mount_infos` and `upons`.
+        """Re-read `/proc/mounts` into `mount_infos` and `upons`.
 
-            Returns the set of *device* keys (`mount_infos.keys()`), which is
-            what the old caller passed around as "mount points". Callers that
-            need mount points must use `self.upons` -- `check_upon()` documents
-            the difference.
+        Returns:
+            set: The mounted device keys.
         """
         self.mount_infos = {}
         self.upons = set()
-        with open('/proc/mounts', 'r', encoding='utf-8') as f:
+        with open('/proc/mounts', encoding='utf-8') as f:
             for line in f:
                 parts = line.split()
                 if len(parts) >= 4:
@@ -528,41 +424,18 @@ class LuksTray():
         return set(self.mount_infos.keys())
 
     def is_mounted(self, thing):
-        """ True if `thing` is a mounted device or a mount point. """
+        """Return True if `thing` is a mounted device or mount point."""
         return thing in self.mount_infos or thing in self.upons
 
     def merge_containers_history(self):
-        """ Make the history agree with the containers just discovered.
-
-            The history is restored from disk first (another process may have
-            written it), then every container without an entry is registered
-            and the result is saved once -- so a device or file seen for the
-            first time is remembered before the menu is built from it.
-        """
+        """Make the history agree with the containers just discovered."""
         self.history.restore()
         for container in self.containers.values():
             self.history.ensure_container(container)
         self.history.save()
 
     def identify_file_containers(self):
-        """ Key a loop-backed container by the container *inside* the file.
-
-            `parse_lsblk()` keys one by the UUID of its loop device, which is
-            the file's own identity only while `blkid` can read a header there.
-            A TrueCrypt/VeraCrypt header is encrypted, so `lsblk` reports
-            nothing for the loop device and the entry arrived keyed by `None`,
-            while the history keys that same file by its salt (see
-            `get_container_identity()`). The menu then listed the container
-            twice -- once from `lsblk`, once as a history stand-in built by
-            `history_file_container()` -- and `merge_containers_history()`
-            recorded the `None` key as a history entry of its own. Several such
-            containers also collided under the single `None` key, so all but
-            one of them vanished from the menu.
-
-            Re-keying before the history is merged makes the two agree, which
-            is what removes the duplicate. It costs one `blkid` per poll, and
-            only for a container `lsblk` could not identify at all.
-        """
+        """Re-key loop-backed containers by the container inside the file."""
         identified = {}
         for uuid, container in self.containers.items():
             identity = ''
@@ -579,18 +452,13 @@ class LuksTray():
         self.containers = identified
 
     def history_file_container(self, vital):
-        """ The stand-in container for a history entry lsblk did not report.
+        """Return the stand-in container for a history entry lsblk missed.
 
-            A LUKS file container is normally discovered through its loop
-            device, which is why the menu can see one that was closed by
-            another session. A TrueCrypt/VeraCrypt file has no loop device at
-            all -- cryptsetup reads the file directly -- and its header is
-            encrypted, so lsblk has nothing to report and this namespace is the
-            only record of it.
+        Args:
+            vital: The history record.
 
-            The mapper name is derived exactly the way `mount_luks_container()`
-            derives it, which is enough to tell "open" from "closed" and to
-            close it again from the menu.
+        Returns:
+            SimpleNamespace: The container record.
         """
         container = DeviceInfo.make_partition_namespace('', '')
         container.type = 'crypt'
@@ -608,17 +476,7 @@ class LuksTray():
         return container
 
     def update_menu(self):
-        """Refresh device/history state, then rebuild the tray menu.
-
-            This is both the 3 s timer slot and the call dialogs make when an
-            operation finishes, so it has to be re-entrancy safe. It reads
-            /proc/mounts, spawns lsblk, reloads history (blkid per back_file)
-            and finally rebuilds the QMenu. A nested second run used to happen
-            whenever an event was dispatched inside the first one -- the
-            processEvents() that show_progress() called did exactly that --
-            and it could rebuild the menu from a container list captured
-            *before* a cryptsetup/mount that was still in flight.
-        """
+        """Refresh device and history state, then rebuild the menu."""
         if self.refreshing or self.operation:
             return
         self.refreshing = True
@@ -649,13 +507,13 @@ class LuksTray():
 
     @contextmanager
     def busy_operation(self, name):
-        """Suspend polling while a privileged dialog action is in flight.
+        """Suspend polling while a privileged dialog action runs.
 
-            Between `cryptsetup open` and `mount` (or between `umount` and
-            `cryptsetup close`) the system is in a state no refresh should
-            snapshot: the container looks half-opened, and the menu rebuilt
-            from it offered the wrong action. Restored on exit, including via
-            exceptions, so a failed operation cannot park the poller.
+        Args:
+            name: Operation name recorded while the block runs.
+
+        Yields:
+            None: Control while the operation is in flight.
         """
         previous, self.operation = self.operation, name
         try:
@@ -664,30 +522,7 @@ class LuksTray():
             self.operation = previous
 
     def update_menu_items(self):
-        """ Build the menu entries and hand them to `replace_menu_if_different()`.
-
-            The list is a mix of ready-made `QAction`s and `None` for a
-            separator: building actions is cheap and comparing them is what
-            decides whether the popup has to be replaced at all.
-
-            Every fixed entry starts with one symbol from the same small set
-            (`✚` add, `✦` create, `⚙` options, `✎` master password, `≡` log,
-            `☓` exit, `↺` restart), the way the containers already carry
-            `▣ ⧈ ▽ ‼`: they are basic dingbats that the monospace font itself
-            has, so the list reads at a glance without depending on an emoji
-            font being installed. `✎` is the password symbol in both states --
-            the prompt of a locked history and the create/change entry of a
-            readable one -- and those two never appear in the same menu.
-
-            "Open Log" is offered only when something can actually show it --
-            a terminal emulator, or the `log_viewer` prefix from `config.ini` --
-            because the applet's own stdout is the log file, so `less` has no
-            tty to draw on without one. It carries a count once this session has
-            reported a failure (see `log_entry_text()`), which is the one piece
-            of menu state that changes on its own: `replace_menu_if_different()`
-            compares the rendered text, so the marker appears (and the menu is
-            rebuilt) as soon as an error is logged.
-        """
+        """Build the menu entries and compare them with the current menu."""
         actions = []
 
         # The icon key is the state the shield reports: the containers decide it
@@ -839,19 +674,17 @@ class LuksTray():
 
 
     def replace_menu_if_different(self, actions, icon_key):
-        """ Install `actions` on the tray menu, but only if they changed.
+        """Install `actions` on the tray menu only when they changed.
 
-            Rebuilding the `QMenu` on every 3 s tick would close a popup under
-            the user's cursor, so the new list is compared first -- by length,
-            by rendered text and by icon key. Returns True when the menu was
-            replaced.
+        Args:
+            actions: Actions and separators for the menu.
+            icon_key: Icon state key.
 
-            `replace_menu()` reopens a popup that was visible, at the cursor
-            position, and keeps the list in `self.actions` for the next
-            comparison.
+        Returns:
+            bool: True when the menu was replaced.
         """
         def replace_menu():
-            """ Install `actions` on the menu and refresh the tray icon. """
+            """Install `actions` on the menu and refresh the tray icon."""
             nonlocal actions
             was_visible = self.menu and self.menu.isVisible()
 
@@ -904,15 +737,13 @@ class LuksTray():
 
 
     def handle_device_click(self, uuid):
-        """Handle clicking a partition."""
-        # Show a dialog to unmount or display info
+        """Open the mount dialog for a device container."""
         if uuid in self.containers:
             dialog = MountDeviceDialog(self, self.containers[uuid])
             dialog.exec()
 
     def handle_file_click(self, uuid):
-        """Handle clicking a partition."""
-        # Show a dialog to unmount or display info
+        """Open the mount dialog for a file container."""
         if uuid in self.containers:
             dialog = MountFileDialog(self, self.containers[uuid])
             dialog.exec()
@@ -928,17 +759,7 @@ class LuksTray():
         dialog.exec()
 
     def handle_options_click(self):
-        """ Open the options dialog: the four `[ui]` settings.
-
-            Never on a locked history. The menu does not offer either settings
-            entry there, and the reason is the master password rather than the
-            settings themselves: both of those dialogs write the history file
-            from the namespaces in memory, and a locked history has none -- which
-            is how an empty password once turned into a clear-text history. A
-            stale menu (one rebuilt before the history locked itself) asks for
-            the password instead, because the entry the user was reaching for is
-            the one that guards the file.
-        """
+        """Open the options dialog."""
         if self.history.status == 'locked':
             self.prompt_master_password()
             return
@@ -952,13 +773,7 @@ class LuksTray():
         return '✎ Update Master Password…'
 
     def handle_master_password_click(self):
-        """ Open the create-or-change dialog for the master password.
-
-            Refused while locked for the same reason as the options dialog: the
-            write re-encrypts the file from the namespaces in memory, and a
-            locked history has none. A stale click asks for the password, which
-            is the step that makes the entry usable.
-        """
+        """Open the create-or-change dialog for the master password."""
         if self.history.status == 'locked':
             self.prompt_master_password()
             return
@@ -972,42 +787,14 @@ class LuksTray():
             [], self.ini_tool.get_current_val('log_viewer') or ''))
 
     def log_entry_text(self):
-        """ The "Open Log" label, marked once this session reported a failure.
-
-            A failure the user was told about -- a mount that could not be
-            completed, a viewer that would not start -- is worth a pointer back
-            to the log, because the dialog says *what* failed and the log says
-            why. The count is of this session only (`log_session_start()` resets
-            it), so a restart clears the marker; the log file itself is not read
-            back, which keeps the menu's build cheap.
-        """
+        """Return the "Open Log" label for the current failure count."""
         problems = Utils.session_problems()
         if not problems:
             return '≡ Open Log'
         return f'≡ Open Log [{problems} error{"" if problems == 1 else "s"}]'
 
     def open_log(self):
-        """ Page debug.log -- and its one rotated generation -- in a terminal.
-
-            `less +F` follows the live file, so the check for "did my click do
-            anything?" is answered by the log itself; `:n` reaches debug.log.old.
-
-            Started with `spawn_detached()` rather than `run()`: the viewer
-            stays open for as long as the user keeps it open, and blocking the
-            Qt event loop that long would freeze the tray and the 3 s refresh.
-            That call also puts the viewer in its own session -- and, under
-            systemd, in a transient scope outside our cgroup -- so restarting or
-            stopping the applet does not take the log window down with it.
-
-            `quiet=True` because the viewer's own output is not ours: prt() has
-            pointed fds 1 and 2 at debug.log, and a terminal emulator that
-            inherited them writes its Qt chatter into the file -- `konsole`,
-            the `x-terminal-emulator` alternative on this machine, is a Qt6
-            application and dumps the platform theme's whole palette table
-            there. That is the noise `qt_message_handler()` cannot reach: a
-            message handler filters its own process, and those lines come from
-            the terminal's.
-        """
+        """Page `debug.log` and its rotated generation in a terminal."""
         preferred = self.ini_tool.get_current_val('log_viewer') or ''
         arguments = Utils.log_viewer_argv(self.ini_tool.log_path,
                                           self.ini_tool.log_old_path,
@@ -1028,25 +815,7 @@ class LuksTray():
         sys.exit()
 
     def restart_self(self, *_args):
-        """ Replace this process with a fresh instance of the applet.
-
-            Under a ``systemd --user`` unit the restart is handed to the
-            supervisor instead: a child spawned here would share the cgroup
-            systemd kills when it stops the unit, so it would die with us and
-            the row would behave like "quit".  See `_restart_via_systemd()`.
-
-            Elsewhere the replacement is launched as ``python -m luks_tray.Main``
-            so that PyKill recognises it via `command_names()`.  The
-            single-instance lock is released first: ``os._exit()`` skips atexit
-            handlers, and the replacement must be able to take the lock as soon
-            as it starts.  If the replacement cannot be spawned the lock is
-            taken back, so a failed restart does not quietly leave the running
-            tray unlocked.
-
-            The package root goes on PYTHONPATH rather than into ``cwd=``: the
-            replacement inherits whatever directory the user is in and must
-            still be able to import the module when running from a checkout.
-        """
+        """Replace this process with a fresh applet instance."""
         if service.supervised_here():
             self._restart_via_systemd()
             return
@@ -1079,30 +848,7 @@ class LuksTray():
         os._exit(0)
 
     def _restart_via_systemd(self):
-        """ Hand this process's restart to systemd, and wait until it is queued.
-
-            ``systemctl --user --no-block restart`` is run *synchronously*
-            (see `service.request_restart()`): the request has to be in the
-            manager's hands before this process exits, because the restart job
-            begins by stopping us, and that stop kills the unit's whole cgroup.
-            Detaching the helper instead -- ``systemd-run --user --scope``, the
-            tool `Utils.spawn_detached()` uses for viewers -- looked like the
-            safe way to outlive the stop and is not: the transient scope is
-            created out of our own cgroup, so it died with us before it had
-            asked systemd anything, the tray went down and the unit stayed
-            inactive.  That is the bug this method's first version shipped.
-
-            Once the job is queued, the applet leaves through the Qt event loop
-            rather than ``os._exit()``, so the lock is released by the normal
-            exit path, and the unit's ``ExecStart=`` starts the fresh instance.
-            The stop job signals us as it runs, so the stop line is written by
-            ``atexit`` or -- as observed -- by the termination handler, whichever
-            wins that race; either way the process is gone before systemd starts
-            its replacement.  A clean exit is also what ``Restart=on-failure``
-            does *not* answer on its own, so one restart request cannot turn
-            into two applets.  If the request cannot be made, the applet stays
-            up: a working tray with an unchanged menu row beats a dead one.
-        """
+        """Ask systemd to restart this unit and wait until the job is queued."""
         prt('+', 'restarting applet via systemd...')
         try:
             status = service.request_restart()
@@ -1124,70 +870,14 @@ class LuksTray():
     # -- a session that is ending ------------------------------------------
 
     def install_session_shutdown_handler(self):
-        """ Answer a session manager that asks the applet to leave -- when Qt can.
-
-            This is a *second* line of defence, and a build-dependent one.  The
-            guarantee is the shipped unit, in two halves: `Restart=on-failure`
-            together with `RestartPreventExitStatus=3 15 SIGTERM SIGHUP SIGINT
-            SIGPIPE` lets a logout end the applet for good -- with `Restart=always`
-            it did not: the unit started the applet again five seconds into the
-            teardown, into a session that was waiting for its processes to
-            disappear, so the session never emptied, SDDM never got the VT, and
-            the screen stayed black -- and `TimeoutStopSec=3` with `SendSIGKILL`
-            bounds how long the stop may take, so a wedged event loop or an open
-            modal dialog cannot hold a session open for systemd's default 90s.
-            That pair holds whatever ends the process.
-
-            Whether this handler ever runs depends on how Qt was built.  An X11
-            logout is a conversation only with clients registered with the
-            session manager (ksmserver): Qt's xcb plugin registers by opening an
-            ICE connection while `SESSION_MANAGER` is set, and reports the save
-            phase as `commitDataRequest`.  The distribution's Qt 6 does that --
-            `SmcOpenConnection` is linked into libQt6XcbQpa.  The PyQt6 wheel
-            ships a Qt *without* X11 session management, so the connect below
-            succeeds against a signal that never fires: no session management,
-            no handler, and the applet is not in the session manager's
-            conversation at all -- it simply waits for the stop, which the unit's
-            bounded `TimeoutStopSec=` then guarantees.  That is fine, because
-            `Restart=on-failure` keeps it down; it is also why this is an extra
-            rather than the mechanism that makes a logout finish.
-
-            Observed, not our doing: an installed build with no handler
-            connected (3.0.0.99.2, whose Main.py has no `commitDataRequest`)
-            still wrote a clean `=== luks-tray ... stopped, pid N ===` at a KDE
-            logout, with no `(signal 15)` that `install_termination_log()` would
-            have appended -- the interpreter returned from its event loop on its
-            own.  The distro Qt's xcb plugin answers the session manager's die
-            phase itself: the `SmcDieProc` it registers (read from Qt 6.8.2 on
-            this machine) calls
-            `QWindowSystemInterface::handleApplicationTermination()`, whose
-            synchronous delivery reaches
-            `QGuiApplicationPrivate::processApplicationTermination()` and sends
-            `QEvent::Quit` to the application.  What this handler adds is an
-            explicit, earlier answer in the protocol's terms -- quit with status
-            0 and the `RestartNever` hint -- not the clean exit itself.
-
-            Where there is no session manager -- a Wayland session, a bare X
-            session, a terminal -- the signal is simply never emitted, so this
-            is inert rather than conditional.
-        """
+        """Answer a session manager that asks the applet to leave."""
         try:
             self.app.commitDataRequest.connect(self._on_commit_data_request)
         except (AttributeError, TypeError) as exc:
             prt(f'note: no session management in this Qt: {exc}')
 
     def _on_commit_data_request(self, manager):
-        """ A session manager is ending the session: quit, and do not come back.
-
-            The Qt signal carries the `QSessionManager`; the restart hint rides
-            along with the client's saved state, and says "do not restore me".
-            Quitting leaves the event loop normally, so this slot exits 0 -- but
-            it is not what made the logout complete: the unit's
-            `Restart=on-failure` / `RestartPreventExitStatus=` are, and an
-            installed build with no handler connected still stopped cleanly (see
-            `install_session_shutdown_handler()`).  A Qt that refuses the hint
-            is not fatal either -- documented, and ignored.
-        """
+        """Quit without being restored when the session manager ends the session."""
         prt('session manager is ending the session; quitting')
         try:
             manager.setRestartHint(QSessionManager.RestartHint.RestartNever)
@@ -1196,17 +886,13 @@ class LuksTray():
         self.app.quit()
 
     def lock_history(self, reason='session event'):
-        """ Forget the master password and everything it decrypted.
+        """Forget the master password and the decrypted vitals.
 
-            Called by `SessionLockWatch` when the session stops being ours, and
-            deliberately quiet: no dialog can be shown over a lock screen, and
-            none is needed, because the rebuilt menu *is* the report -- it
-            becomes `✎ Click to enter master password` and the shield turns
-            orange. Unlocking is then the entry that always unlocks.
+        Args:
+            reason: Event that triggered the lock.
 
-            Idempotent, because one screen lock produces two or three of these
-            events and the log should say so once. Returns True only when this
-            call is what locked a readable history.
+        Returns:
+            bool: True when this call locked a readable history.
         """
         if not self.history.lock():
             return False
@@ -1215,12 +901,7 @@ class LuksTray():
         return True
 
     def prompt_master_password(self):
-        """ Ask for the master password that unlocks the history.
-
-            The dialog only unlocks; setting, changing and clearing the password
-            are in the master-password entry of the menu, which needs a history
-            it can already read.
-        """
+        """Ask for the master password that unlocks the history."""
         dialog = MasterPasswordDialog(self)
         dialog.exec()
 
@@ -1232,14 +913,7 @@ class LuksTray():
         return key if key in self.icons else 'none'
 
     def _install_tray_icon(self):
-        """ Create the tray item; showing it is what registers it with a host.
-
-            Qt talks to the StatusNotifierWatcher once, when the item is shown,
-            and never retries, so re-creating the item is the only way to
-            register with a host that was absent the first time -- or with a
-            host that has been restarted since.  The previous item is hidden
-            before the new one is shown, so a host never lists two entries.
-        """
+        """Create the tray item and show it so a host registers it."""
         previous = getattr(self, 'tray_icon', None)
         if previous is not None:
             previous.hide()
@@ -1281,17 +955,13 @@ class LuksTray():
             self._on_tray_host_appeared()
 
     def update_history(self, uuid, values, back_file=None, meta_type=None):
-        """ Record/refresh the history entry for a container.
+        """Record or refresh the history entry for a container.
 
-            `back_file` is only meaningful for crypt *file* containers, and it
-            must be stored here: HistoryClass re-derives the identity of every
-            back_file on restore and purges the entry when it does not match
-            the key. A file entry written without its back_file can therefore
-            never be found again after a restart.
-
-            `meta_type` is the header type that opened the file ('luks' or
-            'tcrypt'), or None to leave what is recorded alone -- a device is
-            always LUKS and nothing ever has to be remembered for it.
+        Args:
+            uuid: Container identity.
+            values: Form values, including `upon` and `password`.
+            back_file: Backing file for a file container.
+            meta_type: Header type that opened the container.
         """
         vital = self.history.get_vital(uuid)
         if uuid:
@@ -1317,15 +987,10 @@ class LuksTray():
             self.history.put_vital(vital)
 
     def get_auto_mount_root(self):
-        """ Return the configured `auto_mount_folder` as an absolute path.
+        """Return the configured `auto_mount_folder` as an absolute path.
 
-            A relative value is *refused*, not resolved: `abspath` would turn
-            `Vaults` into `<cwd>/Vaults`, which then passes every check in
-            [`validate_auto_mount_root()`](luks_tray/Main.py) -- it is absolute
-            by then, two levels deep, neither home nor a system tree -- so a
-            typo would silently relocate the vault area to wherever the process
-            happened to start. The configured default is used instead, reported
-            once per offending value.
+        Returns:
+            str: The vault root.
         """
         configured = self.ini_tool.get_current_val('auto_mount_folder')
         auto_root = LuksTray.expand_real_user(configured)
@@ -1339,12 +1004,10 @@ class LuksTray():
 
     @staticmethod
     def get_real_user_ids():
-        """ Return (uid, gid) of the user this tray acts for.
+        """Return `(uid, gid)` of the user this tray acts for.
 
-            Under `sudo` these are SUDO_UID/SUDO_GID; otherwise they are the
-            effective ids. The value is always an int -- SUDO_UID arrives as a
-            string from the environment, which cannot be compared with the
-            numeric st_uid reported by os.stat().
+        Returns:
+            tuple: The user and group ids.
         """
         def as_int(value, fallback):
             """ Coerce an environment id to int, warning on garbage. """
@@ -1364,7 +1027,11 @@ class LuksTray():
 
     @staticmethod
     def get_real_user_home():
-        """ Home directory of the user this tray acts for (sudo aware). """
+        """Return the home directory of the user this tray acts for.
+
+        Returns:
+            str: The home directory.
+        """
         real_user = os.environ.get('SUDO_USER')
         if real_user:
             try:
@@ -1381,30 +1048,13 @@ class LuksTray():
 
     @staticmethod
     def validate_auto_mount_root(auto_root):
-        """ Return None if `auto_root` may be cleaned, else an error string.
+        """Return None if `auto_root` may be cleaned, else an error string.
 
-            [`remove_unused_automounts()`](luks_tray/Main.py) deletes (empty)
-            subdirectories below `auto_mount_folder`, which comes straight from
-            config.ini, so a typo (`/`, `/home`) or a shared system path must not
-            turn the startup cleanup into an `rmdir` sweep over unrelated paths.
-            The folder therefore has to look like a *dedicated* vault area:
+        Args:
+            auto_root: Candidate vault root.
 
-            - an absolute path, at least two levels deep, not in/under a system
-              tree, and not a symlink (which could point anywhere);
-            - neither the real user's home nor an ancestor of it, and not inside
-              another user's home;
-            - if it exists: a plain directory, not a mount point, owned by the
-              real user or by root (an install whose mount points were created
-              with `sudo mkdir` has a root-owned root; the cleanup still works
-              there because it retries `rmdir` via `sudo -n`), and not writable
-              by *other*. A group-writable root is accepted: on a user-private-
-              group system (`umask 0002`) that is simply the mode `mkdir`
-              makes, and the caller tightens it with
-              [`repair_auto_mount_root()`](luks_tray/Main.py).
-
-            The checks are deliberately conservative: when in doubt, skip the
-            cleanup and log why (`remove_unused_automounts` treats any returned
-            string as "do nothing").
+        Returns:
+            str | None: The refusal reason, or None when acceptable.
         """
         try:
             path = os.path.abspath(auto_root)
@@ -1472,22 +1122,13 @@ class LuksTray():
 
     @staticmethod
     def repair_auto_mount_root(auto_root):
-        """ Make an existing, accepted, user-owned vault root owner-only.
+        """Make an accepted, user-owned vault root owner-only.
 
-            The root is created with `mkdir -p -m 0700`, but one made by an
-            older release -- or by the user's own `mkdir` -- inherits the
-            process umask: on a user-private-group system (`umask 0002`, the
-            common desktop default) that is 0775. The policy does not refuse
-            such a root (only *other*-writable is fatal), but the app should not
-            leave the area it cleans up group-writable. Tightening it here, with
-            a note in the log, fixes it without a popup.
+        Args:
+            auto_root: Vault root to tighten.
 
-            The path is validated first, so a config typo (`/home`, a symlink,
-            another user's home, a mount point) is never chmod'd. A root this
-            user does not own is skipped too: the `chown` in
-            [`ensure_auto_mount_root()`](luks_tray/Main.py) handles that case.
-
-            Returns True when the mode was changed.
+        Returns:
+            bool: True when the mode was changed.
         """
         if LuksTray.validate_auto_mount_root(auto_root):
             return False
@@ -1512,23 +1153,13 @@ class LuksTray():
 
     @staticmethod
     def ensure_auto_mount_root(auto_root):
-        """ Make the auto-mount root exist, and belong to the real user.
+        """Make the auto-mount root exist and belong to the real user.
 
-            Earlier releases created mount points with `sudo mkdir -p`, which
-            left the *root* root-owned as well (the `-p` creates missing
-            parents). Since `rmdir` needs write permission on the parent, the
-            cleanup could then never remove anything below it, and every new
-            mount point had to be created through sudo again. One non-recursive
-            `chown` of the root repairs that for good: afterwards the user owns
-            the tree, so mount points are created and cleaned up unprivileged.
+        Args:
+            auto_root: Vault root to create or repair.
 
-            The `chown` is deliberately *not* `-R`: that would rewrite the
-            ownership of whatever filesystem is mounted inside. It is also only
-            attempted on a root that [`validate_auto_mount_root()`]
-            (luks_tray/Main.py) accepts, so a path read from config.ini cannot
-            turn this into a privileged chown of an arbitrary directory.
-
-            Returns None on success, or a 'FAIL: ...' string.
+        Returns:
+            str | None: The failure text, or None on success.
         """
         if not os.path.isdir(auto_root):
             # The mode is part of the policy this folder has to pass: leaving it
@@ -1553,16 +1184,10 @@ class LuksTray():
         return sudo_cmd(['chown', f'{real_uid}:{real_gid}', auto_root])
 
     def generate_auto_mount_folder(self):
-        """ Return a new, unused mount point below the auto-mount root.
+        """Return a new, unused mount point below the auto-mount root.
 
-            Makes the root exist and belong to the user first (see
-            [`ensure_auto_mount_root()`](luks_tray/Main.py)), so the mount point
-            below it can be created unprivileged and cleaned up again. Then
-            offers petname-style names: the short suffix alone at first and the
-            full `adjective_name` form after a few tries, skipping anything
-            currently mounted or known to the history. If those run out, a
-            numeric `vaultNNNN` fallback is used; RuntimeError is raised when
-            even that is exhausted.
+        Returns:
+            str: The generated mount point.
         """
 
         def available(basename):
@@ -1619,19 +1244,13 @@ class LuksTray():
 
     @staticmethod
     def remove_empty_dir(path):
-        """ rmdir `path` if (and only if) it is an empty, plain directory.
+        """Remove `path` when it is an empty, plain directory.
 
-            The guards below decide whether a directory may go; the credentials
-            used to remove it do not change them -- `rmdir` itself refuses
-            non-empty directories and mount points, and the caller has already
-            restricted `path` to below a validated auto-mount root (see
-            [`validate_auto_mount_root()`](luks_tray/Main.py)).
+        Args:
+            path: Directory to remove.
 
-            The first attempt is unprivileged; EACCES/EPERM is retried with
-            `sudo -n`, like the rest of the mount handling. That is what makes
-            the cleanup work on a vault root earlier releases left root-owned
-            (`sudo mkdir -p` created it as root): `rmdir` needs write permission
-            on the *parent*, which the unprivileged tray does not have there.
+        Returns:
+            bool: True when it was removed.
         """
         if os.path.islink(path) or not os.path.isdir(path):
             return False
@@ -1667,7 +1286,7 @@ class LuksTray():
             return False
 
     def remove_if_auto(self, mount):
-        """Remove target_dir if it is empty and within parent_dir"""
+        """Remove `mount` when it is an empty directory below the vault root."""
         parent_dir = self.get_auto_mount_root()
         target_dir = os.path.abspath(mount)
 
@@ -1680,14 +1299,10 @@ class LuksTray():
         return LuksTray.remove_empty_dir(target_dir)
 
     def remove_unused_automounts(self):
-        """ A startup function (could be periodic) that cleans up the
-            auto mount folder.
+        """Remove empty subdirectories of `auto_mount_folder`.
 
-            Deletes empty subdirectories of `auto_mount_folder`, which is read
-            from config.ini -- so the folder is validated first (see
-            [`validate_auto_mount_root()`](luks_tray/Main.py)); when it is not a
-            dedicated, user-owned directory the whole pass is skipped. Returns
-            the number of directories removed.
+        Returns:
+            int: Number of directories removed.
         """
         parent_dir = self.get_auto_mount_root()
         # A root created by an older release inherits the umask (0775 on a
@@ -1748,9 +1363,7 @@ class LuksTray():
 
     @staticmethod
     def expand_real_user(path):
-        """
-        Expands ~ and ~user in paths relative to the *real* user when run under sudo.
-        """
+        """Expand `~` and `~user` relative to the real user under sudo."""
         real_user = os.environ.get('SUDO_USER')
         if not real_user:
             return os.path.expanduser(path)
@@ -1768,12 +1381,13 @@ class LuksTray():
 
     @staticmethod
     def shorten_home(path):
-        """ The display form of `path`: the real user's home becomes `~`.
+        """Return `path` with the real user's home written as `~`.
 
-            For menu and dialog text only -- anything that mounts, unmounts or
-            compares paths keeps the absolute value. The home used is the one
-            `expand_real_user()` expands `~` back to, so the abbreviation and
-            the expansion always name the same directory.
+        Args:
+            path: Path to shorten.
+
+        Returns:
+            str: The display form.
         """
         if not path:
             return path
@@ -1788,13 +1402,10 @@ class LuksTray():
 
 
 def tray_watcher_present():
-    """ Ask the session bus whether a StatusNotifierWatcher is registered.
+    """Return whether a StatusNotifierWatcher is registered.
 
-        Returns True/False, or None when the question cannot be asked at all
-        (no QtDBus module, no session bus, D-Bus error).  QtDBus ships with the
-        PyQt6 this applet already requires, so the check adds no package; the
-        import is local, so importing this module -- and therefore
-        `luks-tray --help` -- never touches D-Bus.
+    Returns:
+        bool | None: True or False when known, None when it cannot be asked.
     """
     try:
         # pylint: disable=import-outside-toplevel
@@ -1819,19 +1430,14 @@ def tray_watcher_present():
 
 
 def acquire_lock_or_take_over(lock, replace=False):
-    """ Take the single-instance lock and report whether this process owns it.
+    """Take the single-instance lock, or take over from its holder.
 
-        The lock comes *first*: killing an incumbent must never be what a plain
-        start does, because a DE autostart plus a supervisor that restarts the
-        tray would then ping-pong forever, each new instance terminating the
-        other.
+    Args:
+        lock: The `SingleInstance` lock.
+        replace: Terminate a non-supervised holder.
 
-        Killing is therefore the *takeover* path, and it is opt-in
-        (``--replace``).  Even then the recorded pid is only signalled after its
-        command line is confirmed to still be luks-tray, so a recycled pid or a
-        foreign lock holder is left alone -- and a holder that systemd
-        supervises is never signalled at all, because restarting the unit is
-        what recreates it (see `service.supervised_by()`).
+    Returns:
+        bool: True when this process owns the lock.
     """
     if lock.acquire(retries=5, delay=0.2):
         return True
@@ -1862,14 +1468,13 @@ def confirm(question):
 
 
 def run_service_command(opts):
-    """ Run one --svc-* verb and return the process exit status.
+    """Run one `--svc-*` verb and return the process exit status.
 
-        None of these verbs build the applet: they render the shipped unit for
-        this session, install it, and hand control to systemctl.  They print to
-        stdout/stderr as they are, so the verbs stay usable from a terminal --
-        and from `if luks-tray --svc-status; then ...`, which is why `status`
-        has its own exit codes (0 active, 1 installed but not running, 2 not
-        installed) instead of the usual 0/1.
+    Args:
+        opts: Parsed command-line options.
+
+    Returns:
+        int: Process exit status.
     """
     try:
         holder = service.applet_holder(IniTool(paths_only=True).folder)
@@ -1887,27 +1492,7 @@ def run_service_command(opts):
 
 
 def main():
-    """ Entry point: parse the CLI and then run the tray loop.
-
-        The informational options (`--version`, `--edit-config`,
-        `--follow-log`, `--check-deps`, `--svc-*`) print or exec and never
-        return; the normal path takes the single-instance lock, builds
-        `IniTool` and `LuksTray` and hands control to `QApplication.exec()`.
-        Anything that fails on the way is logged through `prt()` -- stdout may
-        already be the debug log by then -- and exits with status 15.  A second
-        instance that does not own the lock exits with status 3 instead of
-        starting.
-
-        The `--svc-*` verbs never construct the applet and never take the lock:
-        they exist to install, inspect and remove the `systemd --user` unit, so
-        they have to keep working while a tray is running -- or while the unit
-        is broken.
-
-        `--version` is deliberately handled by argparse (`action='version'`):
-        it exits while parsing, before `IniTool` is built and before stdin is
-        detached from the terminal, which is what makes it usable as the
-        smoke check ./bless runs against a wheel installed in a scratch venv.
-    """
+    """Parse the CLI and run the tray loop."""
     import argparse
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 

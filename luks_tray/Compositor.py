@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-""" Compositor setup instructions for the app's Wayland windows.
-
-    Wayland has no client-side request to make a window float: an
-    `xdg_toplevel` is placed by the compositor, and `move()` is ignored.  The
-    stable trait a rule can match is the surface `app_id`, which
-    [`luks_tray.AppInfo`](luks_tray/AppInfo.py:1) sets to the same name for the
-    dialogs, the error boxes and the file pickers.  This module turns that rule
-    into the two snippets the supported tiling compositors understand.
-
-    `--show-window-rules` is deliberately informational: it prints the snippet
-    and never edits a user's compositor configuration.
-"""
+"""Compositor window rules for the app's Wayland dialogs."""
 import os
 
 from luks_tray.AppInfo import APP_NAME
@@ -19,21 +7,16 @@ from luks_tray.AppInfo import APP_NAME
 NIRI = 'niri'
 SWAY = 'sway'
 
-#: niri reads this from ~/.config/niri/config.kdl.
 NIRI_RULE = f'''window-rule {{
     match app-id="{APP_NAME}"
     open-floating true
 }}'''
 
-#: sway reads this from ~/.config/sway/config.  Do not add `no_focus`: a
-#: password dialog that cannot take keyboard focus is worse than a tiled one.
 SWAY_RULE = (
     f'for_window [app_id="{APP_NAME}"] floating enable, '
     'move position center, border normal'
 )
 
-#: niri renamed this action: `reload-config` is rejected by current releases
-#: ("unrecognized subcommand"), and `load-config-file` is the accepted spelling.
 NIRI_INTRO = (
     '# niri: add this to ~/.config/niri/config.kdl, then run'
     ' `niri msg action load-config-file`'
@@ -44,16 +27,18 @@ SWAY_INTRO = (
 
 
 def _environment(env):
+    """Return `env`, or `os.environ` when it is None."""
     return os.environ if env is None else env
 
 
 def desktop_names(env=None):
-    """ Return the lower-cased desktop names this session advertises.
+    """Return the lower-cased desktop names advertised by the session.
 
-        `XDG_CURRENT_DESKTOP` is a colon-separated list on some desktops, and
-        `DESKTOP_SESSION` is the fallback used by lighter setups.  Both are
-        read, and duplicates are dropped, so a session that sets both does not
-        make the caller decide which one wins.
+    Args:
+        env: Environment mapping to read; defaults to `os.environ`.
+
+    Returns:
+        list: Unique names from `XDG_CURRENT_DESKTOP` and `DESKTOP_SESSION`.
     """
     environment = _environment(env)
     names = []
@@ -66,7 +51,7 @@ def desktop_names(env=None):
 
 
 def _detect_in(names):
-    """ Return the first supported compositor named in `names`. """
+    """Return the first supported compositor named in `names`."""
     for compositor in (NIRI, SWAY):
         if any(compositor in name for name in names):
             return compositor
@@ -74,12 +59,13 @@ def _detect_in(names):
 
 
 def detect(env=None):
-    """ Return 'niri', 'sway', or '' when neither is advertised.
+    """Return `'niri'`, `'sway'`, or `''` when neither is advertised.
 
-        `XDG_CURRENT_DESKTOP` is checked first and `DESKTOP_SESSION` only as a
-        fallback: the latter can be left over from the session that started the
-        shell (a niri login running an explicit sway test, for example), and a
-        stale value must not outrank the variable the user just set.
+    Args:
+        env: Environment mapping to read; defaults to `os.environ`.
+
+    Returns:
+        str: The detected compositor, if any.
     """
     environment = _environment(env)
     for key in ('XDG_CURRENT_DESKTOP', 'DESKTOP_SESSION'):
@@ -93,7 +79,14 @@ def detect(env=None):
 
 
 def rules_for(compositor):
-    """ Return the rule snippet for `compositor`, or '' when unknown. """
+    """Return the rule snippet for `compositor`, or `''` when unknown.
+
+    Args:
+        compositor: Compositor name.
+
+    Returns:
+        str: The rule snippet.
+    """
     if compositor == NIRI:
         return NIRI_RULE
     if compositor == SWAY:
@@ -102,11 +95,14 @@ def rules_for(compositor):
 
 
 def show_rules(echo=print, env=None):
-    """ Print the rules for this session and return a process exit status.
+    """Print the rules for this session and return an exit status.
 
-        An unknown desktop gets both snippets: the flag is most useful on a
-        machine where the user is not yet sure what the compositor expects,
-        and printing the alternatives is more helpful than refusing to answer.
+    Args:
+        echo: Callable used to print each line.
+        env: Environment mapping to read; defaults to `os.environ`.
+
+    Returns:
+        int: Process exit status, always 0.
     """
     compositor = detect(env)
     if compositor:
@@ -115,7 +111,7 @@ def show_rules(echo=print, env=None):
         echo(rules_for(compositor))
         return 0
 
-    echo('# luks-tray did not recognise this desktop session.')
+    echo('# luks-tray did not recognize this desktop session.')
     echo('# If dialogs open tiled, add the rule for your compositor:')
     echo('')
     echo(NIRI_INTRO)

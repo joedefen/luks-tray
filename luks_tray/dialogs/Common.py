@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-""" Shared dialog scaffolding for LUKS TRAY.
-
-    Every dialog uses the same body heading and the same window-title suffix.
-    That is deliberate: a Wayland compositor owns decorations and placement, so
-    a dialog cannot rely on its title bar being drawn.  Sway hides decorations
-    by default, and niri/X11 draw them, but the heading is part of the dialog
-    layout everywhere -- the information never depends on the compositor.
-
-    Compositor rules match the stable `app_id` set in
-    [`luks_tray.AppInfo`](luks_tray/AppInfo.py:1), not the title, so one rule
-    covers the dialogs, the error boxes and the file pickers.
-"""
+"""Shared dialog scaffolding for LUKS TRAY."""
 # pylint: disable=unused-import,broad-exception-caught, invalid-name
 # pylint: disable=no-name-in-module,import-outside-toplevel,too-many-instance-attributes
 # pylint: disable=too-many-locals,too-many-branches,too-many-statements
@@ -20,36 +8,45 @@
 import os
 from functools import partial
 
-from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog,
-                             QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-                             QProgressBar, QPushButton, QVBoxLayout)
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCursor
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QDialog,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QVBoxLayout,
+)
 
 from luks_tray.AppInfo import heading_text, window_title
-from luks_tray.Utils import note_problem, prt_once
 from luks_tray.DeviceInfo import DeviceInfo
+from luks_tray.Utils import note_problem, prt_once
 
 
 class CommonDialog(QDialog):
-    """ Base class for every dialog: layout helpers, paths and progress UI.
+    """Base class for every dialog: layout helpers, paths and progress UI.
 
-        A dialog is built from small pieces (`add_line()`, `add_input_field()`,
-        `add_push_button()`) and then runs one privileged operation, so this
-        class holds the parts they all share: the invisible parent window from
-        the tray, cursor-relative placement under X11 (see `showEvent()`; a
-        Wayland compositor places the window itself), password visibility
-        toggling, the error message box and the progress bar.
-
-        The tray is a constructor argument rather than a singleton lookup: it
-        keeps this package independent of `luks_tray.Main` (no circular import)
-        and lets tests pass a plain stand-in object.
+    Attributes:
+        home_dir: Home directory of the real user.
+        dot_vault_dir: Default directory for new crypt files.
+        vault_dir: Default mount area.
     """
     home_dir = None
-    dot_vault_dir = None # ~/.Vaults (default crypts)
-    vault_dir = None # ~/Vaults (default mount area)
+    dot_vault_dir = None
+    vault_dir = None
 
     def __init__(self, tray):
+        """Build the dialog scaffolding.
+
+        Args:
+            tray: The running tray instance.
+        """
         super().__init__(parent=tray.dialog_parent)
         self.tray = tray
         self.setWindowRole("dialog")
@@ -64,28 +61,18 @@ class CommonDialog(QDialog):
         self.button_layout = QHBoxLayout()
         self.password_toggle = None
         self.password_input = None
-        # key -> (line edit, eye button), in the order they were added. A
-        # dialog may hold more than one masked field (the options dialog asks
-        # for a new password twice), and each eye has to drive its own field.
         self.password_fields = {}
         self.items = []
         self.inputs = {}
         self.progress_label = None
         self.progress_bar = None
-        self.get_real_user_home_directory() # populate home/vault dir
+        self.get_real_user_home_directory()
 
     def set_title(self, title):
-        """ Set the window title and add the same purpose as a body heading.
+        """Set the window title and add the same purpose as a body heading.
 
-            The heading is added on every compositor, not only where the title
-            bar is missing: Sway hides decorations by default, but even a
-            compositor that draws them can change its mind, and a dialog that
-            carries its own heading is never ambiguous.  Legacy callers that
-            still pass the `[luks-tray]` suffix are accepted; the suffix only
-            belongs in the window title.
-
-            Inserted at position 0 because every dialog calls this before it
-            adds any fields.
+        Args:
+            title: Window title, with or without the app suffix.
         """
         self.setWindowTitle(window_title(title))
         heading = QLabel(heading_text(title))
@@ -101,56 +88,46 @@ class CommonDialog(QDialog):
         self.main_layout.insertWidget(0, heading)
 
     def showEvent(self, event):
+        """Place the dialog near the cursor before Qt shows it.
+
+        Args:
+            event: Qt show event.
         """
-        Called automatically by Qt immediately before the dialog is shown.
-        This is the most reliable place to adjust position based on final size.
-        """
-        # 1. Finalize size and get screen info
-        # This forces the layout to calculate the final width/height of the dialog
         self.adjustSize()
 
         cursor_pos = QCursor.pos()
         dialog_width = self.width()
         dialog_height = self.height()
 
-        # Get the screen where the cursor currently is, which is the most reliable
         screen = self.screen() or QApplication.primaryScreen()
         screen_geometry = screen.geometry()
 
-        # 2. Calculate initial position (centered below cursor, with a small offset)
         x = cursor_pos.x() - (dialog_width // 2)
         y = cursor_pos.y() + 20
 
-        # 3. Add Explicit Boundary Checks
-
-        # Horizontal (X-Axis) Checks
         if x < screen_geometry.left():
             x = screen_geometry.left()
         elif (x + dialog_width) > screen_geometry.right():
             x = screen_geometry.right() - dialog_width
 
-        # Vertical (Y-Axis) Checks
-        # If dialog is launching from the top tray, it's very likely to hit the top
         if y < screen_geometry.top():
             y = screen_geometry.top()
         elif (y + dialog_height) > screen_geometry.bottom():
             y = screen_geometry.bottom() - dialog_height
 
-        # 4. Move the dialog to the adjusted position
         self.move(x, y)
 
-        # IMPORTANT: Call the base class implementation
         super().showEvent(event)
 
     def hide_password(self):
-        """Hide every password field, and point its eye the right way."""
+        """Hide every password field and point its eye the right way."""
         for input_field, toggle in self.password_fields.values():
             toggle.setChecked(False)
             toggle.setText("👁️")
             self.set_password_visibility(input_field, False)
 
     def show_password(self):
-        """Show every password field, and point its eye the right way."""
+        """Show every password field and point its eye the right way."""
         for input_field, toggle in self.password_fields.values():
             toggle.setChecked(True)
             toggle.setText("●")
@@ -158,22 +135,21 @@ class CommonDialog(QDialog):
 
     @staticmethod
     def set_password_visibility(input_field, exposed):
-        """ Set one field's echo mode, whatever its eye button says.
+        """Set one field's echo mode.
 
-            The one place that knows which `QLineEdit` mode means "readable":
-            the toggles, the helpers above and `add_input_field()` all end up
-            here, so a field can never be shown while its button says hidden.
+        Args:
+            input_field: Line edit to update.
+            exposed: True to show the text.
         """
         input_field.setEchoMode(
             QLineEdit.EchoMode.Normal if exposed else QLineEdit.EchoMode.Password)
 
-
     def add_line(self, text, wrap=False):
-        """ Append a read-only text line to the main layout.
+        """Append a read-only text line to the main layout.
 
-            `wrap` is for the paragraphs that explain a consequence: a label
-            without word wrap makes the whole dialog as wide as its longest
-            sentence, which on a small screen is a dialog wider than the screen.
+        Args:
+            text: Text to show.
+            wrap: Enable word wrap for long paragraphs.
         """
         label = QLabel(text)
         if wrap:
@@ -181,14 +157,15 @@ class CommonDialog(QDialog):
         self.main_layout.addWidget(label)
 
     def add_push_button(self, label, method, arg=None):
-        """ Add a button to the button row that calls `method(arg)`.
+        """Add a button to the button row that calls `method(arg)`.
 
-            `arg` keeps the callbacks one-argument (`self.mount_device(uuid)`,
-            `self.cancel(_)`), which is also the signature Qt's `clicked`
-            hands over when a button is connected directly. The button is
-            returned so a dialog whose buttons describe a state (the master
-            password dialog enables "Clear" and "Change" as the two fields
-            change) can keep hold of it instead of searching the layout.
+        Args:
+            label: Button text.
+            method: Callable invoked on click.
+            arg: Argument passed to `method`.
+
+        Returns:
+            QPushButton: The new button.
         """
         button = QPushButton(label)
         button.clicked.connect(lambda: method(arg))
@@ -197,16 +174,23 @@ class CommonDialog(QDialog):
 
     def add_input_field(self, keys, label_texts, placeholder_texts, char_width=5,
                        field_type='text', add_on=''):
-        """ Adds a label and a line edit input to the main layout. """
+        """Add one or more labeled input fields to the dialog.
+
+        Args:
+            keys: Input key, or a list of keys.
+            label_texts: Label text, or a list matching `keys`.
+            placeholder_texts: Initial text, or a list matching `keys`.
+            char_width: Minimum field width in characters.
+            field_type: `'text'` or `'checkbox'`.
+            add_on: Optional `'password'`, `'folder'`, `'file'` or
+                `'new_file'` decoration.
+        """
         tray = self.tray
-        field_layout = QHBoxLayout() # Create a horizontal layout for the label and input field
+        field_layout = QHBoxLayout()
 
         if not isinstance(keys, list):
             keys = [keys]
 
-        # Normalize both arguments to lists *before* padding them: a scalar
-        # label/placeholder is repeated for every key, and appending to a
-        # still-scalar `placeholder_texts` used to raise AttributeError.
         if not isinstance(label_texts, (list, tuple)):
             label_texts = [label_texts]
         else:
@@ -236,15 +220,11 @@ class CommonDialog(QDialog):
             label_text = label_texts[idx]
             placeholder_text = placeholder_texts[idx]
 
-            label = QLabel(label_text) # Create a QLabel for the label text
-            # Set the width of the input field based on character width
-            # Approximation: assuming an average of 8 pixels per character for a monospace font
-             # You can adjust this factor based on the font
+            label = QLabel(label_text)
             if field_type == 'checkbox':
                 input_field = QCheckBox()
-                # For checkbox, use placeholder_text as the checkbox label instead of separate label
                 input_field.setText(label_text)
-                input_field.setChecked(False)  # Default unchecked
+                input_field.setChecked(False)
                 field_layout.addWidget(input_field)
 
             elif field_type == 'text':
@@ -255,13 +235,11 @@ class CommonDialog(QDialog):
                 field_layout.addWidget(label)
                 field_layout.addWidget(input_field)
             else:
-                # Validation must survive `python -O`; the old `assert` also
-                # left `input_field` unbound for the code that follows.
                 raise ValueError(f'invalid field_type {field_type!r}')
 
             if add_on == 'password':
                 exposed = tray.ini_tool.get_current_val('show_passwords_by_default')
-                exposed = bool(exposed) and not placeholder_text # don't show existing passwords
+                exposed = bool(exposed) and not placeholder_text
                 self.set_password_visibility(input_field, exposed)
                 toggle = QPushButton("●")
                 toggle.setFixedWidth(30)
@@ -269,71 +247,70 @@ class CommonDialog(QDialog):
                 toggle.setChecked(exposed)
                 toggle.setText("●" if exposed else "👁️")
                 toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-                # The field and its button are bound here, not looked up later:
-                # the callback used to read `self.password_*`, which is only
-                # ever the *last* masked field of the dialog.
                 toggle.clicked.connect(
                     partial(self.toggle_password_visibility, input_field, toggle))
                 field_layout.addWidget(toggle)
                 self.password_fields[key] = (input_field, toggle)
-                # The plain attributes stay pointed at the first field, which
-                # is what `hide_password()`/`show_password()` and the dialogs
-                # that hold a single password mean; `password_fields` is the
-                # answer for everything else.
                 if self.password_input is None:
                     self.password_input = input_field
                     self.password_toggle = toggle
 
-            if add_on == 'folder': # Create a Browse button
+            if add_on == 'folder':
                 button = QPushButton("Browse...", self)
-                button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Prevent the button from gaining focus
+                button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 button.clicked.connect(partial(self.browse_folder, input_field))
                 field_layout.addWidget(button)
 
-            if add_on == 'file': # Create a Browse button for existing file
+            if add_on == 'file':
                 button = QPushButton("Browse...", self)
-                button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Prevent the button from gaining focus
+                button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 button.clicked.connect(partial(self.browse_file, input_field))
                 field_layout.addWidget(button)
 
-            if add_on == 'new_file': # Create a Browse button for new file
+            if add_on == 'new_file':
                 button = QPushButton("Browse...", self)
-                button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Prevent the button from gaining focus
+                button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 button.clicked.connect(partial(self.browse_new_file, input_field))
                 field_layout.addWidget(button)
 
-
             self.inputs[key] = input_field
-        self.main_layout.addLayout(field_layout) # Add horizontal layout to main vertical layout
+        self.main_layout.addLayout(field_layout)
 
     def get_real_user_home_directory(self):
-        """Returns the home directory of the real user when running under sudo."""
+        """Return the home directory of the real user, even under sudo.
+
+        Returns:
+            str: The home directory.
+        """
         if not self.home_dir:
             real_user = os.environ.get('SUDO_USER')
             if real_user:
-                self.home_dir = os.path.join("/home", real_user)  # Assumes standard home directory structure
+                self.home_dir = os.path.join("/home", real_user)
             else:
-                self.home_dir = os.path.expanduser("~")  # Fallback to current user's home directory
+                self.home_dir = os.path.expanduser("~")
             self.vault_dir = os.path.join(self.home_dir, 'Vaults')
             self.dot_vault_dir = os.path.join(self.home_dir, '.Vaults')
         return self.home_dir
 
     def browse_folder(self, input_field):
-        """ Open a dialog to select a folder and update the input field with the selected path. """
-        # Determine the initial directory to open
+        """Select a folder and put it in `input_field`.
+
+        Args:
+            input_field: Line edit to update.
+        """
         initial_dir = input_field.text()
-        # `home_dir` is a plain string, not a method -- calling it raised
-        # TypeError when the field was empty.
         initial_dir = initial_dir if initial_dir else self.get_real_user_home_directory()
 
-        # Open the folder dialog starting at the determined directory
         folder_path = QFileDialog.getExistingDirectory(self, "Select Folder", initial_dir)
         if folder_path:
-            input_field.setText(folder_path)  # Update the input field with the selected folder path
+            input_field.setText(folder_path)
 
     def browse_file(self, input_field):
-        """ Open a dialog to select a folder and update the input field with the selected path. """
-        # Determine the initial directory to open
+        """Select an existing file and put it in `input_field`.
+
+        Args:
+            input_field: Line edit to update.
+        """
         initial_dir = input_field.text()
         if not initial_dir:
             if os.path.exists(self.dot_vault_dir):
@@ -341,15 +318,16 @@ class CommonDialog(QDialog):
             else:
                 initial_dir = self.home_dir
 
-        # Open the folder dialog starting at the determined directory
         file_path = QFileDialog.getOpenFileName(self, "Select Existing File", initial_dir)
-        # returns tuple (path, type of file)
         if file_path[0]:
-            input_field.setText(file_path[0])  # Update the input field with the selected folder path
+            input_field.setText(file_path[0])
 
     def browse_new_file(self, input_field):
-        """ Open a dialog to select a folder and update the input field with the selected path. """
-        # Determine the initial directory to open
+        """Select a path for a new file and put it in `input_field`.
+
+        Args:
+            input_field: Line edit to update.
+        """
         initial_dir = input_field.text()
         if not initial_dir:
             if os.path.exists(self.dot_vault_dir):
@@ -357,89 +335,66 @@ class CommonDialog(QDialog):
             else:
                 initial_dir = self.home_dir
 
-        # Open the folder dialog starting at the determined directory
         file_path = QFileDialog.getSaveFileName(self, "Select New File", initial_dir)
-        # returns tuple (path, type of file)
         if file_path[0]:
-            input_field.setText(file_path[0])  # Update the input field with the selected folder path
+            input_field.setText(file_path[0])
 
     def toggle_password_visibility(self, input_field=None, toggle=None):
         """Toggle the visibility of one password field.
 
-            `add_input_field()` binds each eye button to the field next to it,
-            so a dialog can ask for a new password twice without the two boxes
-            fighting over one switch. Called with no arguments -- as the tests
-            and any older caller do -- it drives the dialog's first password
-            field.
+        Args:
+            input_field: Field to update; defaults to the first password field.
+            toggle: Eye button; defaults to the first password toggle.
         """
         input_field = input_field if input_field is not None else self.password_input
         toggle = toggle if toggle is not None else self.password_toggle
         if not input_field or not toggle:
             return
-        exposed = toggle.isChecked() # password to be exposed
+        exposed = toggle.isChecked()
         self.set_password_visibility(input_field, exposed)
         toggle.setText("●" if exposed else "👁️")
 
     def clear_passwords(self):
-        """ Empty every password field of the dialog.
-
-            Called on the way out: a widget that keeps a typed password alive
-            after the dialog is gone is a copy nobody is watching.
-        """
+        """Empty every password field of the dialog."""
         for input_field, _toggle in self.password_fields.values():
             input_field.clear()
 
     def cancel(self, _=None):
-        """ null function"""
+        """Reject the dialog."""
         self.reject()
 
     def alert_errors(self, error_lines):
-        """Callback to show errors if present.
+        """Show errors in a message box and count them as session failures.
 
-            Every failure the dialogs have to announce comes through here -- a
-            mount that did not happen, a password that did not unlock, a write
-            that was refused -- so it is also where the session's failure tally
-            is kept, which is what the tray menu's "Open Log [n errors]" marker
-            shows. Counting the message box, not just prt()'s own error lines,
-            is what makes the marker agree with what the user was told.
+        Args:
+            error_lines: Error text lines to show.
         """
-        if error_lines:  # Check if there are any errors
+        if error_lines:
             for line in error_lines:
                 note_problem(line)
-            error_text = '\n'.join(error_lines)  # Join the list of error lines into one string
+            error_text = '\n'.join(error_lines)
 
             error_dialog = QMessageBox(self)
-            error_dialog.setIcon(QMessageBox.Icon.Critical)  # Set the icon to show it's an error
+            error_dialog.setIcon(QMessageBox.Icon.Critical)
             error_dialog.setWindowTitle(window_title('Errors Detected'))
             error_dialog.setText("The following errors were encountered:")
             error_dialog.setInformativeText(error_text)
-            error_dialog.setStandardButtons(QMessageBox.StandardButton.Ok)  # Add a dismiss button
-            error_dialog.exec()  # Show the message box
+            error_dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+            error_dialog.exec()
 
-                    # Ensure the parent dialog regains focus
             self.raise_()
             self.activateWindow()
 
-    #: How long a self-closing notice stays up. Long enough to read a sentence,
-    #: short enough that it never becomes the thing the user is fighting.
+    # How long a self-closing notice stays up.
     NOTICE_TIMEOUT_MS = 3000
 
     def show_timed_message(self, text, success=True, informative=''):
-        """ Say what happened in a box that closes itself, and carry on.
+        """Show a notice that closes itself.
 
-            For answers rather than questions: "the master password was
-            changed" / "that password did not open the file". A message with a
-            single Ok button asks for a click that decides nothing, so it goes
-            away on its own after `NOTICE_TIMEOUT_MS`.
-
-            A failure still reaches `note_problem()`, exactly as
-            `alert_errors()` reports one, because the user was told about it and
-            the menu's "Open Log [n errors]" marker counts what the user was
-            told, not what was written to the file.
-
-            The box runs its own event loop, so the timer fires inside it and
-            there is nothing to poll; the timeout is a class attribute so a test
-            can set it to 0 instead of sleeping.
+        Args:
+            text: Main text.
+            success: True for an information box, false for a warning.
+            informative: Optional secondary text.
         """
         if not success:
             note_problem(text)
@@ -453,19 +408,22 @@ class CommonDialog(QDialog):
         box.setStandardButtons(QMessageBox.StandardButton.Ok)
         QTimer.singleShot(self.NOTICE_TIMEOUT_MS, box.accept)
         box.exec()
-        # Ensure the parent dialog regains focus
         self.raise_()
         self.activateWindow()
 
     def show_progress(self, message):
-        """Show progress indicator and disable buttons."""
+        """Show the progress indicator and disable the buttons.
+
+        Args:
+            message: Progress text.
+        """
         for button in self.findChildren(QPushButton):
             button.setEnabled(False)
 
         if not self.progress_label:
             self.progress_label = QLabel()
             self.progress_bar = QProgressBar()
-            self.progress_bar.setRange(0, 100)  # Indeterminate
+            self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(10)
             self.main_layout.addWidget(self.progress_label)
             self.main_layout.addWidget(self.progress_bar)
@@ -473,24 +431,13 @@ class CommonDialog(QDialog):
         self.progress_label.setText(message)
         self.progress_label.show()
         self.progress_bar.show()
-        # Paint the dialog now, but *without* spinning the event loop: this
-        # used to be QApplication.processEvents(), which dispatched the tray's
-        # 3 s QTimer (and any queued click) in the middle of the operation and
-        # re-entered update_menu() while cryptsetup was still running.
-        # activate() + repaint() shows the new widgets with no such risk.
+        # Paint without processing events, which would re-enter update_menu().
         if self.layout() is not None:
             self.layout().activate()
         self.repaint()
 
     def hide_progress(self):
-        """Hide progress indicator and re-enable buttons.
-
-            `progress_label` exists from `__init__` (as None), so `hasattr()`
-            was always true and the `finally:` calls in the dialogs' unmount
-            paths -- which run whether or not a progress bar was ever shown --
-            hit `AttributeError: 'NoneType' object has no attribute 'hide'`.
-            Test what is there, not what attribute exists.
-        """
+        """Hide the progress indicator and re-enable the buttons."""
         if self.progress_label and self.progress_bar:
             self.progress_label.hide()
             self.progress_bar.hide()
@@ -499,21 +446,23 @@ class CommonDialog(QDialog):
             button.setEnabled(True)
 
     def check_upon(self, text, mount_points, is_device=False):
-        """ Validate candidate mount point.
-            `mount_points` must be the set of *currently mounted mount points*
-            (i.e. `LuksTray.upons`), **not** `update_mounts()`, which
-            returns the set of device keys.
-            Returns error (or None if no error)
+        """Validate a candidate mount point.
+
+        Args:
+            text: Candidate mount point.
+            mount_points: Currently mounted mount points.
+            is_device: True when mounting a device rather than a file.
+
+        Returns:
+            str | None: The error text, or None when the mount point is usable.
         """
         if not text:
             return 'ERR: empty field not allowed for devices or files'
         if not os.path.isabs(text):
             return f'ERR: mount point ({text}) must be absolute path'
         try:
-            text = os.path.abspath(text) # normalize
+            text = os.path.abspath(text)
         except (TypeError, ValueError, OSError) as exc:
-            # Keep the un-normalized text and let the checks below report on
-            # it; swallowing the reason made a rejected name unexplainable.
             prt_once(f'abspath {text!r}', f'WARN: cannot normalize {text!r}: {exc}')
 
         if DeviceInfo.is_banned(text):

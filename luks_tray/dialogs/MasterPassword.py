@@ -1,43 +1,19 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-""" The master password: opening the history, and setting the key that guards it.
-
-    Two dialogs, because they answer two different questions and one of them is
-    asked in a state where the other cannot run.
-
-    `MasterPasswordDialog` is asked by a locked history: the file is encrypted
-    and this process holds no decrypted content, so the only thing that can
-    happen is an unlock. Setting, changing and clearing the password used to
-    live here too, in one dialog with one button row for all of it -- which put
-    a "Remove Password" button in front of a user whose history the applet could
-    not read, where an empty password plus `save(force=True)` wrote `{}` over
-    the encrypted file.
-
-    `MasterPasswordSetupDialog` is asked by a history that can already be read,
-    and is one dialog in two modes: 'create' when there is no password yet,
-    'update' when there is. Both write through `HistoryClass.save()`, whose own
-    guard refuses a clear-text write over an encrypted file -- the backstop that
-    makes a wrong caller loud instead of destructive.
-"""
+"""The master password dialogs: unlock, set, change and clear."""
 # pylint: disable=broad-exception-caught, invalid-name
 
 from luks_tray.dialogs.Common import CommonDialog
 
 
 class MasterPasswordDialog(CommonDialog):
-    """ Unlock the history with its master password.
+    """Unlock the history with its master password."""
 
-        `restore()` decides the outcome: it sets 'unlocked' on success and
-        'locked' on a wrong password, so this dialog reads the state back
-        instead of decrypting anything itself. An empty field is refused rather
-        than read as "forget the password": clearing the password needs the
-        decrypted history in memory, which is exactly what this state does not
-        have.
-
-        The applet offers this dialog from the single menu line a locked history
-        has, and `handle_options_click()` falls back to it if that menu is stale.
-    """
     def __init__(self, tray):
+        """Build the unlock dialog.
+
+        Args:
+            tray: The running tray instance.
+        """
         super().__init__(tray)
         self.set_title('Master Password')
         self.add_input_field('password', "Master Password", '', 24, add_on='password')
@@ -48,13 +24,10 @@ class MasterPasswordDialog(CommonDialog):
         self.setLayout(self.main_layout)
 
     def unlock(self, _=None):
-        """ Unlock with the typed password; report and stay open on failure.
+        """Unlock with the typed password, or report a failure.
 
-            A wrong password leaves the history exactly as it was -- `restore()`
-            only reads -- and the field is emptied, because the next thing the
-            user does is type the password again. That answer is a notice, not a
-            question: it closes on its own, and the dialog stays open for the
-            second attempt.
+        Args:
+            _: Optional signal argument.
         """
         history = self.tray.history
         password = self.inputs['password'].text().strip()
@@ -76,39 +49,10 @@ class MasterPasswordDialog(CommonDialog):
 
 
 class MasterPasswordSetupDialog(CommonDialog):
-    """ Set, change or clear the master password of the history.
+    """Set, change or clear the master password of the history."""
 
-        One dialog in two modes, because the fields are the same and only their
-        meaning changes: 'create' fills an empty slot, 'update' replaces the key
-        that is already there. The buttons -- not a Save button reading the
-        fields at the end -- carry the state:
-
-        - both entries empty       -> `Clear Password` (update mode only);
-        - equal and long enough    -> `Apply` / `Change Password`;
-        - anything else            -> only `Cancel` is enabled.
-
-        That choice is what removes the old decision table. The dialog cannot
-        submit a password it would have to refuse (too short, or the two entries
-        differ), so there is no "the fields do not match" box to write and no
-        path from an empty box to a write; and `Clear Password` sits behind two
-        empty entries rather than being inferred from them.
-
-        `Change` is a re-key, not a remove followed by an add: `save()` copies
-        the namespaces it holds and encrypts them under the new password, so
-        every remembered container password survives. `Clear` is the lossy one
-        and says so in the body: `_namespaces_to_json_data()` never writes a
-        container password without a master password over it, so the file
-        forgets them (this session keeps using the ones it already has).
-
-        Both writes leave the history 'locked': the password was just proved to
-        be known, and asking for it again on the next interaction checks that
-        the file really opens with it.
-    """
-
-    #: Shortest password the dialog will accept. Not a crackability floor --
-    #: 600,000 rounds of PBKDF2 and a local file decide that -- but a typo
-    #: floor: this is a password the user has to reproduce exactly, years
-    #: later, with nothing to check it against.
+    # Shortest password the dialog accepts; this is a typo floor, not a
+    # strength requirement.
     MIN_PASSWORD_LENGTH = 4
 
     NO_RECOVERY = ('There is no recovery. If this password is forgotten, the '
@@ -122,14 +66,17 @@ class MasterPasswordSetupDialog(CommonDialog):
                         'container list stays hidden until it is entered again.')
 
     def __init__(self, tray, create=False):
+        """Build the setup dialog.
+
+        Args:
+            tray: The running tray instance.
+            create: True when no master password exists yet.
+        """
         super().__init__(tray)
         self.create = create
         self.set_title('Create Master Password' if create
                        else 'Update Master Password')
 
-        # Two masked fields, each with its own eye button: the password is never
-        # read back from anywhere, so an empty pair means "nothing typed", and
-        # an untouched dialog can only be closed.
         self.add_input_field('new_master_password', 'New master password', '',
                              24, add_on='password')
         self.add_input_field('repeat_master_password', 'Repeat new password', '',
@@ -155,29 +102,37 @@ class MasterPasswordSetupDialog(CommonDialog):
         self.refresh_buttons()
 
     def typed_password(self):
-        """ The new password and its repetition, as typed and stripped.
+        """Return the new password and its repetition, stripped.
 
-            Stripped because a leading or trailing space is invisible here and
-            would have to be reproduced exactly at the next unlock.
+        Returns:
+            tuple: The two typed values.
         """
         return (self.inputs['new_master_password'].text().strip(),
                 self.inputs['repeat_master_password'].text().strip())
 
     def fields_are_empty(self):
-        """ True when neither field holds anything: the only state Clear allows. """
+        """Return True when neither field holds anything.
+
+        Returns:
+            bool: Whether both fields are empty.
+        """
         return self.typed_password() == ('', '')
 
     def password_is_usable(self):
-        """ True when the two entries agree and are long enough. """
+        """Return True when the two entries agree and are long enough.
+
+        Returns:
+            bool: Whether the value may be submitted.
+        """
         password, repeated = self.typed_password()
         return (len(password) >= self.MIN_PASSWORD_LENGTH
                 and password == repeated)
 
     def refresh_buttons(self, _text=''):
-        """ Point the buttons at the state of the two fields.
+        """Enable the buttons that match the state of the two fields.
 
-            Connected to both `textChanged` signals, so the state on screen is
-            never one keystroke behind what a click would do.
+        Args:
+            _text: Optional `textChanged` argument.
         """
         usable = self.password_is_usable()
         self.apply_button.setEnabled(usable)
@@ -185,17 +140,14 @@ class MasterPasswordSetupDialog(CommonDialog):
             self.clear_button.setEnabled(self.fields_are_empty())
 
     def write_password(self, password, drop_encryption=False):
-        """ Write the history with `password`; return the error lines.
+        """Write the history with `password`.
 
-            An empty `password` is only ever written with `drop_encryption`, and
-            `HistoryClass.save()` refuses that combination over a file it cannot
-            read -- it is the one write that can lose data, so it is asked for
-            explicitly and checked twice.
+        Args:
+            password: New master password; empty to clear it.
+            drop_encryption: Allow a clear-text write over an encrypted file.
 
-            A non-empty password is written and then read back before the state
-            changes: `restore()` short-cuts on an unchanged file, so the read
-            back is `verify_password_on_disk()`. If that fails, the file is not
-            the one the user thinks they just made, and the state is left alone.
+        Returns:
+            list: Error lines; empty on success.
         """
         history = self.tray.history
         previous = history.master_password
@@ -211,7 +163,11 @@ class MasterPasswordSetupDialog(CommonDialog):
         return []
 
     def change_password(self, _=None):
-        """ Re-key the history with the typed password, confirm it, and close. """
+        """Re-key the history with the typed password and close.
+
+        Args:
+            _: Optional signal argument.
+        """
         password, _repeated = self.typed_password()
         if not self.password_is_usable():
             return
@@ -220,7 +176,7 @@ class MasterPasswordSetupDialog(CommonDialog):
             self.alert_errors(errors)
             return
         self.clear_passwords()
-        self.tray.update_menu()     # the menu entry reads the new state
+        self.tray.update_menu()
         self.show_timed_message(
             'The master password was set. The history is locked.' if self.create
             else 'The master password was changed. The history is locked.',
@@ -229,12 +185,10 @@ class MasterPasswordSetupDialog(CommonDialog):
         self.accept()
 
     def clear_password(self, _=None):
-        """ Store the history in clear text, discarding the key, and close.
+        """Store the history in clear text and close.
 
-            Only reachable with both fields empty, and the body of the dialog
-            says what it costs: the container passwords this file remembered are
-            not written without a master password over them, so they are gone at
-            the next start. This session keeps using the ones it already holds.
+        Args:
+            _: Optional signal argument.
         """
         if not self.fields_are_empty():
             return
@@ -242,7 +196,7 @@ class MasterPasswordSetupDialog(CommonDialog):
         if errors:
             self.alert_errors(errors)
             return
-        self.tray.update_menu()     # the menu entry reads the new state
+        self.tray.update_menu()
         self.show_timed_message(
             'The master password was cleared. The history is stored in clear '
             'text.',

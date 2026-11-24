@@ -14,6 +14,10 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+
+# The suite lives outside the tree; the gate symlinks it in as `tests/`, and
+# that link must not show up as an untracked file.
+/tests
 htmlcov/
 .coverage
 .coverage.*
